@@ -22,6 +22,9 @@
 | M2 | 4 | 可判定性：CI 全阶段 + 22 个测试可执行 + 150 轮长跑 | PASS | run_ci PASS×13；ctest 22/22（含 raft_chaos_n150） |
 | M2 | 5 | 契约与复用：对齐三项 + 登记对账 + 缺陷门禁 + 自测 | PASS | align 3/3；registry/bugfix/selftest 全 PASS |
 | M2 | 6 | 文档与红线：预算/查重/链接 + guard + 心跳不带日志抽查 | PASS | docs PASS×4；guard PASS；无空目录 |
+| M3 | 1 | 可判定性：CI 全阶段 + 23 个测试可执行 | PASS | run_ci PASS×13；ctest 23/23（含 readindex_test） |
+| M3 | 2 | 契约与复用：对齐三项 + 登记对账 + 自测 | PASS | align 3/3；registry/selftest PASS |
+| M3 | 3 | 文档与红线：预算/查重/链接 + guard + 租约默认关抽查 | PASS | docs PASS×4；guard 无改动；lease 默认 false |
 <!-- review:end -->
 
 ## 约定

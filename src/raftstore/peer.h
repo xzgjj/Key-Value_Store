@@ -49,6 +49,23 @@ public:
     // 从传输层收到的消息交给状态机
     [[nodiscard]] result<void> step_message(const raftpb::Message& msg);
 
+    // ---- M3 一致读（ReadIndex 必做 / LeaseRead 默认关） ----
+    // 两阶段而非阻塞式：Peer 不持有传输层，不能自己泵消息；由调用方（Worker/测试驱动）
+    // 在 begin 之后泵若干轮，再取 confirmed 位点，等 applied 追平后读状态机。
+    [[nodiscard]] result<std::uint64_t> begin_read_index();
+
+    // 取走已获 quorum 确认的读位点（可能为空）
+    [[nodiscard]] std::vector<std::uint64_t> take_confirmed_reads();
+
+    // 租约：默认关；开启且有效时可跳过 ReadIndex 直接读（零 RPC）
+    void enable_lease(bool on);
+    [[nodiscard]] bool lease_valid() const;
+
+    [[nodiscard]] bool applied_at_least(std::uint64_t index) const { return applied_ >= index; }
+
+    // 直接读状态机（调用方保证 applied ≥ read_index，否则读到的可能不是线性一致点）
+    [[nodiscard]] result<GetResult> read_directly(Cf cf, std::string_view key) const;
+
     [[nodiscard]] bool is_leader() const { return raft_->is_leader(); }
     [[nodiscard]] raft::Raft& raft() { return *raft_; }
     [[nodiscard]] std::uint64_t applied_seq(std::uint64_t client_id) const;
@@ -64,6 +81,8 @@ private:
     Storage& storage_;
     std::map<std::uint64_t, std::uint64_t> last_seq_;   // client_id → 已 apply 的最大 seq
     std::vector<raftpb::Message> outbox_;
+    std::vector<std::uint64_t> confirmed_reads_;
+    std::uint64_t applied_{0};   // 已 apply 到的日志位点
 };
 
 }  // namespace tinykv::raftstore

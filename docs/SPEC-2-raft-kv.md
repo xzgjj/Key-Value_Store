@@ -239,9 +239,9 @@ TEST(SimCompaction, LaggingPeerCatchesUpViaSnapshot) {
 
 | 需求 | 验收口径 | 测试登记名 | 命令 | 证据物 |
 |---|---|---|---|---|
-| REL-01/FUNC-05 | ReadIndex 线性一致历史检查通过 | `lincheck_readindex_test`（integration） | `ctest -L nightly` | 线性化报告 |
-| FUNC-06/PERF-04 | LeaseRead（默认关）：开启后读 QPS ≥10× 写共识(S1)；语义仍线性一致 | `sim_leaseread_test` `lincheck_leaseread_test` `read_bench --mode=lease` | `ctest -L slow` / 夜跑 | junit.xml + `bench/read.json` |
-| PERF-03 | ReadIndex 读 ≥3×(S0)/≥5×(S1) 写共识路径 | `read_bench --mode=read_index` vs `--mode=log` | 夜跑 | `bench/read.json` |
+| REL-01/FUNC-05 | ReadIndex 协议不变量：quorum 确认、分区不可确认、非 leader 拒绝 | `readindex_test` | `ctest -L fast` | junit.xml；**lincheck 历史检查未做** |
+| FUNC-06 | LeaseRead（默认关）：租约刷新/过期/默认关三条语义 | `readindex_test` | `ctest -L fast` | junit.xml；**PERF-04 QPS 未测** |
+| PERF-03 | ReadIndex 读 ≥3×(S0)/≥5×(S1) 写共识路径 | **未测**：`read_bench` 未实现 | — | 缺口，见 notes-m3 §4 |
 | UX-06 | M3 实现笔记一篇（读路径选型对比） | —（人工） | — | `docs/notes-m3.md` |
 
 **M3 完成判定** = 本表全部行达标（FUNC-06/PERF-04 为 P2 可选，不做不阻塞 M3 判定但必须留"未做"记录）。

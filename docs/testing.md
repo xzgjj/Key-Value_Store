@@ -148,6 +148,7 @@ CI 用 `ctest -L unit|simulation|integration|bench` 选择，无需解析本页�
 | tests/integration/tcp_cluster_test.cpp | integration | `tcp_cluster_test` | - | nightly |
 | tests/integration/raft_chaos_n150_test.cpp | integration | `raft_chaos_n150` | - | nightly;serial |
 | tests/unit/cli/cli_status_test.cpp | unit | `cli_status_test` | - | fast |
+| tests/unit/raft/readindex_test.cpp | unit | `readindex_test` | - | fast |
 <!-- registry:end -->
 
 > **M0 起步批次**（2026-11-16 落地登记，见上表）：encode / kv_error / strong_id / common_log 四个

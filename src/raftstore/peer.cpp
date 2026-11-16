@@ -79,10 +79,29 @@ std::vector<raftpb::Message> Peer::take_messages() {
 
 result<void> Peer::step_message(const raftpb::Message& msg) { return raft_->step(msg); }
 
+std::vector<std::uint64_t> Peer::take_confirmed_reads() {
+    std::vector<std::uint64_t> out;
+    out.swap(confirmed_reads_);
+    return out;
+}
+
+result<std::uint64_t> Peer::begin_read_index() { return raft_->read_index(); }
+
+void Peer::enable_lease(bool on) { raft_->enable_lease(on); }
+
+bool Peer::lease_valid() const { return raft_->lease_valid(); }
+
+result<GetResult> Peer::read_directly(Cf cf, std::string_view key) const {
+    return storage_.get(cf, std::as_bytes(std::span{key.data(), key.size()}));
+}
+
 result<std::size_t> Peer::on_ready() {
     auto ready = raft_->take_ready();
     for (auto& m : ready.messages) {
         outbox_.push_back(std::move(m));   // 交给传输层，不能丢
+    }
+    for (const auto idx : ready.confirmed_reads) {
+        confirmed_reads_.push_back(idx);
     }
     std::size_t applied = 0;
     for (const raftpb::Entry& entry : ready.to_apply) {
@@ -90,6 +109,7 @@ result<std::size_t> Peer::on_ready() {
             return std::unexpected(r.error());
         }
         ++applied;
+        applied_ = entry.index();   // 已 apply 位点：ReadIndex 放行判据
     }
     return applied;
 }

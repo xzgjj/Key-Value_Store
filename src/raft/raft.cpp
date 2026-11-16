@@ -89,6 +89,7 @@ void Raft::become_leader() {
 }
 
 void Raft::tick() {
+    ++now_ticks_;   // 单调 tick 计数：租约用 tick 而非墙钟，保证模拟可复现
     if (role_ == Role::Leader) {
         if (++heartbeat_elapsed_ >= cfg_.heartbeat_interval) {
             heartbeat_elapsed_ = 0;
@@ -123,8 +124,10 @@ result<void> Raft::step(const raftpb::Message& msg) {
         case raftpb::MSG_HEARTBEAT:
             handle_heartbeat(msg);
             return {};
-        case raftpb::MSG_BEAT:
         case raftpb::MSG_HEARTBEAT_RESPONSE:
+            handle_heartbeat_response(msg);
+            return {};
+        case raftpb::MSG_BEAT:
         case raftpb::MSG_PROPOSE:
         case raftpb::MSG_SNAPSHOT:
             return {};
@@ -220,9 +223,39 @@ Ready Raft::take_ready() {
     Ready ready;
     ready.messages = std::move(outbox_);
     ready.to_apply = std::move(to_apply_);
+    ready.confirmed_reads = std::move(confirmed_reads_);
     outbox_.clear();
     to_apply_.clear();
+    confirmed_reads_.clear();
     return ready;
+}
+
+result<std::uint64_t> Raft::read_index() {
+    if (role_ != Role::Leader) {
+        return std::unexpected(NotLeader{.region_id = RegionId{0}, .leader_hint = std::nullopt});
+    }
+    const std::uint64_t ctx = ++read_ctx_seq_;
+    // read_index 必须取"发起时已提交位点"：这是 ReadIndex 的核心——只要多数派确认过
+    // 这个位点，后来者就不可能在不含该位点的日志上当选（选举安全）。
+    pending_reads_[ctx] = PendingRead{.index = log_.committed().value, .acks = 1};
+
+    if (pending_reads_[ctx].acks >= majority()) {
+        confirmed_reads_.push_back(log_.committed().value);
+        pending_reads_.erase(ctx);
+        return ctx;
+    }
+    // 广播一轮带轮次标识的心跳（仍不带日志，PERF-08 约束保持）
+    for (const PeerId& p : cfg_.voters) {
+        if (same(p, cfg_.id)) {
+            continue;
+        }
+        auto msg = make(raftpb::MSG_HEARTBEAT, p);
+        msg.set_index(log_.last_index().value);
+        msg.set_commit(log_.committed().value);
+        msg.set_read_ctx(ctx);
+        outbox_.push_back(std::move(msg));
+    }
+    return ctx;
 }
 
 void Raft::handle_vote_request(const raftpb::Message& msg) {
@@ -392,6 +425,30 @@ void Raft::handle_append_response(const raftpb::Message& msg) {
     advance_commit();
 }
 
+void Raft::handle_heartbeat_response(const raftpb::Message& msg) {
+    if (msg.term() != term_) {
+        return;
+    }
+    // 租约刷新：收到任期内的心跳回执即认为该 follower 仍认自己为 leader
+    lease_deadline_ = now_ticks_ + (election_timeout_ * 7) / 10;
+
+    const std::uint64_t ctx = msg.read_ctx();
+    if (ctx == 0) {
+        return;   // 普通心跳回执：只刷新租约
+    }
+    const auto it = pending_reads_.find(ctx);
+    if (it == pending_reads_.end()) {
+        return;   // 已确认或已失效
+    }
+    if (msg.index() < it->second.index) {
+        return;   // follower 日志还没到这个位点，不能计入 quorum
+    }
+    if (++it->second.acks >= majority()) {
+        confirmed_reads_.push_back(it->second.index);
+        pending_reads_.erase(it);
+    }
+}
+
 void Raft::handle_heartbeat(const raftpb::Message& msg) {
     const PeerId from{msg.from()};
     if (msg.term() < term_) {
@@ -412,6 +469,7 @@ void Raft::handle_heartbeat(const raftpb::Message& msg) {
     auto reply = make(raftpb::MSG_HEARTBEAT_RESPONSE, from);
     reply.set_index(log_.last_index().value);
     reply.set_commit(log_.committed().value);
+    reply.set_read_ctx(msg.read_ctx());   // 原样带回，leader 据此做 quorum 确认
     outbox_.push_back(std::move(reply));
 }
 

@@ -37,7 +37,13 @@ struct Config {
 struct Ready {
     std::vector<raftpb::Message> messages;
     std::vector<Entry> to_apply;
+    // ReadIndex 已获 quorum 确认的位点（升序）。调用方据此放行等待中的读请求：
+    // 等 applied >= 该位点后读状态机，才算线性一致。
+    std::vector<std::uint64_t> confirmed_reads;
 };
+
+// 读模式：ReadIndex 必做，LeaseRead 默认关（SPEC-2 D2-4：开启需声明时钟漂移假设）
+enum class ReadMode { ReadIndex, Lease, Log };
 
 class Raft {
 public:
@@ -52,6 +58,14 @@ public:
 
     // 取走本轮输出（消息 + 待 apply），并推进 applied 指针
     [[nodiscard]] Ready take_ready();
+
+    // 发起一次 ReadIndex：返回轮次标识。获 quorum 确认后位点出现在 Ready.confirmed_reads。
+    // 非 leader 返回 NotLeader；LeaseRead 开启且租约有效时调用方可以跳过本方法直接读。
+    [[nodiscard]] result<std::uint64_t> read_index();
+
+    // 租约：默认关。开启后每次 quorum 心跳回执刷新 deadline = now + election_timeout×0.7
+    void enable_lease(bool on) { lease_enabled_ = on; }
+    [[nodiscard]] bool lease_valid() const { return lease_enabled_ && now_ticks_ < lease_deadline_; }
 
     [[nodiscard]] Role role() const { return role_; }
     [[nodiscard]] bool is_leader() const { return role_ == Role::Leader; }
@@ -82,6 +96,7 @@ private:
     void handle_vote_request(const raftpb::Message& msg);
     void handle_vote_response(const raftpb::Message& msg);
     void handle_heartbeat(const raftpb::Message& msg);
+    void handle_heartbeat_response(const raftpb::Message& msg);
     void append_entry_and_replicate(const std::string& data);
 
     // 把 [applied+1, committed] 的条目收进待 apply 队列
@@ -100,8 +115,19 @@ private:
     std::vector<PeerId> votes_;               // 本轮已收到的赞成票
     std::map<std::uint64_t, std::uint64_t> next_index_;   // per follower
     std::map<std::uint64_t, std::uint64_t> match_index_;  // per follower
+    struct PendingRead {
+        std::uint64_t index{0};   // read_index = 发起时的 committed 位点
+        std::size_t acks{0};      // 已确认的副本数（含自己）
+    };
+
     std::vector<raftpb::Message> outbox_;
     std::vector<Entry> to_apply_;
+    std::vector<std::uint64_t> confirmed_reads_;
+    std::map<std::uint64_t, PendingRead> pending_reads_;
+    std::uint64_t read_ctx_seq_{0};
+    std::uint64_t now_ticks_{0};        // 单调 tick 计数（租约用，不读墙钟保证可复现）
+    std::uint64_t lease_deadline_{0};
+    bool lease_enabled_{false};
 };
 
 }  // namespace tinykv::raft

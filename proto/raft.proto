@@ -56,4 +56,6 @@ message Message {
     bool reject = 8;     // 仅 *RESPONSE 类型：true=拒绝；REQUEST_VOTE_RESPONSE 拒绝时不重置对方计时器
     repeated Entry entries = 9;    // 仅 MSG_APPEND/MSG_PROPOSE：追加/提案条目；可为空
     SnapshotMeta snapshot = 10;    // 仅 MSG_SNAPSHOT：快照元数据；其余类型不设置
+    uint64 read_ctx = 11;          // 仅 HEARTBEAT/HEARTBEAT_RESPONSE：ReadIndex 轮次标识
+                                   // （0 = 普通心跳；非 0 时回执必须原样带回，用于 quorum 确认）
 }
