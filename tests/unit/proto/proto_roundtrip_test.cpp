@@ -5,8 +5,8 @@
 
 #include <gtest/gtest.h>
 
-#include <raft_cmdpb.pb.h>
 #include <raft.pb.h>
+#include <raft_cmdpb.pb.h>
 
 #include <string>
 
@@ -21,8 +21,8 @@ TEST(ProtoRoundtrip, RaftMessageRoundtrip) {
     m.set_term(3);
     m.set_from(11);
     m.set_to(12);
-    m.set_index(5);       // prev_log_index 语义
-    m.set_log_term(2);    // prev_log_term 语义
+    m.set_index(5);     // prev_log_index 语义
+    m.set_log_term(2);  // prev_log_term 语义
     m.set_commit(4);
     m.add_entries()->set_index(5);
     m.mutable_entries(0)->set_term(2);
@@ -61,7 +61,7 @@ TEST(ProtoRoundtrip, RegionErrorNotLeaderHintOptionality) {
     // UX-03：leader_hint 未知的 NotLeader 不得伪造——proto 侧用 not set 表达
     using tinykv::cmdpb::RegionError;
     RegionError err;
-    auto *nl = err.mutable_not_leader();
+    auto* nl = err.mutable_not_leader();
     nl->set_region_id(3);  // 不设置 leader_hint
 
     std::string wire;
@@ -76,10 +76,10 @@ TEST(ProtoRoundtrip, RegionErrorNotLeaderHintOptionality) {
 TEST(ProtoRoundtrip, RaftCmdRequestBatchShape) {
     // 契约关键：requests[] 批量一等公民（白皮书 QPS 0 分教训的反向锁定）
     tinykv::cmdpb::RaftCmdRequest cmd;
-    auto *put1 = cmd.add_requests()->mutable_put();
+    auto* put1 = cmd.add_requests()->mutable_put();
     put1->set_key("k1");
     put1->set_value("v1");
-    auto *put2 = cmd.add_requests()->mutable_put();
+    auto* put2 = cmd.add_requests()->mutable_put();
     put2->set_key("k2");
     put2->set_value("");
 

@@ -5,6 +5,11 @@ implementation-notes.md
 implementation_plan.md
 diff.md
 notes.txt
+# 阶段交接材料：点目录同时被文档检查器跳过（lib_ci.iter_md_files 只跳过点目录），
+# 故交接文档不会因"引用待建脚本"或"未声明路径"拉红 CI（HANDOVER-M0.md 属此类）。
+.handover/
+# 工作区代理自身数据（记忆/日志），非项目资产
+.workbuddy/
 # SPEC.md 为 TinyKV-CI 规则人读镜像（见 SPEC.md 头注），属仓库资产，入库。
 
 # ===== 日志（日志只在根 log/，spdlog 轮转）=====
