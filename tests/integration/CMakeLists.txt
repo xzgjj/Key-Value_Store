@@ -1,0 +1,2 @@
+# 文件用途：tests/integration 层测试注册（用例随里程碑增量登记，docs/testing.md §4）。
+# 归属：TinyKV-CPP（M0 基建）。

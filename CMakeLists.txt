@@ -18,6 +18,13 @@ endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
+# FetchContent 产物统一落 build/.deps（点目录）：
+# 1) 全部构建目录（含 TinyKV-CI 的 build/ci）共用一份下载，避免重复拉取；
+# 2) 三方源码自带的 .md 文档不得进入文档检查范围（docs CI 只认点前缀为工具噪声），
+#    规则资产不动，以目录约定隔离。
+set(FETCHCONTENT_BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build/.deps" CACHE PATH
+    "FetchContent 产物目录（build/.deps：gitignored + 文档检查跳过点目录）")
+
 # 警告即失败（SPEC.md §3 阈值总表 / check_code.py 同口径 -Wall -Wextra -Werror）
 if(MSVC)
     add_compile_options(/W4 /WX)
