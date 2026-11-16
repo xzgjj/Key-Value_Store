@@ -63,6 +63,12 @@ public:
     // apply 时才更新 membership（保证崩溃后可从日志重建）。
     [[nodiscard]] result<void> propose_conf_change(const raftpb::ConfChange& cc);
 
+    // M4 第⑦层：把 leadership 交给 target（红线6）。目标须是 voter 且已追平才发 TimeoutNow；
+    // 转移期拒新提案；一个 election timeout 内未完成即静默放弃（意图易失、不落日志）。
+    [[nodiscard]] result<void> transfer_leader(PeerId target);
+    [[nodiscard]] bool is_transferring() const { return transfer_target_.has_value(); }
+    [[nodiscard]] std::optional<PeerId> transfer_target() const { return transfer_target_; }
+
     // 取走本轮输出（消息 + 待 apply），并推进 applied 指针
     [[nodiscard]] Ready take_ready();
 
@@ -97,6 +103,12 @@ private:
     [[nodiscard]] bool is_learner_caught_up(PeerId p) const;
     // 每拍刷新追平计时：差首次 <100 记起点，退回 >=100 清零（仅 leader 需要）
     void refresh_learner_catchup();
+    // ⑦a：目标追平后发一次 TimeoutNow（未追平先等 append 回执追上来）
+    void maybe_send_timeout_now();
+    // ⑦a：清除转移状态（成功、放弃、降级三处共用）
+    void clear_transfer();
+    // ⑦a：某 peer 的 match 前移后的转移钩子（把分支挡在 handle_append_response 之外）
+    void on_match_advanced(PeerId from);
     [[nodiscard]] std::size_t majority() const { return cfg_.voters.size() / 2 + 1; }
     [[nodiscard]] raftpb::Message make(raftpb::MessageId id, PeerId to) const;
 
@@ -117,6 +129,8 @@ private:
     void handle_vote_response(const raftpb::Message& msg);
     void handle_heartbeat(const raftpb::Message& msg);
     void handle_heartbeat_response(const raftpb::Message& msg);
+    // ⑦a：收到 TimeoutNow → 立即竞选（learner 忽略；已是 leader 忽略）
+    void handle_timeout_now(const raftpb::Message& msg);
     void append_entry_and_replicate(const std::string& data);
 
     // 把 [applied+1, committed] 的条目收进待 apply 队列；apply 时处理 ConfChange
@@ -155,6 +169,11 @@ private:
     // M4 ④b：learner 追平计时——记录"日志差首次进入 <100"的 tick，持续够 5s 才算追平。
     // 差重新 >=100 时清零重计；用 tick 而非墙钟，模拟器可复现。
     std::map<std::uint64_t, std::uint64_t> learner_catch_since_;  // peer_id → tick
+    // M4 ⑦a：leadership 转移意图（易失，不落日志）。deadline 到点即放弃；
+    // notified 保证一次转移只发一个 TimeoutNow（重复发只会让目标反复抬 term 打断服务）。
+    std::optional<PeerId> transfer_target_;
+    std::uint64_t transfer_deadline_{0};
+    bool transfer_notified_{false};
 };
 
 }  // namespace tinykv::raft

@@ -34,6 +34,7 @@ enum MessageId {
     MSG_SNAPSHOT = 9;                // leader→follower：快照单块入口（M2 兼容路径保留）
     MSG_SNAPSHOT_CHUNK = 10;         // leader→follower：快照分块（M4 第⑤层，4MB+逐块CRC）
     MSG_SNAPSHOT_ACK = 11;           // follower→leader：分块流控确认（已连续收到的最大 seq）
+    MSG_TIMEOUT_NOW = 12;            // leader→target：立即竞选（M4 第⑦层 TransferLeader，红线6）
 }
 
 // 快照分块（M4 第⑤层，SPEC-3 D3-3：4MB/块 + 流内序号 + 逐块 CRC）。

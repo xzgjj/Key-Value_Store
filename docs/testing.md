@@ -150,9 +150,11 @@ CI 用 `ctest -L unit|simulation|integration|bench` 选择，无需解析本页�
 | tests/unit/raft/raft_log_test.cpp | unit | `raft_log_test` | - | fast |
 | tests/unit/raft/raft_step_test.cpp | unit | `raft_step_test` | - | fast |
 | tests/unit/raft/raft_kv_test.cpp | unit | `raft_kv_test` | - | fast |
+| tests/unit/raft/transfer_leader_test.cpp | unit | `transfer_leader_test` | - | fast |
 | tests/simulation/sim_chaos_test.cpp | simulation | `sim_chaos_test` | - | fast |
 | tests/simulation/sim_confchange_test.cpp | simulation | `sim_confchange_test` | - | fast |
 | tests/simulation/sim_scheduler_test.cpp | simulation | `sim_scheduler_test` | - | fast |
+| tests/simulation/sim_transfer_test.cpp | simulation | `sim_transfer_test` | - | fast |
 | tests/integration/tcp_cluster_test.cpp | integration | `tcp_cluster_test` | - | nightly |
 | tests/integration/raft_chaos_n150_test.cpp | integration | `raft_chaos_n150` | - | nightly;serial |
 | tests/unit/cli/cli_status_test.cpp | unit | `cli_status_test` | - | fast |

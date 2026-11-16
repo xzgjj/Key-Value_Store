@@ -39,7 +39,10 @@
     "implementation_plan.md",
     "diff.md",
     "notes.txt",
-    "docs/reuse-register.md"
+    "docs/reuse-register.md",
+    "tests/unit/raft/transfer_leader_test.cpp",
+    "tests/unit/raft/CMakeLists.txt",
+    "docs/M4-TRANSFERLEADER-DRAFT.md"
   ],
   "reason": "用户 2026-11-16 指令『请继续完成未完成的任务。⑤ 契约核对 完成m4』，授权按 SPEC-3 D3-1~D3-5 默认值落版契约并推进 M4 剩余全部层（⑤快照分块、⑥调度器、⑦集成+CLI+TransferLeader）。每层 TDD、CI 绿、三轮 review、本地 commit（不 push）。",
   "bugfix": false,

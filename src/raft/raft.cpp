@@ -80,6 +80,7 @@ void Raft::become_follower(std::uint64_t term, std::optional<PeerId> vote) {
     leader_ = 0;
     election_elapsed_ = 0;
     votes_.clear();
+    clear_transfer();   // 已降级：转移意图作废（目标自己赢了或别人上台都算转移结束）
 }
 
 void Raft::campaign() {
@@ -112,6 +113,7 @@ void Raft::become_leader() {
     role_ = Role::Leader;
     leader_ = cfg_.id.value;
     heartbeat_elapsed_ = 0;
+    clear_transfer();   // 自己成了 leader：任何在途转移意图都已由本次选举决出结果
     const auto last = log_.last_index().value;
     for (const PeerId& p : cfg_.voters) {
         next_index_[p.value] = last + 1;
@@ -145,10 +147,64 @@ void Raft::refresh_learner_catchup() {
     }
 }
 
+void Raft::clear_transfer() {
+    transfer_target_.reset();
+    transfer_deadline_ = 0;
+    transfer_notified_ = false;
+}
+
+void Raft::maybe_send_timeout_now() {
+    if (!transfer_target_.has_value() || transfer_notified_) {
+        return;
+    }
+    // 目标必须先追平：日志落后的节点去竞选会被"日志新旧比较"拒掉，白抬一次 term。
+    const auto it = match_index_.find(transfer_target_->value);
+    const std::uint64_t matched = it == match_index_.end() ? 0 : it->second;
+    if (matched < log_.last_index().value) {
+        send_append(*transfer_target_);   // 先把它补上，回执到达时再送 TimeoutNow
+        return;
+    }
+    outbox_.push_back(make(raftpb::MSG_TIMEOUT_NOW, *transfer_target_));
+    transfer_notified_ = true;
+}
+
+result<void> Raft::transfer_leader(PeerId target) {
+    if (role_ != Role::Leader) {
+        return std::unexpected(NotLeader{.region_id = RegionId{0}, .leader_hint = std::nullopt});
+    }
+    if (same(target, cfg_.id)) {
+        return std::unexpected(InvalidArgument{"转移目标就是自己"});
+    }
+    if (!is_voter(target)) {
+        // learner 不投票也不该当 leader：让它竞选会抬 term 但永远凑不够多数派
+        return std::unexpected(InvalidArgument{"转移目标不是 voter"});
+    }
+    transfer_target_ = target;
+    transfer_deadline_ = now_ticks_ + cfg_.election_timeout;   // 红线6：只给一个 election timeout
+    transfer_notified_ = false;
+    maybe_send_timeout_now();
+    return {};
+}
+
+void Raft::handle_timeout_now(const raftpb::Message& msg) {
+    (void)msg;
+    if (!is_voter(cfg_.id)) {
+        return;   // learner 收到也不竞选（只收日志）
+    }
+    if (role_ == Role::Leader) {
+        return;   // 已经是 leader：没有可接的对象
+    }
+    campaign();   // 不等 election timeout，立即竞选（带 term+1，原 leader 会投票并降级）
+}
+
 void Raft::tick() {
     ++now_ticks_;   // 单调 tick 计数：租约/追平判定用 tick 而非墙钟，保证模拟可复现
     if (role_ == Role::Leader) {
         refresh_learner_catchup();
+        // 红线6：一个 election timeout 内没完成即放弃（意图易失，不落日志、不通知客户端）
+        if (transfer_target_.has_value() && now_ticks_ >= transfer_deadline_) {
+            clear_transfer();
+        }
         if (++heartbeat_elapsed_ >= cfg_.heartbeat_interval) {
             heartbeat_elapsed_ = 0;
             broadcast_heartbeat();
@@ -185,6 +241,9 @@ result<void> Raft::step(const raftpb::Message& msg) {
         case raftpb::MSG_HEARTBEAT_RESPONSE:
             handle_heartbeat_response(msg);
             return {};
+        case raftpb::MSG_TIMEOUT_NOW:
+            handle_timeout_now(msg);
+            return {};
         case raftpb::MSG_BEAT:
         case raftpb::MSG_PROPOSE:
         case raftpb::MSG_SNAPSHOT:
@@ -199,6 +258,11 @@ result<void> Raft::propose(std::string data) {
     if (role_ != Role::Leader) {
         return std::unexpected(NotLeader{.region_id = RegionId{0}, .leader_hint = std::nullopt});
     }
+    if (transfer_target_.has_value()) {
+        // 红线6：转移期拒新提案。若放行，目标可能带着"更多未提交条目"去竞选，
+        // 转移就变成一次状态不确定的冒险；宁可让调用方重试。
+        return std::unexpected(InvalidArgument{"leader 转移中，暂不接受新提案"});
+    }
     append_entry_and_replicate(data);
     return {};
 }
@@ -206,6 +270,9 @@ result<void> Raft::propose(std::string data) {
 result<void> Raft::propose_conf_change(const raftpb::ConfChange& cc) {
     if (role_ != Role::Leader) {
         return std::unexpected(NotLeader{.region_id = RegionId{0}, .leader_hint = std::nullopt});
+    }
+    if (transfer_target_.has_value()) {
+        return std::unexpected(InvalidArgument{"leader 转移中，暂不接受成员变更"});
     }
     const PeerId target{cc.node_id()};
     // 红线 5 / D3-5 前置守卫（在落盘前拒绝，避免把注定卡死的变更写进日志）：
@@ -544,6 +611,12 @@ result<void> Raft::handle_append(const raftpb::Message& msg) {
     return {};
 }
 
+void Raft::on_match_advanced(PeerId from) {
+    if (transfer_target_.has_value() && transfer_target_->value == from.value) {
+        maybe_send_timeout_now();
+    }
+}
+
 void Raft::handle_append_response(const raftpb::Message& msg) {
     if (role_ != Role::Leader || msg.term() != term_) {
         return;
@@ -583,6 +656,7 @@ void Raft::handle_append_response(const raftpb::Message& msg) {
     }
     match_index_[from.value] = msg.index();
     next_index_[from.value] = msg.index() + 1;
+    on_match_advanced(from);   // ⑦a：转移目标可能刚追平，补发 TimeoutNow
     // 只有 voter 的回执能推进 commit：learner 不计入多数派（红线：learner 不投票）。
     // 若让 learner 回执也调 advance_commit，region 会出现"少数派写入已提交"的严重错误。
     if (from_voter) {

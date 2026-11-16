@@ -58,6 +58,9 @@
 | M4 | 19 | ⑥可判定性：CI13项 + sim_scheduler 4例 + 全量38 | PASS | run_ci PASS×13；ctest 38/38；sim_scheduler 4/4（心跳汇总/AskSplit分配/三轮单调收敛/限速1迁移） |
 | M4 | 20 | ⑥契约与复用：scheduler.proto 未改 + AskSplit不撞号(本轮修复) + 复用RegionEpoch | PASS | align 3/3(contract/doc_cmd/banned)；proto/scheduler.proto 保持用户核对版未动；复用 common. RegionEpoch 未新造；review 发现 next_region_id_ 从0起算会与已见region撞号→改为心跳抬升基线+新peer对齐已见max，用例 EXPECT_GT(new_region_id,5) 固化 |
 | M4 | 21 | ⑥文档与红线：控制面/数据面分离 + 限速 + docs/guard/scope | PASS | docs PASS×4；guard PASS；scope 已声明含 src/scheduler；调度器只产出 MovePeer 建议、不直接改数据不走数据通道(M-1)；限速 max_moves_per_round=1 由 BalanceRespectsRateLimit 证明；size 汇总只信 store 心跳，删除region回填兜底(会把空store算成有量) |
+| M4 | 22 | ⑦a可判定性：CI13 + transfer_leader 4例 + sim_transfer 3例 + 全量40 | PASS | run_ci PASS×13；ctest 40/40；transfer_leader 4/4（转移成功/转移期拒提案/超时放弃/非法目标）；sim_transfer 3/3（不丢提案/拒绝可重试/放弃后继续服务）；变异检查2次：去campaign→2例红、放宽deadline→1例红，用例咬得住实现 |
+| M4 | 23 | ⑦a契约与复用：MSG_TIMEOUT_NOW 追加式枚举 + TransferLeaderRequest 零改动 + 对齐三项 | PASS | align 3/3；raft.proto 仅追加 MSG_TIMEOUT_NOW=12（七字段复用，不新增 Message 字段）；TransferLeaderRequest 用既有契约零改动；M4-TRANSFERLEADER-DRAFT 留痕待追认；不落日志（易失意图，与etcd leadTransferee 同构）；复用 campaign/handle_vote_request 现成路径 |
+| M4 | 24 | ⑦a文档与红线：红线6三条逐条证明 + scope/guard/docs | PASS | docs PASS；guard PASS；scope 已补声明(CMakeLists/测试/草稿)；红线6：转移期拒提案(例2)、一个election timeout放弃(例3)、目标追平才发TimeoutNow(maybe_send_timeout_now)；once-notified防重复抬term；测试修正2处场景假设(TimeoutNow会被flush送达/红线4需当前term条目)均非实现缺陷；登记 40⇄40 |
 <!-- review:end -->
 
 ## 约定

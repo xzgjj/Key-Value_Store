@@ -106,6 +106,21 @@ best-effort 副本、租约过期读失败。理由见设计文档 §7 与 §3.7
 结论：⑥ 全程停在档 1–2；两处 review 发现（size 汇总回填、AskSplit 撞号）都是档 2 范围内的实现修正，
 未触发升档。
 
+## 4.3 [2026-11-16] M4 ⑦a 复核记录（TransferLeader）
+
+- **档 1 复用本仓**：竞选完全复用既有 campaign()（TimeoutNow 只是"提前触发"它）；
+  降级/投票复用 become_follower 与 handle_vote_request（含既有 up-to-date 检查，本次核对确认完整）；
+  转移执行本身零新协议——TimeoutNow 到 campaign 到 RequestVote 全是现成路径。
+- **档 2 语言机制**：std::optional 存意图、单调 tick 计 deadline（与④b 追平同口径），
+  bool notified 防重复——零新依赖。
+- **档 3/4 未触发**：proto 仅追加 MSG_TIMEOUT_NOW=12 一个枚举值（七字段复用，不新增 Message 字段），
+  TransferLeaderRequest 用既有契约零改动。
+- **KVstorageBaseRaft-cpp 反模式复核**：未借鉴其"转移靠超时自然发生"的隐式做法；
+  本实现显式 TimeoutNow + deadline 放弃，行为可判定。X-1~X-6 无回潮。
+- **Mooncake 架构原则复核**：转移只动 leadership 元数据，不动数据通道；M-1 边界延续。
+
+结论：⑦a 全程停在档 1–2；两处测试场景修正不涉及升档。
+
 ## 5. 与对齐检查的关系
 
 `align` 阶段（`tools/ci/check_align.py`）只校验可判定项（契约集合、命令引用、违禁模式），
