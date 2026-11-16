@@ -169,6 +169,7 @@ CI 用 `ctest -L unit|simulation|integration|bench` 选择，无需解析本页�
 | tests/unit/txn/mvcc_test.cpp | unit | `mvcc_test` | - | fast |
 | tests/unit/txn/si_semantics_test.cpp | unit | `si_semantics_test` | - | fast |
 | tests/unit/txn/txn_resolve_test.cpp | unit | `txn_resolve_test` | - | fast |
+| tests/unit/txn/txn_peer_test.cpp | unit | `txn_peer_test` | - | fast |
 | tests/integration/snapshot_test.cpp | integration | `snapshot_test` | - | nightly |
 | tests/integration/crash_recovery_test.cpp | integration | `crash_recovery_test` | - | nightly |
 | tests/bench/cluster_bench_test.cpp | bench | `cluster_bench` | - | nightly |

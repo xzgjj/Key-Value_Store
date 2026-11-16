@@ -3,11 +3,17 @@
 
 #include "raftstore/peer.h"
 
+#include <utility>
+
+#include "common/error_format.h"
+
 #include <algorithm>
 #include <memory>
 #include <span>
 #include <string_view>
 #include <utility>
+
+#include "common/error_format.h"
 #include <vector>
 
 #include "common/crc32c.h"
@@ -15,6 +21,12 @@
 #include "raft/entry_batch.h"
 
 namespace tinykv::raftstore {
+
+constexpr char kTxnMarker = '\x2B';           // RaftCmdRequest 起始字节只会是 0x0A/0x12/0x1A
+constexpr char kTxnTypePrewrite = '\x01';
+constexpr char kTxnTypeCommit = '\x02';
+constexpr char kTxnTypeRollback = '\x03';
+
 namespace {
 
 // M4 第⑤层：快照分块在途窗口（流控）——未确认块数上限，防止把接收端内存打爆
@@ -257,6 +269,10 @@ result<void> Peer::apply_entry(const raftpb::Entry& entry) {
     if (entry.data().empty()) {
         return {};   // 空条目（leader 占位）无需执行
     }
+    // M5 ⑤：txn 载荷（[0x2B][type][kvpb]）走独立执行路径——cmdpb 反序列化对它必然失败
+    if (entry.data()[0] == kTxnMarker) {
+        return execute_txn_payload(entry.data(), entry.index());
+    }
     // M4 第①层：Envelope 解包后逐条 execute——每条用各自 header 的 (client,seq) 登记回执，
     // 批量不串回执；解包失败说明是旧的单条 protobuf data，走原路径（向后兼容崩溃重放）。
     std::vector<std::string> items;
@@ -309,6 +325,96 @@ void Peer::fill_scan_reply(const cmdpb::ScanRequest& scan, cmdpb::ScanResponse* 
         out->add_keys(std::string((**it).key()));
         out->add_values(std::string((**it).value()));
     }
+}
+
+// ---- M5 ⑤：事务命令（SPEC-4 架构：Latch → MvccTxn → raft 提案；apply 时落三列族） ----
+
+bool Peer::propose_txn_prewrite(const kvpb::TxnPrewriteRequest& req) {
+    std::string payload(1, kTxnMarker);
+    payload.push_back(kTxnTypePrewrite);
+    payload += req.SerializeAsString();
+    return raft_->propose(std::move(payload)).has_value();
+}
+
+bool Peer::propose_txn_commit(const kvpb::TxnCommitRequest& req) {
+    std::string payload(1, kTxnMarker);
+    payload.push_back(kTxnTypeCommit);
+    payload += req.SerializeAsString();
+    return raft_->propose(std::move(payload)).has_value();
+}
+
+bool Peer::propose_txn_rollback(const kvpb::TxnBatchRollbackRequest& req) {
+    std::string payload(1, kTxnMarker);
+    payload.push_back(kTxnTypeRollback);
+    payload += req.SerializeAsString();
+    return raft_->propose(std::move(payload)).has_value();
+}
+
+result<void> Peer::execute_txn_payload(const std::string& payload, std::uint64_t index) {
+    txn::MvccTxn mvcc(storage_);
+    const char type = payload[1];
+    std::string body = payload.substr(2);
+    std::optional<KvError> err;
+    if (type == kTxnTypePrewrite) {
+        kvpb::TxnPrewriteRequest req;
+        if (!req.ParseFromString(body)) {
+            err = InvalidArgument{"txn prewrite 反序列化失败"};
+        } else {
+            // 红线4：latch 按 key 全序持有至 apply 完成；apply 单线程下互斥天然成立，
+            // 这里显式取闩让"闩语义"落在代码结构上而非巧合上
+            std::vector<std::string> keys;
+            for (const auto& m : req.mutations()) {
+                keys.emplace_back(m.key());
+            }
+            auto guard = txn_latches_.acquire(keys);
+            std::vector<txn::Mutation> muts;
+            for (const auto& m : req.mutations()) {
+                muts.push_back(txn::Mutation{
+                    .op = m.op() == kvpb::Mutation::PUT ? txn::Mutation::Op::PUT
+                                                        : txn::Mutation::Op::DELETE,
+                    .key = m.key(), .value = m.value()});
+            }
+            if (auto r = mvcc.prewrite(muts, req.primary_lock(), Ts{req.start_ts()},
+                                       req.lock_ttl(), 0); !r.has_value()) {
+                err = std::move(r.error());
+            }
+        }
+    } else if (type == kTxnTypeCommit) {
+        kvpb::TxnCommitRequest req;
+        if (!req.ParseFromString(body)) {
+            err = InvalidArgument{"txn commit 反序列化失败"};
+        } else {
+            auto guard = txn_latches_.acquire(
+                std::vector<std::string>(req.keys().begin(), req.keys().end()));
+            if (auto r = mvcc.commit(
+                    std::vector<std::string>(req.keys().begin(), req.keys().end()),
+                    Ts{req.start_ts()}, Ts{req.commit_ts()});
+                !r.has_value()) {
+                err = std::move(r.error());
+            }
+        }
+    } else if (type == kTxnTypeRollback) {
+        kvpb::TxnBatchRollbackRequest req;
+        if (!req.ParseFromString(body)) {
+            err = InvalidArgument{"txn rollback 反序列化失败"};
+        } else {
+            auto guard = txn_latches_.acquire(
+                std::vector<std::string>(req.keys().begin(), req.keys().end()));
+            if (auto r = mvcc.rollback(
+                    std::vector<std::string>(req.keys().begin(), req.keys().end()),
+                    Ts{req.start_ts()});
+                !r.has_value()) {
+                err = std::move(r.error());
+            }
+        }
+    } else {
+        err = InvalidArgument{"未知 txn 载荷类型"};
+    }
+    if (err.has_value()) {
+        txn_errors_[index] = std::move(*err);   // nullopt = 成功；client 泵到位点后查询
+    }
+    return {};
+    return {};
 }
 
 result<void> Peer::apply_split_admin(const cmdpb::SplitRequest& split) {

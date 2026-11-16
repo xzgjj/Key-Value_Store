@@ -20,6 +20,7 @@
 
 #include "common/error.h"
 #include "scheduler/tso.h"
+#include "txn/executor.h"
 #include "txn/mvcc.h"
 
 namespace tinykv::txn {
@@ -32,8 +33,9 @@ struct TxnGetResult {
 
 class TxnClient {
 public:
-    TxnClient(Storage& storage, tso::TsProvider& tso)
-        : mvcc_(storage), tso_(tso), lock_ttl_ms_(3000) {}
+    // 执行端注入：LocalExecutor（单机基线）或 Peer 端执行器（经 raft，⑤层）
+    TxnClient(TxnExecutor& executor, tso::TsProvider& tso)
+        : exec_(executor), tso_(tso), lock_ttl_ms_(3000) {}
 
     // D4-1：lock TTL 可配（默认 3000ms）
     void set_lock_ttl(std::uint64_t ttl_ms) { lock_ttl_ms_ = ttl_ms; }
@@ -78,7 +80,7 @@ public:
                 return TxnGetResult{.value = m.value, .blocked = false};   // 读己之写
             }
         }
-        auto r = mvcc_.get(key, start_ts_);
+        auto r = exec_.get(key, start_ts_);
         if (r.has_value()) {
             return TxnGetResult{.value = std::move(*r), .blocked = false};
         }
@@ -90,7 +92,7 @@ public:
             return TxnGetResult{.value = std::nullopt, .blocked = true};   // 未过期锁，稍后重试
         }
         // 决议完成 → 重试一次
-        auto retry = mvcc_.get(key, start_ts_);
+        auto retry = exec_.get(key, start_ts_);
         if (!retry.has_value()) {
             return std::unexpected(retry.error());
         }
@@ -107,7 +109,7 @@ public:
         for (const auto& m : writes_) {
             primary_ = std::min(primary_, m.key);
         }
-        auto pre = mvcc_.prewrite(writes_, primary_, start_ts_, lock_ttl_ms_, now_ms);
+        auto pre = exec_.prewrite(writes_, primary_, start_ts_, lock_ttl_ms_, now_ms);
         if (!pre.has_value()) {
             auto locked = resolve_blocking(std::move(pre.error()), now_ms);
             if (!locked.has_value()) {
@@ -118,7 +120,7 @@ public:
                                                     .primary = "",
                                                     .lock_start_ts = 0});   // 未过期，稍后重试
             }
-            pre = mvcc_.prewrite(writes_, primary_, start_ts_, lock_ttl_ms_, now_ms);
+            pre = exec_.prewrite(writes_, primary_, start_ts_, lock_ttl_ms_, now_ms);
             if (!pre.has_value()) {
                 return std::unexpected(pre.error());
             }
@@ -131,7 +133,7 @@ public:
         const Ts commit_ts = ts->front();
         // primary 先提交（提交凭证），secondary 并发语义由调用方控制（D4-3 ≤8）
         std::vector<std::string> primary_keys{primary_};
-        if (auto r = mvcc_.commit(primary_keys, start_ts_, commit_ts); !r.has_value()) {
+        if (auto r = exec_.commit(primary_keys, start_ts_, commit_ts); !r.has_value()) {
             return std::unexpected(r.error());
         }
         std::vector<std::string> secondary;
@@ -141,7 +143,7 @@ public:
             }
         }
         if (!secondary.empty()) {
-            if (auto r = mvcc_.commit(secondary, start_ts_, commit_ts); !r.has_value()) {
+            if (auto r = exec_.commit(secondary, start_ts_, commit_ts); !r.has_value()) {
                 return std::unexpected(r.error());
             }
         }
@@ -156,7 +158,7 @@ public:
             keys.push_back(m.key);
         }
         writes_.clear();
-        return mvcc_.rollback(keys, start_ts_);
+        return exec_.rollback(keys, start_ts_);
     }
 
     [[nodiscard]] Ts start_ts() const { return start_ts_; }
@@ -169,13 +171,13 @@ private:
             return std::unexpected(std::move(err));   // 非锁冲突（如写写冲突）原样上抛
         }
         const auto lc = std::get<LockConflict>(err);
-        auto st = mvcc_.check_txn_status(lc.primary, Ts{lc.lock_start_ts}, now_ms);
+        auto st = exec_.check_txn_status(lc.primary, Ts{lc.lock_start_ts}, now_ms);
         if (!st.has_value()) {
             return std::unexpected(st.error());
         }
         if (st->committed) {
             // 正向推进：用对方的 commit_ts 补 Write 删 Lock（红线3：不存在永久死锁锁）
-            auto r = mvcc_.resolve_locks_of(lc.primary, Ts{lc.lock_start_ts}, st->commit_ts);
+            auto r = exec_.resolve_locks_of(lc.primary, Ts{lc.lock_start_ts}, st->commit_ts);
             if (!r.has_value()) {
                 return std::unexpected(r.error());
             }
@@ -185,14 +187,14 @@ private:
             return true;   // 未过期：等待（调用方稍后带更新的 now_ms 重试）
         }
         // 过期或已回滚 → 清锁
-        auto r = mvcc_.resolve_locks_of(lc.primary, Ts{lc.lock_start_ts}, std::nullopt);
+        auto r = exec_.resolve_locks_of(lc.primary, Ts{lc.lock_start_ts}, std::nullopt);
         if (!r.has_value()) {
             return std::unexpected(r.error());
         }
         return false;
     }
 
-    MvccTxn mvcc_;
+    TxnExecutor& exec_;
     tso::TsProvider& tso_;
     Ts start_ts_{0};
     std::vector<Mutation> writes_;

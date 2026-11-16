@@ -273,28 +273,34 @@ public:
         return storage_.write(batch);
     }
 
+    // 枚举指定事务（primary+start_ts）的全部活跃锁 key（只读；决议 victim 发现用）
+    [[nodiscard]] std::vector<std::string> locks_of(std::string_view primary,
+                                                    Ts lock_start_ts) const {
+        std::vector<std::string> victims;
+        auto reader = storage_.create_reader();
+        if (!reader.has_value()) {
+            return victims;
+        }
+        auto it = (*reader)->scan(Cf::Lock, std::span<const std::byte>{}, kScanLimit);
+        if (!it.has_value()) {
+            return victims;
+        }
+        for (; (*it)->valid(); (*it)->next()) {
+            auto lv = decode_lock_value((*it)->value());
+            if (lv.has_value() && lv->flag == kLockFlagActive &&
+                lv->start_ts.value == lock_start_ts.value && lv->primary == primary) {
+                victims.emplace_back((*it)->key());
+            }
+        }
+        return victims;
+    }
+
     // ---- ResolveLock（锁解析三件套之一）：扫 Lock CF，把"同 primary+start_ts"的
     // 全部锁按决议结果清掉（committed → 补 Write 删 Lock；rolled_back/expired → 墓碑）。
     // 返回处理的锁数。生死判定在调用方（check_txn_status，红线2：本方法不自行判定）。
     [[nodiscard]] result<std::size_t> resolve_locks_of(std::string_view primary, Ts lock_start_ts,
                                                        std::optional<Ts> commit_to) {
-        auto reader = storage_.create_reader();
-        if (!reader.has_value()) {
-            return std::unexpected(IoFailed{.path = "txn:resolve", .reason = "reader 创建失败"});
-        }
-        auto it = (*reader)->scan(Cf::Lock, std::span<const std::byte>{}, kScanLimit);
-        if (!it.has_value()) {
-            return std::unexpected(IoFailed{.path = "txn:resolve", .reason = "锁扫描失败"});
-        }
-        std::vector<std::string> victims;
-        for (; (*it)->valid(); (*it)->next()) {
-            auto lv = decode_lock_value((*it)->value());
-            if (!lv.has_value() || lv->flag != kLockFlagActive ||
-                lv->start_ts.value != lock_start_ts.value || lv->primary != primary) {
-                continue;   // 不是本事务的锁（红线2：secondary 不得自行判定，只认 primary）
-            }
-            victims.emplace_back((*it)->key());
-        }
+        std::vector<std::string> victims = locks_of(primary, lock_start_ts);
         if (victims.empty()) {
             return 0U;
         }

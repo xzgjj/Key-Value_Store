@@ -26,13 +26,7 @@ using tinykv::Ts;
 // 同 key 写写冲突：t2 后提交胜，t1 commit → WriteConflict；再读 = b（无中间态）
 TEST(SiSemantics, SameKeyWriteWriteConflict) {
     Fixture f;
-    auto t1 = f.client();
-    auto t2 = f.client();
-    (void)t1.begin();
-    (void)t2.begin();
-    (void)t1.set("k", "a");
-    (void)t2.set("k", "b");
-    f.now_ms += 10;
+    auto [t1, t2] = f.begin_two("k", "a", "k", "b");
     ASSERT_TRUE(t2.commit(f.now_ms).has_value()) << "t2 首提交应胜出";
 
     f.now_ms += 10;

@@ -28,7 +28,7 @@ TEST(TxnResolve, CrashedTxnResolvedAfterTtlExpiry) {
     Fixture f;
     // 先有旧版本 "old"（已提交）
     {
-        TxnClient c(*f.engine, f.tso);
+        auto c = f.client();
         (void)c.begin();
         (void)c.set("k", "old");
         f.advance(10);
@@ -36,7 +36,7 @@ TEST(TxnResolve, CrashedTxnResolvedAfterTtlExpiry) {
     }
 
     // 事务 A：prewrite(k,"new") 后"崩溃"——不 commit 不 rollback，锁残留
-    TxnClient a(*f.engine, f.tso);
+    auto a = f.client();
     (void)a.begin();
     (void)a.set("k", "new");
     f.advance(10);
@@ -50,7 +50,7 @@ TEST(TxnResolve, CrashedTxnResolvedAfterTtlExpiry) {
     // 注意：A 的 client 层并未 commit——锁以 start_ts=a 残留在 Lock CF
 
     // 事务 B：get(k) → TTL 未过期时被阻塞（不等待——用注入时钟推进判定）
-    TxnClient b(*f.engine, f.tso);
+    auto b = f.client();
     (void)b.begin();
     {
         // 现在时刻还在 A 的 TTL 内 → get 报 blocked
@@ -60,7 +60,7 @@ TEST(TxnResolve, CrashedTxnResolvedAfterTtlExpiry) {
         ASSERT_TRUE(std::holds_alternative<tinykv::LockConflict>(r.error()));
     }
     {
-        TxnClient probe(*f.engine, f.tso);
+        auto probe = f.client();
         (void)probe.begin();
         auto r = probe.get("k", f.now_ms);   // now_ms 仍在 TTL 内
         ASSERT_TRUE(r.has_value());
@@ -106,7 +106,7 @@ TEST(TxnResolve, ForwardProgressWhenPrimaryCommitted) {
     ASSERT_TRUE(mvcc.commit(std::vector<std::string>{"p"}, a_start, commit_ts).has_value());
 
     // B 在 A 的 primary 提交之后开始（start_ts > commit_ts）：读 secondary 遇残留锁
-    TxnClient b(*f.engine, f.tso);
+    auto b = f.client();
     (void)b.begin();
     ASSERT_GT(b.start_ts().value, commit_ts.value);
     f.advance(4000);

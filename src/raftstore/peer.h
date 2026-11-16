@@ -25,7 +25,10 @@
 
 #include "common/error.h"
 #include "raft/raft.h"
+#include <kv.pb.h>
 #include "raftstore/region.h"
+#include "txn/latch.h"
+#include "txn/mvcc.h"
 #include "storage/storage.h"
 
 namespace tinykv::raftstore {
@@ -100,6 +103,24 @@ public:
     // ---- M4 第⑤层：快照分块大小（默认 4MB，SPEC-3 D3-3；测试调小以覆盖多块路径） ----
     void set_snapshot_chunk_bytes(std::size_t n) { snapshot_chunk_bytes_ = n == 0 ? 1 : n; }
 
+    // ---- M5 第⑤层：事务命令进 raft 提案（SPEC-4 架构：Latch → MvccTxn → raft） ----
+    // 提案载荷 = [0x2B][type:1B][kvpb 序列化]；apply 时经 execute_txn_payload 落三列族。
+    // 返回 false = 非 leader（NotLeader 语义由调用方处理）。
+    [[nodiscard]] bool propose_txn_prewrite(const kvpb::TxnPrewriteRequest& req);
+    [[nodiscard]] bool propose_txn_commit(const kvpb::TxnCommitRequest& req);
+    [[nodiscard]] bool propose_txn_rollback(const kvpb::TxnBatchRollbackRequest& req);
+    // apply 位点到达后取该条目的 txn 执行错误（nullopt = 成功；结构化，client 编排需要字段）
+    [[nodiscard]] std::optional<KvError> take_txn_error(std::uint64_t index) {
+        auto it = txn_errors_.find(index);
+        if (it == txn_errors_.end()) {
+            return std::nullopt;
+        }
+        return std::move(it->second);
+    }
+    // 只读事务操作直接走 leader 本地 MVCC（M2 leader 本地读同款偏差，记 notes-m5）
+    [[nodiscard]] txn::MvccTxn mvcc() { return txn::MvccTxn(storage_); }
+    [[nodiscard]] txn::LatchManager& txn_latches() { return txn_latches_; }
+
 private:
     Peer(std::unique_ptr<raft::RaftLog> log, Storage& storage, const raft::Config& cfg);
 
@@ -111,6 +132,8 @@ private:
     [[nodiscard]] result<void> apply_split_admin(const cmdpb::SplitRequest& split);
     // 把攒批队列打包成 Envelope 一次 propose；返回是否产生了提案
     [[nodiscard]] result<bool> flush_proposals();
+    // M5 ⑤：txn 载荷执行（Latch → MvccTxn；失败记入 txn_errors_ 供 client 查询）
+    [[nodiscard]] result<void> execute_txn_payload(const std::string& payload, std::uint64_t index);
     void fill_get_reply(const cmdpb::GetRequest& get, cmdpb::GetResponse* out);
     void fill_scan_reply(const cmdpb::ScanRequest& scan, cmdpb::ScanResponse* out);
 
@@ -175,6 +198,8 @@ private:
     // M4 第③层：Split 路由（可选注入；未注入时忽略 split admin）
     std::optional<Region> my_region_;
     StoreMeta* store_meta_{nullptr};
+    txn::LatchManager txn_latches_;                                   // M5 ⑤：key 粒度闩（红线4）
+    std::map<std::uint64_t, KvError> txn_errors_;                  // apply 位点 → 错误描述
 };
 
 }  // namespace tinykv::raftstore

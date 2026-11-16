@@ -40,7 +40,10 @@
     "docs/reuse-register.md",
     "ci/task_scope.json",
     "src/txn/client.h",
-    "tests/testlib/txn_fixture.h"
+    "tests/testlib/txn_fixture.h",
+    "src/txn/executor.h",
+    "tests/testlib/peer_txn.h",
+    "tests/unit/txn/txn_peer_test.cpp"
   ],
   "reason": "用户 2026-11-16 指令『三个 bench补充并 推送；之后M5（事务层）新分支 4 开始 各种方案按要求你走最终交付』——授权按 SPEC-4 全部默认值（D4-1~D4-5）自主落地 M5。每层 TDD、CI 绿、三轮 review、本地 commit（分支 4）。",
   "bugfix": false,
