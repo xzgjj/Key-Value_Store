@@ -67,6 +67,9 @@
 | M4 | 28 | ⑦c可判定性：CI13 + mr_chaos_n150 150轮 + 全量42 | PASS | run_ci PASS×13；ctest 42/42；mr_chaos_n150 150/150 种子（~10.5s）；变异检查：去 split 注入→150轮全红（region_count!=2），还原后绿 |
 | M4 | 29 | ⑦c契约与复用：复用 PeerCluster/enable_split 每peer独立StoreMeta + 对齐三项 | PASS | align 3/3；peer_cluster.h 加 enable_split（每 peer 一份 StoreMeta：真实拓扑各 store 各持视图，共享单视图会让后apply的peer撞region不存在且apply不重试）；confchange 复用 raft().propose_conf_change + raft级apply；split 复用③层 admin 提案路径 |
 | M4 | 30 | ⑦c文档与红线：REL-05 经150轮混沌证明 + CI复杂度/重复回修 | PASS | docs PASS；guard PASS；REL-05 断言形式化：区间排序后首尾相接无重叠（contiguous函数）且三副本指纹一致；分区随机注入20%/拍；run_round 拆 inject/converged/mr_invariants 三助手（复杂度26→≤15）；include 序言撞车以 <utility> 打断 |
+| M4 | 31 | ⑦d可判定性：UX-04演练真注入+CLI定位 + 全量42 + CI13 | PASS | 注入 peer.cpp execute split 短路缺陷→cli_region 红（regions 无 id2/epoch 未推进）→还原→绿；演练记录 docs/notes-m4-troubleshoot.md；build/evidence/nightly/mr_chaos_150.txt 生成；ctest 42/42；run_ci PASS×13 |
+| M4 | 32 | ⑦d验收对照：§3.7 逐行核对（9✅/3挂账/2部分） | PASS | notes-m4 §4 逐行表：FUNC-07~12/ENG-05/UX-04/UX-06 全✅；FUNC-08 部分（1M规模挂PERF-07）；PERF-07/08/09 bench 未建如实挂账（§5 待用户决策）；SPEC 建议名↔实际登记名映射注明；登记名以 testing.md §4 为唯一事实来源 |
+| M4 | 33 | ⑦d文档收尾：notes-m4 UX-06 + guard/scope/docs + 契约待追认汇总 | PASS | docs PASS；guard PASS；scope 补 notes-m4-troubleshoot；notes-m4 含 P3 踩坑 6 条与 4 份契约草稿待追认清单；M4 30+3 轮 review 全 PASS |
 <!-- review:end -->
 
 ## 约定
