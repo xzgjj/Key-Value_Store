@@ -37,6 +37,7 @@ struct Region {
     std::string end_key;
     std::vector<PeerInfo> peers;
     RegionEpoch epoch;
+    std::int64_t size_hint{0};   // 近似字节数（Put/Delete apply 时增减，供 split-check 估计）
 
     // key 是否落在本 region：start <= key < end（空 end = 无限）
     [[nodiscard]] bool contains(std::string_view key) const noexcept {
@@ -45,6 +46,28 @@ struct Region {
         return ge_start && lt_end;
     }
 };
+
+// Split 校验与切分（SPEC-3 红线1）：split_key 必须落在 (start,end) 开区间。
+// 成功返回左右两个新 region：左继承原 id、右用 new_id；两者 version 各 +1（数据世代推进）。
+[[nodiscard]] inline result<std::pair<Region, Region>> split_region(
+    const Region& r, std::string_view split_key, RegionId new_id) {
+    const bool gt_start = r.start_key.empty() || split_key > std::string_view(r.start_key);
+    const bool lt_end = r.end_key.empty() || split_key < std::string_view(r.end_key);
+    if (!gt_start || !lt_end || split_key.empty()) {
+        return std::unexpected(InvalidArgument{"split_key 必须落在 region 开区间内"});
+    }
+    Region left = r;
+    left.end_key = std::string(split_key);
+    left.epoch.version += 1;
+    Region right = r;
+    right.id = new_id;
+    right.start_key = std::string(split_key);
+    right.epoch.version += 1;
+    // size_hint 按 key 均分（近似）：无精确分布时按区间对半是保守估计
+    left.size_hint = r.size_hint / 2;
+    right.size_hint = r.size_hint - left.size_hint;
+    return std::make_pair(std::move(left), std::move(right));
+}
 
 // 每个 store 的 region 元数据视图：regions map + 按 end_key 的区间索引，RWMutex 保护。
 // split/conf-change apply 时更新，路由读与更新并发安全。

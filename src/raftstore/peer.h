@@ -25,6 +25,7 @@
 
 #include "common/error.h"
 #include "raft/raft.h"
+#include "raftstore/region.h"
 #include "storage/storage.h"
 
 namespace tinykv::raftstore {
@@ -91,6 +92,11 @@ public:
     void enable_batching(bool on) { batching_ = on; }
     [[nodiscard]] bool batching_enabled() const { return batching_; }
 
+    // ---- M4 第③层：Split 路由注入（可选；不设置则忽略 split admin，保持 M2 行为） ----
+    // my_region：本 peer 所属 region 的当前元数据（split apply 时据此切分）
+    void set_region(const Region& region) { my_region_ = region; }
+    void set_store_meta(StoreMeta* meta) { store_meta_ = meta; }
+
 private:
     Peer(std::unique_ptr<raft::RaftLog> log, Storage& storage, const raft::Config& cfg);
 
@@ -98,6 +104,8 @@ private:
 
     [[nodiscard]] result<void> apply_entry(const raftpb::Entry& entry);
     [[nodiscard]] result<void> execute(const cmdpb::RaftCmdRequest& req);
+    // M4 第③层：apply Split admin（校验开区间 + 更新 StoreMeta 路由；红线1/2）
+    [[nodiscard]] result<void> apply_split_admin(const cmdpb::SplitRequest& split);
     // 把攒批队列打包成 Envelope 一次 propose；返回是否产生了提案
     [[nodiscard]] result<bool> flush_proposals();
     void fill_get_reply(const cmdpb::GetRequest& get, cmdpb::GetResponse* out);
@@ -125,6 +133,10 @@ private:
     // 批量 propose：待攒批的已序列化请求 + 开关（默认开启）
     std::vector<std::string> pending_proposals_;
     bool batching_{true};
+
+    // M4 第③层：Split 路由（可选注入；未注入时忽略 split admin）
+    std::optional<Region> my_region_;
+    StoreMeta* store_meta_{nullptr};
 };
 
 }  // namespace tinykv::raftstore

@@ -31,6 +31,7 @@ tinykv::raftstore::Region make_region(std::uint64_t id, std::string start, std::
         .end_key = std::move(end),
         .peers = {},
         .epoch = epoch,
+        .size_hint = 0,
     };
 }
 
@@ -152,6 +153,43 @@ TEST(RegionRoute, ConcurrentReadsDuringSplitStayConsistent) {
     for (auto& t : readers) {
         t.join();
     }
+}
+
+TEST(SplitRegion, SplitsIntoAdjacentHalvesWithVersionBump) {
+    auto r = make_region(1, "a", "z", {3, 1});
+    r.size_hint = 100;
+    auto result = tinykv::raftstore::split_region(r, "m", RegionId{9});
+    ASSERT_TRUE(result.has_value());
+    const auto& left = result->first;
+    const auto& right = result->second;
+    EXPECT_EQ(left.id, RegionId{1});
+    EXPECT_EQ(left.start_key, "a");
+    EXPECT_EQ(left.end_key, "m");
+    EXPECT_EQ(left.epoch.version, 4U);
+    EXPECT_EQ(left.epoch.conf_ver, 1U);
+    EXPECT_EQ(right.id, RegionId{9});
+    EXPECT_EQ(right.start_key, "m");
+    EXPECT_EQ(right.end_key, "z");
+    EXPECT_EQ(right.epoch.version, 4U);
+    EXPECT_EQ(left.size_hint + right.size_hint, 100);   // size_hint 守恒
+}
+
+TEST(SplitRegion, RejectsSplitKeyOnBoundaryOrOutside) {
+    auto r = make_region(1, "a", "z");
+    EXPECT_FALSE(tinykv::raftstore::split_region(r, "a", RegionId{9}).has_value());   // =start
+    EXPECT_FALSE(tinykv::raftstore::split_region(r, "z", RegionId{9}).has_value());   // =end
+    EXPECT_FALSE(tinykv::raftstore::split_region(r, "0", RegionId{9}).has_value());   // <start
+    EXPECT_FALSE(tinykv::raftstore::split_region(r, "zz", RegionId{9}).has_value());  // >end
+}
+
+TEST(SplitRegion, InfiniteEndCanSplitAtAnyLargerKey) {
+    auto r = make_region(1, "m", "");   // [m, ∞)
+    auto result = tinykv::raftstore::split_region(r, "z", RegionId{9});
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->first.end_key, "z");
+    EXPECT_EQ(result->second.start_key, "z");
+    EXPECT_TRUE(result->second.end_key.empty());   // 右半仍是 +∞
+    EXPECT_FALSE(tinykv::raftstore::split_region(r, "a", RegionId{9}).has_value());
 }
 
 }  // namespace

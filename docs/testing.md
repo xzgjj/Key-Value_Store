@@ -138,6 +138,7 @@ CI 用 `ctest -L unit|simulation|integration|bench` 选择，无需解析本页�
 | tests/unit/storage/wal_group_commit_test.cpp | unit | `wal_group_commit_test` | - | fast |
 | tests/unit/raft/entry_batch_test.cpp | unit | `entry_batch_test` | - | fast |
 | tests/unit/raftstore/region_route_test.cpp | unit | `region_route_test` | - | fast |
+| tests/unit/raftstore/split_test.cpp | unit | `split_test` | - | fast |
 | tests/unit/storage/engine_get_put_test.cpp | unit | `engine_get_put_test` | - | fast |
 | tests/unit/storage/engine_scan_test.cpp | unit | `engine_scan_test` | - | fast |
 | tests/unit/storage/engine_cf_test.cpp | unit | `engine_cf_test` | - | fast |

@@ -2,3 +2,4 @@
 # 归属：TinyKV-CPP（M4 Multi-Raft 路由层）。
 
 add_tinykv_test(region_route_test SRCS region_route_test.cpp LIBS tinykv_raftstore)
+add_tinykv_test(split_test SRCS split_test.cpp LIBS tinykv_raftstore)

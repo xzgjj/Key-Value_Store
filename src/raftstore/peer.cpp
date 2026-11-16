@@ -308,7 +308,37 @@ void Peer::fill_scan_reply(const cmdpb::ScanRequest& scan, cmdpb::ScanResponse* 
     }
 }
 
+result<void> Peer::apply_split_admin(const cmdpb::SplitRequest& split) {
+    if (!my_region_.has_value() || store_meta_ == nullptr) {
+        return std::unexpected(InvalidArgument{"split 需要注入 region 元数据与 StoreMeta"});
+    }
+    const auto ep = static_cast<std::uint64_t>(split.new_region_id());
+    auto parts = split_region(*my_region_, split.split_key(), RegionId{ep});
+    if (!parts) {
+        return std::unexpected(parts.error());
+    }
+    if (auto r = store_meta_->replace_region(my_region_->id, parts->first, parts->second); !r) {
+        return r;
+    }
+    // 红线2：apply 完成后立即更新本 peer 视图（左半仍由本 peer 负责）
+    my_region_ = parts->first;
+    return {};
+}
+
 result<void> Peer::execute(const cmdpb::RaftCmdRequest& req) {
+    // M4 第③层：admin 与 requests 互斥（proto 约定）；有 admin 时先执行它
+    if (req.has_admin()) {
+        if (req.requests_size() != 0) {
+            return std::unexpected(InvalidArgument{"admin 与 requests 互斥，不得共存"});
+        }
+        if (req.admin().cmd_case() == cmdpb::AdminRequest::kSplit) {
+            if (auto r = apply_split_admin(req.admin().split()); !r) {
+                return r;
+            }
+        } else {
+            return std::unexpected(InvalidArgument{"该 admin 命令本阶段未实现"});
+        }
+    }
     ModifyVec batch;
     cmdpb::RaftCmdResponse resp;   // 与 requests 顺序一一对应的回执
     resp.mutable_header()->set_region_id(req.header().region_id());
