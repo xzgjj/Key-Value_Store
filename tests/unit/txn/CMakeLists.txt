@@ -3,3 +3,4 @@
 
 add_tinykv_test(tso_test SRCS tso_test.cpp LIBS tinykv_proto LEVEL unit)
 add_tinykv_test(latch_concurrency_test SRCS latch_concurrency_test.cpp LIBS tinykv_common LEVEL simulation)
+add_tinykv_test(mvcc_test SRCS mvcc_test.cpp LIBS tinykv_storage LEVEL unit)

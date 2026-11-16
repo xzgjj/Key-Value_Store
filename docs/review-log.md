@@ -76,6 +76,9 @@
 | M5 | 1 | ①②可判定性：CI13 + tso 6例 + latch 4例 + 全量47 | PASS | run_ci PASS×13；ctest 47/47；tso 6/6（批量单调/跨调用不回退/空批量拒/fatal非单调/调度器适配/1e5 ts/s 吞吐）；latch 4/4（同key串行观察点/交叉key集无死锁/释放唤醒/重复key去重） |
 | M5 | 2 | ①②契约与复用：KvError 9变体⇄RegionError 对称 + 调度器兼任TSO + encode_ts_key 复用 | PASS | align 3/3；KvError 6→9 与 RegionError oneof 4/5/6 对称（不进豁免）；TsNotMonotonic 走 fatal 异常（SPEC-4 §4.3.3 明示 fatal 路径，不进 result）；留痕 M5-TXNERROR-DRAFT.md；Ts/encode_ts_key 复用 M0 骨架零改动；TSO 适配器挂 Scheduler（架构图要求） |
 | M5 | 3 | ①②文档与红线：红线4（latch 全序加锁防死锁）+ 红线6（TSO 单调）+ banned/scope 回修 | PASS | docs PASS；guard PASS；latch 排序加锁=全局全序（交叉 key 集无环的结构保证）；测试踩坑 2 处：同线程持有期间重取=自我死锁（测试语义错）、std::move 到局部变量生命周期到作用域尾（释放时机错）——均已记测试内注释；sleep_for 违禁（ENG-04）改 join 同步点；task_scope M5 重写生效 |
+| M5 | 4 | ③可判定性：CI13 + mvcc 9例 + 全量48 | PASS | run_ci PASS×13；ctest 48/48；mvcc 9/9（roundtrip/写写冲突立即abort/锁冲突/幂等重放/commit锁归属校验+幂等/rollback墓碑+不动他者之锁/CheckTxnStatus三态/多版本快照读） |
+| M5 | 5 | ③契约与复用：三CF布局红线5 + Storage语义澄清 + dup收口 | PASS | 对账 3/3；数据布局=Default@start_ts/Lock@key/Write@commit_ts（ts大端，红线5）；关键澄清：Engine::get/write/scan 内部自带 CF 前缀（encode_user），MvccTxn 传 user_key+ts 后缀——首跑双重前缀致全挂；版本归属=剥8B尾后按用户key等值（starts_with 会把 k1 误配给 k）；be64_str 首版写反（110×2^56 现形）已修；重复块收口：for_each_write_version 共享骨架+include 序言重排 |
+| M5 | 6 | ③文档与红线：红线1（冲突立即abort）+ 红线2（rollback不动他者之锁）+ 确定性时钟偏差留痕 | PASS | docs PASS；guard PASS；prewrite 检查阶段先查后写失败即 abort（红线1）；rollback 只动本事务锁（红线2 红线2判定）+ 墓碑语义；TTL 判定显式收 now_ms 参数（与④b tick 同取向，不读墙钟可复现）——偏差记 notes-m5 待记 |
 <!-- review:end -->
 
 ## 约定

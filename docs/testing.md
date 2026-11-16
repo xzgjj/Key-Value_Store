@@ -166,6 +166,7 @@ CI 用 `ctest -L unit|simulation|integration|bench` 选择，无需解析本页�
 | tests/unit/cli/cli_region_test.cpp | unit | `cli_region_test` | - | fast |
 | tests/unit/txn/tso_test.cpp | unit | `tso_test` | - | fast |
 | tests/unit/txn/latch_concurrency_test.cpp | simulation | `latch_concurrency_test` | - | fast |
+| tests/unit/txn/mvcc_test.cpp | unit | `mvcc_test` | - | fast |
 | tests/integration/snapshot_test.cpp | integration | `snapshot_test` | - | nightly |
 | tests/integration/crash_recovery_test.cpp | integration | `crash_recovery_test` | - | nightly |
 | tests/bench/cluster_bench_test.cpp | bench | `cluster_bench` | - | nightly |
