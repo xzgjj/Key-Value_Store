@@ -6,6 +6,8 @@ add_tinykv_test(raft_chaos_n150 SRCS raft_chaos_n150_test.cpp LIBS tinykv_raftst
 add_tinykv_test(lincheck_readindex SRCS lincheck_readindex_test.cpp LIBS tinykv_raftstore LEVEL integration)
 add_tinykv_test(snapshot_test SRCS snapshot_test.cpp LIBS tinykv_raftstore LEVEL integration)
 add_tinykv_test(mr_chaos_n150 SRCS mr_chaos_test.cpp LIBS tinykv_raftstore LEVEL integration)
+add_tinykv_test(lincheck_si_test SRCS lincheck_si_test.cpp LIBS tinykv_storage LEVEL integration)
+add_tinykv_test(txn_chaos_n150 SRCS txn_chaos_test.cpp LIBS tinykv_raftstore tinykv_proto LEVEL integration)
 
 # 崩溃写入器：独立进程 + _Exit(0)，供 REL-02 的"被强杀"验证使用
 add_executable(crash_writer ../tools/crash_writer.cpp)

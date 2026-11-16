@@ -75,9 +75,10 @@ public:
 
     // 读：读己之写 / 快照读 / 锁等待+决议重试（now_ms 注入，确定性时钟）
     [[nodiscard]] result<TxnGetResult> get(const std::string& key, std::uint64_t now_ms) {
-        for (const auto& m : writes_) {
-            if (m.key == key && m.op == Mutation::Op::PUT) {
-                return TxnGetResult{.value = m.value, .blocked = false};   // 读己之写
+        // 读己之写：同一 key 多次 set 时最后一次胜出（与 prewrite 落盘值一致）
+        for (auto it = writes_.rbegin(); it != writes_.rend(); ++it) {
+            if (it->key == key && it->op == Mutation::Op::PUT) {
+                return TxnGetResult{.value = it->value, .blocked = false};
             }
         }
         auto r = exec_.get(key, start_ts_);

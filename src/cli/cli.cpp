@@ -47,6 +47,7 @@ std::string_view usage() {
         "  del <key>                删除（删除不存在的 key 视为成功）\n"
         "  scan [start]             按升序扫描，默认 limit 10\n"
         "  status                   打印配置与引擎统计\n"
+        "  txn <子命令>             事务（M5；详见 txn --help）\n"
         "\n"
         "集群观测命令（需 --endpoint，docs/cli.md §10）：\n"
         "  regions                        列出该 store 全部 region\n"
@@ -373,6 +374,39 @@ int cmd_trace_region(const Globals& g, const std::vector<std::string>& pos, std:
                              out, err);
 }
 
+// ---- M5 ⑥：事务命令（docs/cli.md §11；UX-02(txn) 验收口径 = --help + 示例） ----
+
+std::string_view txn_usage() {
+    return
+        "用法: tinykv-cli --endpoint <host:port> txn <子命令>\n"
+        "\n"
+        "子命令:\n"
+        "  demo                  一次性示例：begin → set → get（读己之写）→ commit → 集群读验证\n"
+        "  begin|set|get|commit|rollback  交互式子命令（未接入：CLI 是一次性进程，\n"
+        "                        无法跨调用持有事务状态；随 daemon 化接入，见 docs/cli.md §11）\n"
+        "\n"
+        "说明: 事务语义见 SPEC-4（Percolator SI）。冲突返回 WriteConflict 退出码 2。\n";
+}
+
+int cmd_txn(const Globals& /*g*/, const std::vector<std::string>& pos, std::ostream& out,
+            std::ostream& err) {
+    if (pos.size() == 1 || pos[1] == "--help") {
+        out << txn_usage();
+        return kExitOk;
+    }
+    if (pos[1] == "demo") {
+        out << "事务示例脚本（需事务服务端在线；当前阶段 CLI 一次性进程无法编排跨调用事务）：\n"
+            << "  1. txn begin            # TSO 分配 start_ts\n"
+            << "  2. txn set k v          # 写缓冲\n"
+            << "  3. txn get k            # 读己之写\n"
+            << "  4. txn commit           # prewrite(冲突立即 abort) → primary 先提交\n"
+            << "  5. get k                # 集群读验证（走 §4 集群命令）\n";
+        return kExitOk;
+    }
+    err << "交互式事务子命令未接入（CLI 是一次性进程）；用法见 txn --help\n";
+    return kExitUsage;
+}
+
 // status/get 的读路径（get 走 /kv 查询串，status 走 /status）
 int cmd_cluster_read(const Globals& g, const std::string& cmd, const std::vector<std::string>& pos,
                      std::ostream& out, std::ostream& err) {
@@ -452,6 +486,11 @@ int run_cli(std::span<const std::string> args, std::ostream& out, std::ostream& 
     }
 
     const std::string& cmd = (*positional)[0];
+    if (cmd == "txn") {
+        // M5：事务命令在本地/集群模式之前分发（--help/demo 无需服务端；
+        // 交互式子命令返回 1 指向用法，docs/cli.md §11）
+        return cmd_txn(g, *positional, out, err);
+    }
     if (!g.endpoint.empty()) {
         return cmd_cluster(g, cmd, *positional, out, err);   // 集群模式不需要本地配置
     }

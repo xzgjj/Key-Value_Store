@@ -204,3 +204,24 @@ tinykv-cli --endpoint 127.0.0.1:3380 trace region 7 on
 tinykv-cli --endpoint 127.0.0.1:3380 trace region 7 off
 # 日志在 log/trace-region-7.log
 ```
+
+## 11. 事务命令（M5，UX-02(txn)）
+
+> 契约口径：SPEC-4 §4.6。CLI 是一次性进程，无法跨调用持有事务状态（begin 的 start_ts
+> 与 writes_ 都在进程内），故 M5 的 CLI 事务面为 **--help + 一次性示例（demo）**；
+> 交互式事务会话随 daemon 化与长连接客户端接入（记 docs/notes-m5.md）。
+
+### 11.1 命令列表
+
+| 命令 | 作用 | 退出码 |
+|---|---|---|
+| `tinykv-cli --endpoint <host:port> txn --help` | 事务子命令用法 | 0 |
+| `tinykv-cli --endpoint <host:port> txn demo` | 一次性示例：begin → set → get（读己之写）→ commit → 集群读验证 | 0 |
+| `tinykv-cli --endpoint <host:port> txn begin|set|get|commit|rollback` | 交互式子命令（未接入，返回 1 并提示见 --help） | 1 |
+
+### 11.2 示例（实现后可直接复制执行）
+
+```bash
+tinykv-cli --endpoint 127.0.0.1:3380 txn --help
+tinykv-cli --endpoint 127.0.0.1:3380 txn demo
+```

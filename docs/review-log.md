@@ -85,6 +85,9 @@
 | M5 | 10 | ⑤可判定性：CI13 + txn_peer 3例（经raft三副本）+ 全量51 | PASS | run_ci PASS×13；ctest 51/51；txn_peer 3/3（提交经raft三副本MVCC一致/写写冲突从apply侧结构化传回/崩溃锁经决议走raft清锁后副本一致可再提交） |
 | M5 | 11 | ⑤契约与复用：TxnExecutor 双端 + Peer txn 路径（marker/kvpb/Latch/结构化错误） | PASS | align 3/3；TxnExecutor 抽象（LocalExecutor/Peer 端同语义）；Peer 载荷 [0x2B][type][kvpb]（cmdpb 起始字节只会 0x0A/0x12/0x1A 不相撞）；apply 侧 Latch 显式取闩（红线4）+ 结构化 KvError 错误表（client 编排要 LockConflict 字段）；决议写入经 raft（否则副本分叉）；读路径 leader 本地直读（M2 同款偏差记 notes-m5） |
 | M5 | 12 | ⑤文档与红线：全副本收敛等待 + 执行端单例（悬垂教训）+ begin_two 上收 | PASS | docs PASS；guard PASS；call_through_raft 等**全部副本** apply 到位（只等 leader 会让 follower 读到锁残留旧态）；PeerTxnExecutor 单例（client 持引用，重复重建悬垂→CI 构建 SEGFAULT 首跑踩坑）；双事务开局收口 TxnFixture::begin_two（client() 虚分派切换执行端）；CI build/ci 目录与 win-debug 双验证 |
+| M5 | 13 | ⑥可判定性：CI13 + cli_txn_smoke 4例 + lincheck_si 5种子 + txn_chaos_n150 150轮 + 全量54 | PASS | run_ci PASS×13；ctest 54/54；cli_txn_smoke 4/4（--help/demo/顶层露出/交互式退码1）；lincheck_si 审计三条 SI 不变量（无脏读含读己之写/首提交不被覆盖/终态账本一致）；txn_chaos_n150 150/150（崩溃级联决议+三副本一致） |
+| M5 | 14 | ⑥契约与复用：CLI txn 契约（§11 --help+demo）+ 审计器 + 复杂度回修 | PASS | align 3/3；CLI txn 按 SPEC 验收口径（--help+示例）落版：一次性进程无法跨调用持事务→交互式子命令退码1指向用法（偏差记 notes-m5）；cli.md §11 契约文档；lincheck 审计器无脏读含读己之写分支；chaos 崩溃级联决议语义（prewrite 撞未过期锁→按编排先决议再重试）；复杂度 20/17→抽 crash_prewrite/resolve_and_verify |
+| M5 | 15 | ⑥文档与红线：红线3（决议后无永久锁）150轮证明 + 读己之写最后胜出修复 | PASS | docs PASS；guard PASS；红线3 经 150 轮崩溃级联决议证明（全部副本锁全清）；发现并修复 TxnClient::get 读己之写取首写而非末写（与 prewrite 落盘不一致）——lincheck 审计器捕获的第三个真实缺陷；登记 54⇄54 |
 <!-- review:end -->
 
 ## 约定

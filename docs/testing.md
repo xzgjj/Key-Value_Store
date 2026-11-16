@@ -158,12 +158,15 @@ CI 用 `ctest -L unit|simulation|integration|bench` 选择，无需解析本页�
 | tests/integration/tcp_cluster_test.cpp | integration | `tcp_cluster_test` | - | nightly |
 | tests/integration/raft_chaos_n150_test.cpp | integration | `raft_chaos_n150` | - | nightly;serial |
 | tests/integration/mr_chaos_test.cpp | integration | `mr_chaos_n150` | - | nightly;serial |
+| tests/integration/lincheck_si_test.cpp | integration | `lincheck_si_test` | - | nightly |
+| tests/integration/txn_chaos_test.cpp | integration | `txn_chaos_n150` | - | nightly;serial |
 | tests/unit/cli/cli_status_test.cpp | unit | `cli_status_test` | - | fast |
 | tests/unit/raft/readindex_test.cpp | unit | `readindex_test` | - | fast |
 | tests/bench/read_bench_test.cpp | bench | `read_bench` | - | nightly |
 | tests/integration/lincheck_readindex_test.cpp | integration | `lincheck_readindex` | - | nightly |
 | tests/unit/cli/cli_cluster_get_test.cpp | unit | `cli_cluster_get_test` | - | fast |
 | tests/unit/cli/cli_region_test.cpp | unit | `cli_region_test` | - | fast |
+| tests/unit/cli/cli_txn_smoke_test.cpp | unit | `cli_txn_smoke` | - | fast |
 | tests/unit/txn/tso_test.cpp | unit | `tso_test` | - | fast |
 | tests/unit/txn/latch_concurrency_test.cpp | simulation | `latch_concurrency_test` | - | fast |
 | tests/unit/txn/mvcc_test.cpp | unit | `mvcc_test` | - | fast |
