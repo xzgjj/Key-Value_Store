@@ -79,6 +79,9 @@
 | M5 | 4 | ③可判定性：CI13 + mvcc 9例 + 全量48 | PASS | run_ci PASS×13；ctest 48/48；mvcc 9/9（roundtrip/写写冲突立即abort/锁冲突/幂等重放/commit锁归属校验+幂等/rollback墓碑+不动他者之锁/CheckTxnStatus三态/多版本快照读） |
 | M5 | 5 | ③契约与复用：三CF布局红线5 + Storage语义澄清 + dup收口 | PASS | 对账 3/3；数据布局=Default@start_ts/Lock@key/Write@commit_ts（ts大端，红线5）；关键澄清：Engine::get/write/scan 内部自带 CF 前缀（encode_user），MvccTxn 传 user_key+ts 后缀——首跑双重前缀致全挂；版本归属=剥8B尾后按用户key等值（starts_with 会把 k1 误配给 k）；be64_str 首版写反（110×2^56 现形）已修；重复块收口：for_each_write_version 共享骨架+include 序言重排 |
 | M5 | 6 | ③文档与红线：红线1（冲突立即abort）+ 红线2（rollback不动他者之锁）+ 确定性时钟偏差留痕 | PASS | docs PASS；guard PASS；prewrite 检查阶段先查后写失败即 abort（红线1）；rollback 只动本事务锁（红线2 红线2判定）+ 墓碑语义；TTL 判定显式收 now_ms 参数（与④b tick 同取向，不读墙钟可复现）——偏差记 notes-m5 待记 |
+| M5 | 7 | ④可判定性：CI13 + si_semantics 6例 + txn_resolve 2例 + 全量50 | PASS | run_ci PASS×13；ctest 50/50；si_semantics 6/6（同key写写冲突首提交胜/不同key并发/可重复读/无脏读blocked/读己之写/abort无痕）；txn_resolve 2/2（崩溃TTL决议回滚+无半提交+清锁后B可写/primary已提交→secondary正向推进） |
+| M5 | 8 | ④契约与复用：TxnClient 编排 + resolve_locks_of（三件套收口）+ TxnFixture 上收 | PASS | align 3/3；TxnClient client驱动2PC（primary=字典序最小key，primary先提交，红线8 server不跨region协调）；MvccTxn 加 resolve_locks_of（只认同 primary+start_ts 的锁，红线2）；决议编排 committed→正向推进/过期→清锁/未过期→blocked；Fixture 上收 testlib/txn_fixture.h（si/resolve 共用） |
+| M5 | 9 | ④文档与红线：测试踩坑（TSO占号撞号/begin清writes_/move生命周期）+ 确定性时钟 | PASS | 测试踩坑留痕：①tso.current()+1 占号不消费→begin 撞出同 start_ts（读己之写误命中）→一律真实分配；②begin() 清空 writes_（先 set 后 begin=空事务）；③move 到局部变量生命周期到作用域尾（同 latch 层教训）；决议时序全程注入 now_ms 零真实等待（ENG-04 禁 sleep 的确定性解法）；SPEC txn_resolve 标 slow 系真实 TTL 等待场景，注入时钟后 fast 可判定 |
 <!-- review:end -->
 
 ## 约定
