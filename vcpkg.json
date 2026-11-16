@@ -1,0 +1,12 @@
+{
+    "$comment": "依赖锁版清单（ENG-02/D0-4）。消费方式二选一：CI/MSVC 环境走 vcpkg（预设 win-vcpkg/linux-vcpkg，需 VCPKG_ROOT）；本机走 MSYS2 pacman 同名库——两者都经 CMake find_package 装配，构建脚本无感知。版本取 vcpkg 检出默认基线。",
+    "name": "tinykv",
+    "version-string": "0.1.0",
+    "dependencies": [
+        "asio",
+        "gtest",
+        "protobuf",
+        "spdlog",
+        "unordered_dense"
+    ]
+}

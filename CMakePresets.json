@@ -1,0 +1,126 @@
+{
+    "version": 6,
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 25,
+        "patch": 0
+    },
+    "configurePresets": [
+        {
+            "name": "base",
+            "hidden": true,
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+            }
+        },
+        {
+            "name": "win-debug",
+            "inherits": "base",
+            "displayName": "Windows · MSYS2 ucrt64 g++ · Debug",
+            "description": "要求 PATH 含 MSYS2 ucrt64（gcc/g++/ninja），否则不可用",
+            "environment": {
+                "CC": "gcc",
+                "CXX": "g++"
+            },
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug"
+            }
+        },
+        {
+            "name": "win-release",
+            "inherits": "win-debug",
+            "displayName": "Windows · MSYS2 ucrt64 g++ · Release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release"
+            }
+        },
+        {
+            "name": "linux-debug",
+            "inherits": "base",
+            "displayName": "Linux · 系统 g++ · Debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug"
+            }
+        },
+        {
+            "name": "linux-release",
+            "inherits": "linux-debug",
+            "displayName": "Linux · 系统 g++ · Release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release"
+            }
+        },
+        {
+            "name": "win-vcpkg",
+            "inherits": "win-debug",
+            "displayName": "Windows · vcpkg 依赖 · Debug",
+            "description": "依赖走 vcpkg 清单（vcpkg.json）；要求已设置 VCPKG_ROOT",
+            "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+        },
+        {
+            "name": "linux-vcpkg",
+            "inherits": "linux-debug",
+            "displayName": "Linux · vcpkg 依赖 · Debug",
+            "description": "依赖走 vcpkg 清单（vcpkg.json）；要求已设置 VCPKG_ROOT",
+            "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "win-debug",
+            "configurePreset": "win-debug"
+        },
+        {
+            "name": "win-release",
+            "configurePreset": "win-release"
+        },
+        {
+            "name": "linux-debug",
+            "configurePreset": "linux-debug"
+        },
+        {
+            "name": "linux-release",
+            "configurePreset": "linux-release"
+        },
+        {
+            "name": "win-vcpkg",
+            "configurePreset": "win-vcpkg"
+        },
+        {
+            "name": "linux-vcpkg",
+            "configurePreset": "linux-vcpkg"
+        }
+    ],
+    "testPresets": [
+        {
+            "name": "win-debug",
+            "configurePreset": "win-debug",
+            "output": {
+                "outputOnFailure": true
+            }
+        },
+        {
+            "name": "win-release",
+            "configurePreset": "win-release",
+            "output": {
+                "outputOnFailure": true
+            }
+        },
+        {
+            "name": "linux-debug",
+            "configurePreset": "linux-debug",
+            "output": {
+                "outputOnFailure": true
+            }
+        },
+        {
+            "name": "linux-release",
+            "configurePreset": "linux-release",
+            "output": {
+                "outputOnFailure": true
+            }
+        }
+    ]
+}

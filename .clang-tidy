@@ -1,0 +1,18 @@
+# TinyKV 静态检查基线（SPEC-0 §0.4 CI 步骤 2）。
+# 原则：清单宁窄勿滥——只启用经评审、可判定、低噪声的检查；ENG-04 违禁模式
+# （detach / 裸数组 new / sleep 对齐启动）不在此处，由 CI grep 步骤独立扫描。
+Checks: >
+  bugprone-*,
+  performance-*,
+  modernize-use-override,
+  modernize-use-nullptr,
+  modernize-use-emplace,
+  modernize-make-shared,
+  modernize-make-unique,
+  cppcoreguidelines-init-variables,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-narrowing-conversions,
+  -performance-unnecessary-value-param
+WarningsAsErrors: '*'
+HeaderFilterRegex: '^src/.*'
+FormatStyle: file
