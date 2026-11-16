@@ -5,7 +5,8 @@
 > 本页与仓库实际不一致时，以一致性检查（`tools/check_test_registry.py`）**明确失败**的形式暴露，不允许静默漂移。
 >
 > **配套材料**：设计总纲见 [TinyKV-CPP-设计思路与需求.md](../TinyKV-CPP-设计思路与需求.md) §8（测什么、达到什么）；
-> 登记表机器解析标记为 `<!-- registry:begin v1 -->` / `<!-- registry:end -->`，仅供检查脚本使用，人读以表格为准。
+> 登记表机器解析标记为 §4 标记区内的一对 HTML 注释（registry:begin v1 … registry:end），
+> 仅供检查脚本使用；本文其他位置一律不以字面形式书写该标记，人读以表格为准。
 
 ---
 
@@ -113,6 +114,7 @@ CI 用 `ctest -L unit|simulation|integration|bench` 选择，无需解析本页�
 > **表格语法约定**（检查脚本按此解析）：
 > - 每行 = 一个 ctest 测试 = 一种执行方式；列内多值用 `;` 分隔。
 > - `Scope`：测试资产路径（相对仓库根，文件或目录；目录则覆盖其下全部 `*_test.*`）。
+>   **Scope 列不加反引号**——检查脚本按字面路径匹配 Scope（仅 Runner 列用反引号提取 ctest 名）。
 > - `Level`：§3 词表之一。
 > - `Runner`：**首个反引号 token = 该行的 ctest 测试名（全表唯一）**，其后可跟 ` = ` 与 COMMAND 说明：
 >   - gtest 可执行直跑（ctest 名 = 可执行名）：`` `raft_step_test` ``；
@@ -124,9 +126,12 @@ CI 用 `ctest -L unit|simulation|integration|bench` 选择，无需解析本页�
 <!-- registry:begin v1 -->
 | Scope | Level | Runner | Args | Metadata |
 |---|---|---|---|---|
+| tests/unit/common/strong_id_test.cpp | unit | `strong_id_test` | - | fast |
+| tests/unit/common/kv_error_test.cpp | unit | `kv_error_test` | - | fast |
 <!-- registry:end -->
 
-> **当前为空是正确的**：仓库尚无代码。M0 基建落地时按下表首批登记（届时移入正式表）：
+> **M0 起步批次**（2026-11-16 落地登记，见上表）：encode / kv_error / strong_id / common_log 四个
+> common 单测（SPEC-0 §0.7 验收表）；其余测试随对应里程碑登记。备查原规划：
 >
 > | Scope | Level | Runner | Args | Metadata |
 > |---|---|---|---|---|
