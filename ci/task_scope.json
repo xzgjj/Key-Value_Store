@@ -1,5 +1,5 @@
 {
-  "task": "M0 基建（SPEC-0）+ 缺陷回归门禁：新增 bugfix 阶段（docs/bugs.md 登记表 + tools/ci/check_bugfix.py），把「修 bug 必须留下触发场景成为回归测试」落成 CI 硬约束，并写进代理必读文档",
+  "task": "M1 单机存储（SPEC-1）：Storage 接口 + 内存表 + WAL（CRC32C/只读重放/段轮转） → SST + Engine + Scan 归并 → Raw API 与本地 CLI",
   "paths": [
     ".gitignore",
     "README.md",
@@ -27,7 +27,7 @@
     ".clang-format",
     ".clang-tidy"
   ],
-  "reason": "基线部分为既有用户资产原样入库（.gitignore 按 D0-1 修正：docs/、tests/ 解除忽略，仓库根即工程根）；骨架与 common 为 SPEC-0 §0.1 交付物；测试新增走 docs/testing.md §5 SOP 登记先行。本次追加（2026-11-16 用户指令）：bugfix 阶段 + 缺陷登记表 + 协议/CLAUDE/CI/SPEC 四处对齐，属规则资产改动，已按 guard 要求单独列出等人工批准",
+  "reason": "按 SPEC-1 §1.1 交付物落地：接口与类型定义进 storage.h 复用 common 的 Cf/encode；WAL 遵守启动只读不改写红线；测试逐条登记 docs/testing.md §4",
   "bugfix": false,
   "fixes": [],
   "overflow_approved": true,
