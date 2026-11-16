@@ -18,6 +18,9 @@ endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
+# 依赖在根作用域解析：IMPORTED 目标全树可见（cmake/AddTest.cmake 需读取其 DLL 位置）
+find_package(protobuf CONFIG QUIET)
+
 # FetchContent 产物统一落 build/.deps（点目录）：
 # 1) 全部构建目录（含 TinyKV-CI 的 build/ci）共用一份下载，避免重复拉取；
 # 2) 三方源码自带的 .md 文档不得进入文档检查范围（docs CI 只认点前缀为工具噪声），
@@ -45,9 +48,10 @@ enable_testing()
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/CMakeLists.txt")
     add_subdirectory(src)
 endif()
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
-    add_subdirectory(tests)
-endif()
+# proto 先于 tests：add_tinykv_test 需读取 protobuf 导入目标的 DLL 位置注入测试进程 PATH
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/proto/CMakeLists.txt")
     add_subdirectory(proto)
+endif()
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
+    add_subdirectory(tests)
 endif()

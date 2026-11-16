@@ -1,0 +1,124 @@
+// 文件用途：KV 数据面契约——Raw API（M1，SPEC-1）与事务 API（M5，SPEC-4）骨架。
+// 归属：TinyKV-CPP（M0 基建；契约变更须先与用户核对，CLAUDE.md §15）。
+// 通用约定：key/value 一律 bytes（编码层见 src/common/encode.h，传输不解释内容）；
+//   ts 为 uint64 时间戳（物理值 Ms 逻辑钟，比较序 = 数值序）；错误见 RegionError。
+
+syntax = "proto3";
+
+package tinykv.kvpb;
+
+import "raft_cmdpb.proto";
+
+// 列族选择：语义与 src/common/encode.h::Cf 一致（事务列 Write/Lock 见 SPEC-4）
+enum CfName {
+    CF_DEFAULT = 0;  // 默认数据列（Raw API 与事务 data 列共用）
+    CF_WRITE = 1;    // 事务 write 列（提交版本指针）
+    CF_LOCK = 2;     // 事务 lock 列（预写锁）
+}
+
+// ---------- Raw API（M1） ----------
+
+message RawGetRequest {
+    bytes key = 1;        // 必填：非空（空 key 由服务端拒绝 InvalidArgument）
+    CfName cf = 2;        // 可空：缺省 = CF_DEFAULT
+}
+message RawGetResponse {
+    bytes value = 1;      // 可空：key 不存在时 not set（存在性用 found 区分）
+    bool found = 2;       // key 是否存在（区别"空值"与"无值"）
+    tinykv.cmdpb.RegionError region_error = 3;  // 可空：region 级失败时其余字段不可信
+}
+
+message RawPutRequest {
+    bytes key = 1;        // 必填：非空
+    bytes value = 2;      // 必填：可空字节串（空 value 合法，与删除区分）
+    CfName cf = 3;
+    uint64 ttl = 4;       // 秒；0 = 永不过期（M1 预留，服务端当前忽略）
+}
+message RawPutResponse {
+    tinykv.cmdpb.RegionError region_error = 1;  // 可空
+}
+
+message RawDeleteRequest {
+    bytes key = 1;        // 必填：非空；删除不存在的 key 视为成功（幂等）
+    CfName cf = 2;
+}
+message RawDeleteResponse {
+    tinykv.cmdpb.RegionError region_error = 1;
+}
+
+message RawScanRequest {
+    bytes start_key = 1;  // 扫描起点（含）；空 = CF 起始
+    uint32 limit = 2;     // 必填：本页最大返回条数（>0；服务端据此截断）
+    CfName cf = 3;
+    bool key_only = 4;    // true 时不返回 value（省带宽）
+}
+message RawScanResponse {
+    message Pair {
+        bytes key = 1;
+        bytes value = 2;  // key_only=true 时 not set
+    }
+    repeated Pair pairs = 1;       // 字节序升序（编码保证）；可为空（无数据）
+    bytes end_key = 2;             // 可空：本页截断处（续扫游标；未截断时 not set）
+    tinykv.cmdpb.RegionError region_error = 3;
+}
+
+// ---------- 事务 API（M5，Percolator SI） ----------
+
+message TxnGetRequest {
+    bytes key = 1;              // 必填：非空
+    uint64 start_ts = 2;        // 事务开始时间戳（TSO 分配）
+}
+message TxnGetResponse {
+    bytes value = 1;            // 可空：SI 快照内不可见或不存在时 not set
+    bool found = 2;
+    tinykv.cmdpb.RegionError region_error = 3;
+}
+
+message Mutation {
+    enum Op {
+        PUT = 0;
+        DELETE = 1;
+    }
+    Op op = 1;
+    bytes key = 2;              // 必填：非空
+    bytes value = 3;            // op=PUT 时必填（可空字节串）；op=DELETE 时忽略
+}
+
+message TxnPrewriteRequest {
+    repeated Mutation mutations = 1;  // 必填：非空（批量一等公民；≥1 条）
+    bytes primary_lock = 2;           // 必填：主锁 key（mutations 之一；提交/回滚的锚点）
+    uint64 start_ts = 3;
+    uint64 lock_ttl = 4;              // 毫秒：锁存活时长
+}
+message TxnPrewriteResponse {
+    repeated bytes already_exist_keys = 1;  // 与既有锁冲突且不可覆盖的 key；可为空
+    tinykv.cmdpb.RegionError region_error = 2;
+}
+
+message TxnCommitRequest {
+    repeated bytes keys = 1;    // 必填：非空（含 primary）
+    uint64 start_ts = 2;
+    uint64 commit_ts = 3;       // 必须 > start_ts（服务端校验）
+}
+message TxnCommitResponse {
+    tinykv.cmdpb.RegionError region_error = 1;
+}
+
+message TxnBatchRollbackRequest {
+    repeated bytes keys = 1;    // 必填：非空（含 primary）
+    uint64 start_ts = 2;
+}
+message TxnBatchRollbackResponse {
+    tinykv.cmdpb.RegionError region_error = 1;
+}
+
+message TxnCheckTxnStatusRequest {
+    bytes primary_key = 1;      // 必填：主锁 key
+    uint64 lock_start_ts = 2;   // 被查事务的 start_ts
+    uint64 caller_start_ts = 3; // 发起查询的事务 start_ts（锁过期回滚判定边界）
+}
+message TxnCheckTxnStatusResponse {
+    uint64 commit_ts = 1;       // 已提交时非 0；未提交/已回滚 = 0
+    uint64 lock_ttl = 2;        // 未过期时剩余 TTL（毫秒）；过期/已终态 = 0
+    tinykv.cmdpb.RegionError region_error = 3;
+}

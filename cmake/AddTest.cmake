@@ -35,9 +35,43 @@ function(add_tinykv_test NAME)
 
     add_test(NAME ${NAME} COMMAND ${NAME} ${T_ARGS})
 
+    # 双标签：Level 标签供分层选择（ctest -L unit|simulation|…，testing.md §3），
+    # 速度标签供 CI 分发（fast=PR 必跑 / nightly=夜跑，testing.md §6 与 TinyKV-CI code 阶段）。
+    set(_TINYKV_SPEED nightly)
+    if(T_LEVEL STREQUAL "unit" OR T_LEVEL STREQUAL "simulation")
+        set(_TINYKV_SPEED fast)
+    endif()
     set_tests_properties(${NAME} PROPERTIES
-        LABELS "${T_LEVEL}"
+        LABELS "${T_LEVEL};${_TINYKV_SPEED}"
         ENVIRONMENT "${T_ENV}")
+
+    # Windows 动态依赖的测试进程 PATH 注入：链接 protobuf 时（MinGW/vcpkg 共享构建），
+    # 其 DLL 所在目录前置到测试进程 PATH，使测试不依赖调用方 shell 的 PATH 纪律。
+    if(WIN32 AND TARGET protobuf::libprotobuf)
+        set(_TINYKV_PBUF_LOC "")
+        get_target_property(_TINYKV_PBUF_CFGS protobuf::libprotobuf IMPORTED_CONFIGURATIONS)
+        foreach(_TINYKV_CFG IN LISTS _TINYKV_PBUF_CFGS)
+            get_target_property(_loc protobuf::libprotobuf IMPORTED_LOCATION_${_TINYKV_CFG})
+            if(_loc AND NOT _loc MATCHES "NOTFOUND$")
+                set(_TINYKV_PBUF_LOC "${_loc}")
+                break()
+            endif()
+        endforeach()
+        if(NOT _TINYKV_PBUF_LOC)
+            get_target_property(_TINYKV_PBUF_LOC protobuf::libprotobuf IMPORTED_LOCATION)
+        endif()
+        if(_TINYKV_PBUF_LOC AND NOT _TINYKV_PBUF_LOC MATCHES "NOTFOUND$")
+            # import 库/静态库与 DLL 同前缀：lib/libprotobuf.dll.a → <prefix>/lib/../bin
+            get_filename_component(_TINYKV_PBUF_LIB_DIR "${_TINYKV_PBUF_LOC}" DIRECTORY)
+            get_filename_component(_TINYKV_PBUF_DLL_DIR "${_TINYKV_PBUF_LIB_DIR}/../bin" ABSOLUTE)
+            if(IS_DIRECTORY "${_TINYKV_PBUF_DLL_DIR}")
+                set_property(TEST ${NAME} APPEND PROPERTY ENVIRONMENT_MODIFICATION
+                    "PATH=path_list_prepend:${_TINYKV_PBUF_DLL_DIR}")
+            endif()
+        endif()
+        unset(_TINYKV_PBUF_LOC)
+        unset(_TINYKV_PBUF_CFGS)
+    endif()
     if(T_TIMEOUT)
         set_property(TEST ${NAME} PROPERTY TIMEOUT ${T_TIMEOUT})
     endif()

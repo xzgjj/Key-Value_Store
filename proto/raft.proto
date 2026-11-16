@@ -1,0 +1,59 @@
+// 文件用途：Raft 纯状态机消息契约（SPEC-0 §0.3.2 七字段复用集合，白皮书消息集对齐）。
+// 归属：TinyKV-CPP（M0 基建；字段变更须过 13 条清单评审并与用户核对，CLAUDE.md §15）。
+// 通用约定：uint64 的 ID 语义随字段名（Term/LogIndex/PeerId，见 src/common/ids.h）；
+//   默认值 0 在 proto3 中不落线——"可空"用 0 表示，读取方不得依赖 0 的业务含义。
+
+syntax = "proto3";
+
+package tinykv.raftpb;
+
+// 消息类型：集合与语义见 SPEC-0 §0.3.2 表（七字段复用，禁止为单类消息私加持久字段）
+enum MessageId {
+    MSG_HUP = 0;                     // 内部：选举超时触发竞选（无字段负载）
+    MSG_BEAT = 1;                    // 内部：leader 心跳计时维持（无字段负载）
+    MSG_PROPOSE = 2;                 // → leader：客户端提案（entries[] 批量一等公民）
+    MSG_APPEND = 3;                  // leader→follower：追加日志
+    MSG_APPEND_RESPONSE = 4;         // follower→leader：追加回执（拒绝时带冲突 term）
+    MSG_REQUEST_VOTE = 5;            // candidate→all：拉票
+    MSG_REQUEST_VOTE_RESPONSE = 6;   // all→candidate：投票回执（拒绝不重置对方计时器）
+    MSG_HEARTBEAT = 7;               // leader→follower：只带元数据（PERF-08 红线：禁止全量日志）
+    MSG_HEARTBEAT_RESPONSE = 8;      // follower→leader：ReadIndex quorum 确认载体（M3）
+    MSG_SNAPSHOT = 9;                // leader→follower：快照模式入口（InstallSnapshot 走 M3 独立流通道）
+}
+
+// region 内副本身份（跨消息复用）
+message Peer {
+    uint64 id = 1;        // PeerId：region 内唯一副本标识
+    uint64 store_id = 2;  // StoreId：副本所在物理节点（路由/传输用；M4 调度器维护）
+}
+
+// 日志条目：序列化载荷为 raft_cmdpb.RaftCmdRequest
+message Entry {
+    uint64 index = 1;  // LogIndex：全局日志槽位，从 1 起；0 非法
+    uint64 term = 2;   // Term：条目写入时的任期；0 非法
+    bytes data = 3;    // 可空：empty entry 合法（leader 提交占位），data 为空时不可执行
+}
+
+// 快照元数据（载荷文件本体走 Store 分发，不经 Raft 消息；M3 落地分块流）
+message SnapshotMeta {
+    uint64 index = 1;            // LogIndex：快照覆盖到的日志位点
+    uint64 term = 2;             // Term：该位点的任期
+    repeated Peer peers = 3;     // 快照内成员列表；可为空（单副本 region）
+}
+
+// Raft 消息：七字段复用集合（term/index/log_term/commit/reject/entries/snapshot），
+// 字段语义随 id 变化（下表）；私加字段视为接口变更须过评审。
+message Message {
+    MessageId id = 1;    // 消息类型
+    uint64 term = 2;     // 全类型通用：发送方当前任期
+    uint64 from = 3;     // PeerId：发送方副本（传输层回路由用）
+    uint64 to = 4;       // PeerId：接收方副本
+    uint64 index = 5;    // 语义随 id：APPEND=prev_log_index；APPEND_RESPONSE=已匹配 index；
+                         //            REQUEST_VOTE=候选者最后 index；HEARTBEAT_RESPONSE=已复制 index
+    uint64 log_term = 6; // 语义随 id：APPEND=prev_log_term；APPEND_RESPONSE=冲突处 term（整段回退用）；
+                         //            REQUEST_VOTE=候选者最后条目 term
+    uint64 commit = 7;   // LogIndex：leader 已提交位点（APPEND/HEARTBEAT 携带；其余类型为 0 不可信）
+    bool reject = 8;     // 仅 *RESPONSE 类型：true=拒绝；REQUEST_VOTE_RESPONSE 拒绝时不重置对方计时器
+    repeated Entry entries = 9;    // 仅 MSG_APPEND/MSG_PROPOSE：追加/提案条目；可为空
+    SnapshotMeta snapshot = 10;    // 仅 MSG_SNAPSHOT：快照元数据；其余类型不设置
+}

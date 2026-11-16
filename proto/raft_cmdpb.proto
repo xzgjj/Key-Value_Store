@@ -1,0 +1,136 @@
+// 文件用途：Raft 命令契约——客户端请求经 Raft 复制的载体（SPEC-0 §0.3.2）。
+// 归属：TinyKV-CPP（M0 基建；契约变更须先与用户核对，CLAUDE.md §15）。
+// 关键设计（白皮书作者 QPS 0 分教训）：requests[] 为一等公民——一次 Raft 提案可携带
+// 多条命令；服务端不得假设 requests.size()==1。
+
+syntax = "proto3";
+
+package tinykv.cmdpb;
+
+import "raft.proto";
+
+// region 世代：version 随 split/merge 递增、conf_ver 随成员变更递增（语义 SPEC-3）
+message RegionEpoch {
+    uint64 version = 1;   // 数据世代
+    uint64 conf_ver = 2;  // 配置世代
+}
+
+// region 级错误：与 src/common/error.h 的 KvError 变体一一对应（UX-03 三要素进 hint 字段）。
+// 定义在本文件以避免 kv.proto ↔ raft_cmdpb.proto 循环 import。
+message RegionError {
+    message KeyNotInRegion {
+        bytes key = 1;         // 越界 key 原文
+        uint64 region_id = 2;  // 拒绝请求的 region（供路由表剔除）
+    }
+    message StaleEpoch {
+        uint64 region_id = 1;
+        RegionEpoch have = 2;  // 请求方携带的旧世代
+        RegionEpoch want = 3;  // region 当前世代（客户端刷新路由）
+    }
+    message NotLeader {
+        uint64 region_id = 1;
+        tinykv.raftpb.Peer leader_hint = 2;  // 可空（not set）：未知 leader 时不得伪造
+    }
+    oneof detail {
+        KeyNotInRegion key_not_in_region = 1;
+        StaleEpoch stale_epoch = 2;
+        NotLeader not_leader = 3;
+    }
+}
+
+// 请求头：路由与幂等判定依据
+message RaftRequestHeader {
+    uint64 region_id = 1;          // RegionId：目标 region
+    RegionEpoch epoch = 2;         // 必填：客户端路由快照的世代（落后则回 StaleEpoch）
+    tinykv.raftpb.Peer peer = 3;         // 必填：客户端认为的 leader 副本（错则回 NotLeader+hint）
+    uint64 client_id = 4;          // ClientId：客户端会话标识（M2 去重表键之一）
+    uint64 sequence_id = 5;        // SeqNo：会话内单调递增（M2 去重表键之二；重试幂等）
+}
+
+// 读命令（leader 本地执行或 ReadIndex，见 SPEC-2）
+message GetRequest {
+    bytes key = 1;   // 必填：非空
+    bytes cf = 2;    // 可空：缺省 = Default 列（字符串名与 encode.h::Cf 一致）
+}
+message ScanRequest {
+    bytes start_key = 1;  // 起点（含）；空 = region 起始
+    uint32 limit = 2;     // 必填：>0，本页条数上限
+}
+message ReadIndexRequest {}  // 无负载：M3 读线性化位点请求
+
+// 写命令（走 Raft 复制）
+message PutRequest {
+    bytes key = 1;      // 必填：非空
+    bytes value = 2;    // 必填：可空字节串（空 value 合法）
+    bytes cf = 3;       // 可空
+}
+message DeleteRequest {
+    bytes key = 1;      // 必填：非空（幂等）
+    bytes cf = 2;       // 可空
+}
+
+// 单条命令：oneof 定型（扩展 = 新增命令类型，开闭原则）
+message Request {
+    oneof cmd {
+        GetRequest get = 1;
+        PutRequest put = 2;
+        DeleteRequest delete_ = 3;
+        ScanRequest scan = 4;
+        ReadIndexRequest read_index = 5;
+    }
+}
+
+// 管理命令（M4 起生效；M0 仅占位定型）
+message SplitRequest {
+    bytes split_key = 1;        // 必填：新 region 的起始 key（原 key 范围内）
+    uint64 new_region_id = 2;   // RegionId：由调度器预分配
+    repeated tinykv.raftpb.Peer new_peers = 3;  // 新 region 初始副本
+}
+message CompactLogRequest {
+    uint64 compact_index = 1;   // LogIndex：压缩到该位点（含）之前
+    uint64 compact_term = 2;    // Term：该位点的任期（一致性校验）
+}
+message TransferLeaderRequest {
+    tinykv.raftpb.Peer peer = 1;      // 目标新 leader
+}
+
+message AdminRequest {
+    oneof cmd {
+        SplitRequest split = 1;
+        CompactLogRequest compact_log = 2;
+        TransferLeaderRequest transfer_leader = 3;
+    }
+}
+
+// Raft 复制命令（Entry.data 载荷）：requests[] 批量一等公民 + 可选 admin（互斥共存：
+// admin 存在时 requests 应为空——服务端校验，违反回 InvalidArgument）
+message RaftCmdRequest {
+    RaftRequestHeader header = 1;  // 必填
+    repeated Request requests = 2; // 批量命令；admin 置位时应为空
+    AdminRequest admin = 3;        // 可空：管理命令单发
+}
+
+// 命令回执：与 requests 顺序一一对应（批量请求批量回执）
+message ResponseHeader {
+    uint64 region_id = 1;
+    RegionError error = 2;   // 可空：见 kv.proto RegionError（region 级失败时 cmd_responses 不可信）
+}
+message GetResponse {
+    bytes value = 1;   // 可空
+    bool found = 2;    // 区别"空值"与"无值"
+}
+message ScanResponse {
+    repeated bytes keys = 1;    // 与 values 等长成对；字节序升序
+    repeated bytes values = 2;  // 下一页游标语义随 SPEC-2 定版
+}
+message PutResponse {}
+message DeleteResponse {}
+message ReadIndexResponse {
+    uint64 read_index = 1;   // LogIndex：读操作的线性化位点（M3）
+}
+message AdminResponse {}
+
+message RaftCmdResponse {
+    ResponseHeader header = 1;              // 必填
+    repeated bytes cmd_responses = 2;       // 占位：M2 定版为 oneof 序列（顺序对应 requests）
+}
