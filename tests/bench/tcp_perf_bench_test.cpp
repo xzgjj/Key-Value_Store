@@ -206,6 +206,58 @@ double run_batch(NodeGroup& g, std::uint64_t client, int ops, int per_request) {
     return records / secs;
 }
 
+// 流水线压测（PERF-01 正确口径）：单个生产者线程维护大小为 window 的 in-flight 滑动窗口——
+// 先投递 window 条，此后每收回执一条就补投一条，始终保持约 window 条在飞。这既让 group commit
+// 窗口内有并发写可合并，又把 in-flight 数量有界化（SPEC-2 D2-3：inflight_max_entries=256），
+// 避免一次性投递全部导致 in-flight 无界膨胀、回执表线性增长（实测 1000 条时吞吐假性跌到 195/s）。
+// batch=1（每条一个 put）、fsync=on、3 节点真 TCP 均不变；只把「串行延迟测量」改为「吞吐测量」。
+double run_pipeline(NodeGroup& g, std::uint64_t client, int ops, int window) {
+    const auto t0 = std::chrono::steady_clock::now();
+    int submitted = 0;
+    int done = 0;
+    auto submit_one = [&](int i) {
+        const auto seq = static_cast<std::uint64_t>(i) + 1;
+        cmdpb::RaftCmdRequest req;
+        req.mutable_header()->set_client_id(client);
+        req.mutable_header()->set_sequence_id(seq);
+        auto* one = req.add_requests();                        // batch=1
+        one->mutable_put()->set_key("pp:" + std::to_string(i));
+        one->mutable_put()->set_value("v");
+        g.submit(Submission{.client = client, .seq = seq, .req = req});
+    };
+    while (done < ops) {
+        while (submitted < ops && submitted - done < window) {
+            submit_one(submitted);
+            ++submitted;
+        }
+        const auto seq = static_cast<std::uint64_t>(done) + 1;
+        for (int spin = 0; spin < 5000000; ++spin) {
+            if (g.take_reply(client, seq)) {
+                ++done;
+                break;
+            }
+            std::this_thread::yield();
+        }
+    }
+    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    return static_cast<double>(done) / secs;
+}
+
+// PERF-01：流水线下的写吞吐（batch=1、fsync=on、3 节点真 TCP）。group commit 在此场景才有效。
+TEST(TcpPerf, Perf01ConcurrentWriteThroughput) {
+    NodeGroup g(true);
+    ASSERT_TRUE(g.wait_leader()) << "未选出 leader";
+    constexpr int kOps = 200;
+    constexpr int kWindow = 256;   // SPEC-2 D2-3 inflight_max_entries
+    // client 必须落在 NodeGroup::update_leader 的回执收集范围（1..4）内，否则回执无人收集
+    const double qps = run_pipeline(g, 3, kOps, kWindow);
+    std::printf("[perf] D 真TCP fsync=on batch=1 流水线(window=%d) : %.0f records/s (S0=2000)\n",
+                kWindow, qps);
+    EXPECT_GT(qps, 0.0) << "流水线压测装置未产生任何有效写回执";
+    // S0 是交付底线（设计文档 §3.4）。C++ 基准默认不做硬失败以适配慢机器；
+    // 达标与否以打印数字对照 S0 人工判定，并在 notes-m2 §8 留证据。
+}
+
 TEST(TcpPerf, FsyncCostAndBatchAmplification) {
     // A：fsync 开启，单条写——端到端真实数字
     double a = 0.0;

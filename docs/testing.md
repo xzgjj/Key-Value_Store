@@ -135,6 +135,7 @@ CI 用 `ctest -L unit|simulation|integration|bench` 选择，无需解析本页�
 | tests/unit/storage/wal_test.cpp | unit | `wal_test` | - | fast |
 | tests/unit/storage/sst_test.cpp | unit | `sst_test` | - | fast |
 | tests/unit/storage/wal_crash_test.cpp | unit | `wal_crash_test` | - | fast |
+| tests/unit/storage/wal_group_commit_test.cpp | unit | `wal_group_commit_test` | - | fast |
 | tests/unit/storage/engine_get_put_test.cpp | unit | `engine_get_put_test` | - | fast |
 | tests/unit/storage/engine_scan_test.cpp | unit | `engine_scan_test` | - | fast |
 | tests/unit/storage/engine_cf_test.cpp | unit | `engine_cf_test` | - | fast |

@@ -100,3 +100,30 @@ apply 时被 `encode_key` 拒绝。这类错误只有真跑 apply 才暴露—�
 - 修法明确：WAL 增加提交队列——写入者登记后由一个提交者批量 fsync 并唤醒全部等待者。
   这是 SPEC-1 §1.4.2 里点名提到、但实现时跳过的机制。
 - 因此 PERF-01 仍记**未达标**，且有了可复现的测量装置（本文件就是它的证据）。
+
+### 8.1 [2026-11-16 接手会话] group commit 已实现 + PERF-01 根因二次修正
+
+**做了什么**：WAL 加后台提交者（`src/storage/wal.cpp`），append 内 fwrite+fflush 后即返回，
+2ms 窗口内多条写合并成一次 fsync（延迟确认窗口，用户选定；进程级崩溃不丢，掉电最多丢一窗）。
+`crash_recovery_test`、`wal_test`、`wal_crash_test` 全绿，新增 `wal_group_commit_test` 3 例。
+
+**实测（本会话，group commit 后）**：
+
+| 装置 | 配置 | 实测 | 对比改动前 |
+|---|---|---|---|
+| `write_bench` 单机 batch=1 fsync=on | 无共识 | **74728 QPS / P99 0.04ms** | 3184 → **23.5×** |
+| `tcp_perf_bench` D 流水线 batch=1 fsync=on | 集群 | **648 records/s** | 197 → 3.3× |
+| `tcp_perf_bench` A 串行 batch=1 fsync=on | 集群 | 455 records/s | 201 → 2.3× |
+| `tcp_perf_bench` B 串行 batch=1 fsync=off | 集群 | 692 records/s | 784（同级）|
+| `tcp_perf_bench` C batch=64 fsync=off | 集群 | 31287 records/s | 33765（同级）|
+
+**根因二次修正（比 §8 又深一层，如实记）**：
+- §8 说"缺 group commit 是主因"——对单机成立（3184→74728，铁证），**对集群不成立**。
+- group commit 后集群 A(455)≈B(692)，fsync 已离开关键路径；但**即使完全不 fsync，单条写也只有 ~700/s**。
+- 说明集群 batch=1 的稳态瓶颈是**每条写一次共识往返（AppendEntries→多数派→apply→回执）+ 泵调度粒度**，
+  与落盘无关。S0=2k 在本进程内泵 + 真 TCP 短连接的装置下不可达，天花板约 ~700/s。
+- C(batch=64)=31287 证明共识摊薄有效——要提速必须改共识管线（批量 propose 合并 append、pipeline 复制），
+  这超出"补 group commit 收口 M2"的范围，属独立优化/M4 议题。
+
+**结论（不许自圆其说）**：group commit 已交付且收益巨大；**PERF-01 的 S0=2000 仍未达标**，
+M2 维持"部分完成"。已如实记录天花板与根因，待用户决策（放宽口径 / 追加共识管线优化 / 接受部分完成进 M4）。

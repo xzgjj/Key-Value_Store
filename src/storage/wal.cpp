@@ -148,13 +148,63 @@ std::string segment_name(std::uint32_t index) {
 
 }  // namespace
 
-Wal::Wal(std::filesystem::path dir, bool fsync_on_commit, std::size_t segment_bytes)
-    : dir_(std::move(dir)), fsync_on_commit_(fsync_on_commit), segment_bytes_(segment_bytes) {}
+Wal::Wal(std::filesystem::path dir, bool fsync_on_commit, std::size_t segment_bytes,
+         std::chrono::milliseconds commit_window)
+    : dir_(std::move(dir)),
+      fsync_on_commit_(fsync_on_commit),
+      segment_bytes_(segment_bytes),
+      commit_window_(commit_window) {}
 
 Wal::~Wal() {
+    // 先停后台提交者并等待其退出（绝不 detach），再把窗口内残留的写强制刷盘
+    stop_.store(true, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(commit_mu_);   // 与提交者的 wait 用同一把锁，唤醒不丢
+    }
+    cv_.notify_all();
+    if (committer_.joinable()) {
+        committer_.join();
+    }
     if (file_ != nullptr) {
+        (void)sync_locked();   // 析构尽力落盘；错误无法向调用者报告，但不影响 fclose
         std::fclose(file_);
         file_ = nullptr;
+    }
+}
+
+void Wal::commit_loop() {
+    // 窗口等待用独立的 commit_mu_，**不占用写路径的 mu_**：否则 append 每批都被锁竞争拖住，
+    // 写入被后台攒批饿死（实测 B 场景 fsync=off 掉到 3/s）。只有真正 fsync 的瞬间才短暂持 mu_。
+    for (;;) {
+        {
+            std::unique_lock<std::mutex> lock(commit_mu_);
+            cv_.wait(lock, [this] {
+                return dirty_.load(std::memory_order_acquire) || stop_.load(std::memory_order_acquire);
+            });
+            if (stop_.load(std::memory_order_acquire) && !dirty_.load(std::memory_order_acquire)) {
+                return;   // 停止且无残留：退出
+            }
+            if (!stop_.load(std::memory_order_acquire)) {
+                cv_.wait_for(lock, commit_window_, [this] {
+                    return stop_.load(std::memory_order_acquire);
+                });
+            }
+        }
+        if (!dirty_.load(std::memory_order_acquire)) {
+            continue;
+        }
+        // 尊重 fsync_on_commit_：关掉时只 fflush（数据进页缓存），不做真 fsync
+        std::lock_guard<std::mutex> lock(mu_);
+        if (dirty_.load(std::memory_order_acquire)) {
+            if (std::fflush(file_) != 0) {
+                continue;
+            }
+            if (fsync_on_commit_ && raw_fsync(file_) != 0) {
+                continue;
+            }
+            fsync_count_.fetch_add(1, std::memory_order_relaxed);
+            dirty_.store(false, std::memory_order_release);
+        }
     }
 }
 
@@ -184,24 +234,26 @@ result<std::unique_ptr<Wal>> Wal::open(const WalOptions& opt) {
         return std::unexpected(
             IoFailed{.path = opt.dir.string(), .reason = "create_directories: " + ec.message()});
     }
-    auto wal = std::unique_ptr<Wal>(new Wal(opt.dir, opt.fsync_on_commit, opt.segment_bytes));
+    auto wal = std::unique_ptr<Wal>(
+        new Wal(opt.dir, opt.fsync_on_commit, opt.segment_bytes, opt.commit_window));
     const auto segs = list_segments(opt.dir);
     if (segs.empty()) {
         wal->next_index_ = 1;
         if (auto r = wal->open_new_segment(); !r) {
             return std::unexpected(r.error());
         }
-        return wal;
+    } else {
+        // 续写到最新段：不新建、不改写既有内容
+        wal->next_index_ = segs.back().first;
+        wal->current_ = segs.back().second;
+        wal->file_ = std::fopen(wal->current_.string().c_str(), "ab");
+        if (wal->file_ == nullptr) {
+            return std::unexpected(
+                IoFailed{.path = wal->current_.string(), .reason = "fopen(ab) 失败"});
+        }
+        wal->current_size_ = std::filesystem::file_size(wal->current_, ec);
     }
-    // 续写到最新段：不新建、不改写既有内容
-    wal->next_index_ = segs.back().first;
-    wal->current_ = segs.back().second;
-    wal->file_ = std::fopen(wal->current_.string().c_str(), "ab");
-    if (wal->file_ == nullptr) {
-        return std::unexpected(
-            IoFailed{.path = wal->current_.string(), .reason = "fopen(ab) 失败"});
-    }
-    wal->current_size_ = std::filesystem::file_size(wal->current_, ec);
+    wal->committer_ = std::thread([p = wal.get()] { p->commit_loop(); });
     return wal;
 }
 
@@ -274,20 +326,22 @@ result<void> Wal::clear_all(const std::filesystem::path& dir) {
     return {};
 }
 
-result<void> Wal::flush_to_disk() {
+result<void> Wal::sync_locked() {
+    if (file_ == nullptr) {
+        return std::unexpected(IoFailed{.path = dir_.string(), .reason = "段文件未打开"});
+    }
     if (std::fflush(file_) != 0) {
         return std::unexpected(IoFailed{.path = current_.string(), .reason = "fflush 失败"});
     }
-    if (fsync_on_commit_ && raw_fsync(file_) != 0) {
+    if (raw_fsync(file_) != 0) {
         return std::unexpected(IoFailed{.path = current_.string(), .reason = "fsync 失败"});
     }
+    fsync_count_.fetch_add(1, std::memory_order_relaxed);
+    dirty_.store(false, std::memory_order_release);
     return {};
 }
 
 result<void> Wal::append(std::span<const Modify> batch) {
-    if (file_ == nullptr) {
-        return std::unexpected(IoFailed{.path = dir_.string(), .reason = "段文件未打开"});
-    }
     std::string payload;
     encode_batch(batch, payload);
     if (payload.size() > kMaxRecordBytes) {
@@ -299,8 +353,17 @@ result<void> Wal::append(std::span<const Modify> batch) {
     put_u32(record, crc32c(std::as_bytes(std::span{payload})));
     record.append(payload);
 
+    std::lock_guard<std::mutex> lock(mu_);
+    if (file_ == nullptr) {
+        return std::unexpected(IoFailed{.path = dir_.string(), .reason = "段文件未打开"});
+    }
     // 仅在段内已有数据时考虑切换：空段上直接写，避免"单条记录超上限"造成段号跳号
     if (current_size_ > 0 && current_size_ + record.size() > segment_bytes_) {
+        if (dirty_.load(std::memory_order_acquire)) {
+            if (auto r = sync_locked(); !r) {   // 切段前先把旧段落盘
+                return r;
+            }
+        }
         if (auto r = open_new_segment(); !r) {
             return r;
         }
@@ -308,21 +371,19 @@ result<void> Wal::append(std::span<const Modify> batch) {
     if (std::fwrite(record.data(), 1, record.size(), file_) != record.size()) {
         return std::unexpected(IoFailed{.path = current_.string(), .reason = "fwrite 失败"});
     }
-    current_size_ += record.size();
-    return flush_to_disk();
-}
-
-result<void> Wal::sync() {
-    if (file_ == nullptr) {
-        return std::unexpected(IoFailed{.path = dir_.string(), .reason = "段文件未打开"});
-    }
+    // 立即 fflush 推进内核页缓存：进程级崩溃不丢；fsync 延后到后台批量窗口
     if (std::fflush(file_) != 0) {
         return std::unexpected(IoFailed{.path = current_.string(), .reason = "fflush 失败"});
     }
-    if (raw_fsync(file_) != 0) {
-        return std::unexpected(IoFailed{.path = current_.string(), .reason = "fsync 失败"});
-    }
+    current_size_ += record.size();
+    dirty_.store(true, std::memory_order_release);
+    cv_.notify_all();
     return {};
+}
+
+result<void> Wal::sync() {
+    std::lock_guard<std::mutex> lock(mu_);
+    return sync_locked();
 }
 
 }  // namespace tinykv
