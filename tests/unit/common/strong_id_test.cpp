@@ -7,10 +7,14 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <concepts>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <type_traits>
+#include <unordered_set>
+#include <vector>
 
 namespace {
 
@@ -73,6 +77,66 @@ TEST(StrongId, EightAliasesAreDistinctTypes) {
     static_assert(!std::same_as<tinykv::RegionId, tinykv::PeerId>);
     static_assert(!std::same_as<tinykv::SeqNo, tinykv::Ts>);
     static_assert(!std::same_as<tinykv::StoreId, tinykv::ClientId>);
+}
+
+// ---------- 可用性：值初始化、无效值、单调推进、零开销 ----------
+// 场景理解：只有"编译期禁错"还不够——类型要能真的装进容器、能表达"未设置"，
+// 否则上层会用 optional/魔法值绕过强类型，防线反而从侧面被拆掉。
+
+TEST(StrongId, ValueInitializableForContainers) {
+    // 回归点：M0 版无默认构造 → 不满足 DefaultInsertable → vector<LogIndex>(n) 编译失败。
+    // Raft 里按键值下标建定长数组是常态，这条必须可用。
+    static_assert(std::default_initializable<Term>);
+    std::vector<LogIndex> by_index(4);
+    std::array<Term, 3> terms{};
+    for (const auto& idx : by_index) {
+        EXPECT_EQ(idx, LogIndex::invalid());  // 值初始化 = 未设置，而非随机的 0
+    }
+    for (const auto& t : terms) {
+        EXPECT_FALSE(t.is_valid());
+    }
+    EXPECT_EQ(by_index.size(), 4U);
+}
+
+TEST(StrongId, InvalidIsExplicitAndNamed) {
+    // "未设置"必须能被显式表达与判断：有效值从 1 起（proto/raft.proto：index/term 0 非法）
+    constexpr Term none = Term::invalid();
+    constexpr Term first{1};
+    static_assert(none.value == 0);
+    static_assert(!none.is_valid());
+    static_assert(first.is_valid());
+    EXPECT_EQ(Term{}, none);  // 默认构造与 invalid() 是同一语义
+}
+
+TEST(StrongId, NextAndPrevCarryIntent) {
+    // 算术运算符被禁，但 index±1 是 Raft 常态：用命名函数让意图可读、可 grep
+    constexpr LogIndex i{7};
+    static_assert(i.next() == LogIndex{8});
+    static_assert(i.prev() == LogIndex{6});
+    static_assert(i.next().prev() == i);
+    EXPECT_LT(i, i.next());
+}
+
+TEST(StrongId, StdHashWorksWithoutKnowingTag) {
+    // 回归点：M0 版只有 HashFor<TermTag>，调用方必须穿透 typedef 才知道 Tag。
+    static_assert(std::is_invocable_r_v<size_t, std::hash<Term>, Term>);
+    std::unordered_set<RegionId> regions;
+    regions.insert(RegionId{1});
+    regions.insert(RegionId{1});  // 重复插入应被去重（比较 + 哈希共同生效）
+    regions.insert(RegionId{2});
+    EXPECT_EQ(regions.size(), 2U);
+
+    // constexpr：编译期即可用（C++26 的 std::hash 才 constexpr，这里自己实现混合）
+    constexpr size_t h1 = std::hash<Term>{}(Term{3});
+    constexpr size_t h2 = std::hash<Term>{}(Term{4});
+    static_assert(h1 != h2);
+}
+
+TEST(StrongId, ZeroOverheadLayout) {
+    // 头文件宣称"零开销"：无 vtable、无额外存储——用 sizeof 把这句话变成可判定的
+    static_assert(sizeof(Term) == sizeof(uint64_t));
+    static_assert(std::is_trivially_copyable_v<Term>);
+    static_assert(std::is_standard_layout_v<Term>);
 }
 
 }  // namespace

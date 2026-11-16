@@ -41,8 +41,38 @@ TEST(KvError, StaleEpochCarriesHaveAndWant) {
                                  .want = RegionEpoch{.version = 2, .conf_ver = 1}};
     const auto& v = std::get<StaleEpoch>(e);
     EXPECT_EQ(v.region_id, RegionId{7});
-    EXPECT_LT(v.have, v.want);  // 落后事实可判定
+    EXPECT_TRUE(v.want.is_newer_than(v.have));  // 落后事实由命名函数判定，而非词典序
     EXPECT_NE(v.have, v.want);
+}
+
+// ---------- epoch 语义：两维计数器不是全序（回归点，2026-11-16） ----------
+// 场景理解：M0 版给 RegionEpoch 默认了 operator<=>，等于提供词典序比较。
+// 混序（一维大、一维小）时词典序会给出一个"看起来合理"的结论，而 TiKV 要求
+// 将其视为不可比并按 stale 拒绝。这条用例把错误结论钉死。
+
+TEST(RegionEpoch, MonotonicAdvanceIsNewer) {
+    constexpr RegionEpoch old_epoch{.version = 1, .conf_ver = 0};
+    constexpr RegionEpoch new_epoch{.version = 2, .conf_ver = 1};
+    static_assert(new_epoch.is_newer_than(old_epoch));
+    static_assert(!old_epoch.is_newer_than(new_epoch));
+    static_assert(!old_epoch.is_newer_than(old_epoch));  // 自己不比"更自己"
+    static_assert(old_epoch.is_comparable_with(new_epoch));
+}
+
+TEST(RegionEpoch, MixedOrderIsIncomparableNotGreater) {
+    // have={v2,cv1} vs want={v1,cv5}：词典序会判 have 更大（错误），实际不可比
+    constexpr RegionEpoch have{.version = 2, .conf_ver = 1};
+    constexpr RegionEpoch want{.version = 1, .conf_ver = 5};
+    static_assert(!have.is_newer_than(want));
+    static_assert(!want.is_newer_than(have));
+    static_assert(!have.is_comparable_with(want));  // 必须走 StaleEpoch 拒绝路径
+}
+
+TEST(RegionEpoch, SingleDimensionAdvanceCounts) {
+    // 只推进 conf_ver（成员变更）或只推进 version（split）都算更新
+    constexpr RegionEpoch base{.version = 3, .conf_ver = 3};
+    static_assert(RegionEpoch{.version = 3, .conf_ver = 4}.is_newer_than(base));
+    static_assert(RegionEpoch{.version = 4, .conf_ver = 3}.is_newer_than(base));
 }
 
 TEST(KvError, NotLeaderHintIsOptional) {

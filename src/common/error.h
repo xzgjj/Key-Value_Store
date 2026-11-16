@@ -25,12 +25,30 @@ namespace tinykv {
 
 // region 世代：version 随 split/merge 递增、conf_ver 随成员变更递增
 // （完整语义与推进规则见 SPEC-3，M0 仅作 StaleEpoch 的载体字段）
+//
+// 为什么只有 == 而没有 <=>（2026-11-16 改）：两维计数器的正确关系不是全序——
+// 若 have={v2,cv1}、want={v1,cv5}，词典序会判 have > want（"不落后"），
+// 而 TiKV 语义下这是**混序**，请求必须按 stale 拒绝。默认 operator<=> 等于
+// 免费提供一个会判错的比较入口，所以删掉，只留两个命名正确的判定函数。
 struct RegionEpoch {
     uint64_t version{};
     uint64_t conf_ver{};
 
     friend constexpr bool operator==(RegionEpoch, RegionEpoch) = default;
-    friend constexpr auto operator<=>(RegionEpoch, RegionEpoch) = default;
+
+    // 严格更新：两维均不小于对方，且至少一维更大（epoch 只单调推进，不允许回退）
+    [[nodiscard]] constexpr bool is_newer_than(const RegionEpoch& other) const noexcept {
+        const bool version_ge = version >= other.version;
+        const bool conf_ge = conf_ver >= other.conf_ver;
+        return version_ge && conf_ge && (version != other.version || conf_ver != other.conf_ver);
+    }
+
+    // 是否可比：两维不交叉。混序（一维大、一维小）在 TiKV 语义下不存在先后，
+    // 调用方必须按 StaleEpoch 拒绝并要求客户端刷新，而不是猜一个方向。
+    [[nodiscard]] constexpr bool is_comparable_with(const RegionEpoch& other) const noexcept {
+        return (version >= other.version && conf_ver >= other.conf_ver) ||
+               (version <= other.version && conf_ver <= other.conf_ver);
+    }
 };
 
 // 六个错误变体：字段名即语义（what / why / hint 三要素见文件头矩阵）

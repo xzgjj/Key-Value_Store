@@ -13,6 +13,9 @@
 | M0 | 1 | 可判定性：CI 全阶段 + 单元测试 | PASS | run_ci PASS×13；ctest 5/5 |
 | M0 | 2 | 契约与复用：对齐检查 + 登记对账 + 检查器自测 | PASS | align 三项全 PASS；registry PASS；selftest PASS |
 | M0 | 3 | 文档与红线：预算/查重/链接 + scope/guard + SPEC-0 红线抽查 | PASS | docs PASS×4；scope/guard PASS；src 无空目录、StrongId 无隐式转换 |
+| M1 | 1 | 可判定性：CI 全阶段 + 全部测试 | PASS | run_ci PASS×13；ctest 15/15（含 bench） |
+| M1 | 2 | 契约与复用：对齐三项 + 登记对账 + 缺陷门禁 + 检查器自测 | PASS | align 3/3；registry PASS；bugfix PASS；selftest PASS |
+| M1 | 3 | 文档与红线：预算/查重/链接 + guard + 恢复路径不改写/无 detach 抽查 | PASS | docs PASS×4；guard PASS；src 无空目录；恢复路径无 truncate |
 <!-- review:end -->
 
 ## 约定
