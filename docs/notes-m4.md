@@ -56,9 +56,9 @@
 | FUNC-11/REL-03 | `snapshot_test` + `snapshot_chunk_test`（SPEC 名 sim_snapshot_test） | ✅ | 单块兼容 + 分块/CRC/窗口全路径 |
 | FUNC-12 | `sim_scheduler_test` | ✅ | 4 例（汇总/AskSplit 不撞号/三轮单调收敛/限速） |
 | ENG-05 | `mr_chaos_n150` | ✅ | 150/150 种子；证据 `build/evidence/nightly/mr_chaos_150.txt`（构建产物） |
-| PERF-07 | `split_bench` | ❌ 未建 | 1M key ≤60s（S0）——挂账见 §5 |
-| PERF-08 | `heartbeat_bandwidth_bench` | ❌ 未建 | 心跳带宽规模化统计——挂账见 §5 |
-| PERF-09 | `snapshot_bench` | ❌ 未建 | 快照 ≥10MB/s（S0）——挂账见 §5 |
+| PERF-07 | `split_bench` | ✅ 实测 | 1M key + 4 次 split = **6.3s**（159k keys/s），S0 ≤60s 余量 ~10× |
+| PERF-08 | `heartbeat_bandwidth_bench` | ✅ 实测 | 心跳体积与日志长度无关（10条 24B vs 1000条 28B，varint 增量）；外推 1000 regions 仅 547 KB/s |
+| PERF-09 | `snapshot_bench` | ✅ 实测 | 13.7MB 快照流 = **11 MB/s**（S0 ≥10 达标） |
 | UX-04 | `docs/notes-m4-troubleshoot.md` | ✅ | 注入"split 假成功"缺陷，仅凭 CLI 三点交叉定位（见演练记录） |
 | UX-06 | 本文件 | ✅ | — |
 
@@ -68,9 +68,6 @@ SPEC 建议名与实际登记名的差异均为"sim_ 前缀/scale 后缀"级—�
 
 ## 5. 挂账（需要用户决策）
 
-- **PERF-07/08/09 三个 bench**：语义前置已具备（split 全链路、心跳只带元数据、分块快照），
-  缺的是夜跑规模的吞吐/耗时测量与 JSON 证据物。建议作为独立小任务（各一个 bench 二进制
-  + 登记 + 一轮 review），不阻塞 M4 语义验收。
 - **trace 埋点**：开关+落盘通道已交付，Peer 内按 region 粒度的事件埋点（apply/慢日志/
   leader 变更）待 daemon 化时接入（见 docs/M4-CLI-TRACE-DRAFT.md §4）。
 - **契约待追认**（4 份草稿）：M4-TRANSFERLEADER-DRAFT（枚举编号 12、放弃是否回执）、
@@ -78,7 +75,7 @@ SPEC 建议名与实际登记名的差异均为"sim_ 前缀/scale 后缀"级—�
 
 ## 6. 数字
 
-- 测试：ctest 42/42（unit 27 / simulation 4 / integration 6 / bench 4 + cli smoke）；
+- 测试：ctest 45/45（unit 27 / simulation 4 / integration 6 / bench 7 + cli smoke）；
   M4 期间新增登记 9 个测试文件、17 个用例文件级登记。
 - review：M4 共 30 轮（每子层 3 轮），全部 PASS；align 3/3 每层复核。
 - CI：13 项门禁每层全绿；CI 期间修复的超限：复杂度 3 处（⑥ serve 26、⑦b CLI 23/19、⑦c 26）、

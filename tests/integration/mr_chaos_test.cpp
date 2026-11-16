@@ -32,53 +32,6 @@ using tinykv::raftstore::Region;
 
 constexpr int kRounds = 150;
 
-RaftCmdRequest make_split_request(std::uint64_t client, std::uint64_t seq,
-                                         const std::string& key, std::uint64_t new_id) {
-    RaftCmdRequest req;
-    req.mutable_header()->set_client_id(client);
-    req.mutable_header()->set_sequence_id(seq);
-    auto* admin = req.mutable_admin();
-    admin->mutable_split()->set_split_key(key);
-    admin->mutable_split()->set_new_region_id(new_id);
-    return req;
-}
-
-// REL-05 的可判定形式：区间排序后首尾相接（首 start=""、尾 end=""、相邻共享边界）
-bool contiguous(const std::vector<Region>& regions) {
-    std::vector<Region> sorted = regions;
-    std::sort(sorted.begin(), sorted.end(),
-              [](const Region& a, const Region& b) { return a.start_key < b.start_key; });
-    if (sorted.empty() || !sorted.front().start_key.empty() || !sorted.back().end_key.empty()) {
-        return false;
-    }
-    for (std::size_t i = 1; i < sorted.size(); ++i) {
-        if (sorted[i - 1].end_key != sorted[i].start_key) {
-            return false;
-        }
-    }
-    return true;
-}
-
-// region 视图的指纹（跨副本一致性比对用）
-std::string regions_fingerprint(const std::vector<Region>& regions) {
-    std::vector<Region> sorted = regions;
-    std::sort(sorted.begin(), sorted.end(),
-              [](const Region& a, const Region& b) { return a.start_key < b.start_key; });
-    std::string out;
-    for (const auto& r : sorted) {
-        out += std::to_string(r.id.value) + ":" + r.start_key + ".." + r.end_key + ";";
-    }
-    return out;
-}
-
-int count_leaders(PeerCluster& c) {
-    int n = 0;
-    for (int i = 0; i < c.size(); ++i) {
-        n += c.peer(i).is_leader() ? 1 : 0;
-    }
-    return n;
-}
-
 // 单拍注入：分区抖动 + 提案 + split + confchange（i==20 无分区时 split，三副本各 apply 各视图）
 void inject(PeerCluster& c, int i, std::mt19937& rng, std::vector<std::string>& written) {
     for (int n = 0; n < c.size(); ++n) {
@@ -102,7 +55,7 @@ void inject(PeerCluster& c, int i, std::mt19937& rng, std::vector<std::string>& 
         written.push_back("k" + std::to_string(i));
     }
     if (i == 20) {
-        (void)c.peer(leader).propose(make_split_request(88, 1, "m", 2));
+        (void)c.peer(leader).propose(make_split_admin(88, 1, "m", 2));
         for (int k = 0; k < 50; ++k) {
             c.pump();
         }
@@ -139,7 +92,7 @@ bool converged(PeerCluster& c) {
 bool mr_invariants_hold(PeerCluster& c, const std::vector<std::string>& written) {
     const auto fp = regions_fingerprint(c.meta(0).all_regions());
     for (int n = 0; n < c.size(); ++n) {
-        if (!contiguous(c.meta(n).all_regions())) {
+        if (!regions_contiguous(c.meta(n).all_regions())) {
             return false;
         }
         if (regions_fingerprint(c.meta(n).all_regions()) != fp) {

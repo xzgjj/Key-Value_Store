@@ -168,6 +168,9 @@ CI 用 `ctest -L unit|simulation|integration|bench` 选择，无需解析本页�
 | tests/integration/crash_recovery_test.cpp | integration | `crash_recovery_test` | - | nightly |
 | tests/bench/cluster_bench_test.cpp | bench | `cluster_bench` | - | nightly |
 | tests/bench/tcp_perf_bench_test.cpp | bench | `tcp_perf_bench` | - | nightly |
+| tests/bench/split_bench_test.cpp | bench | `split_bench` | - | nightly |
+| tests/bench/heartbeat_bandwidth_bench_test.cpp | bench | `heartbeat_bandwidth_bench` | - | nightly |
+| tests/bench/snapshot_bench_test.cpp | bench | `snapshot_bench` | - | nightly |
 <!-- registry:end -->
 
 > **M0 起步批次**（2026-11-16 落地登记，见上表）：encode / kv_error / strong_id / common_log 四个

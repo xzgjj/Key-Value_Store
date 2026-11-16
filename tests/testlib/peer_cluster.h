@@ -15,6 +15,8 @@
 
 #include "raft/raft.h"
 #include "raft_test_base.h"
+#include <algorithm>
+
 #include "raftstore/peer.h"
 #include "storage/engine.h"
 #include "temp_dir.h"
@@ -23,6 +25,52 @@ namespace tinykv::testlib {
 
 using tinykv::raft::ReadMode;
 using tinykv::raftstore::Peer;
+
+// ---- M4 共享 region 断言助手（⑦c/⑦d 与 bench 共用，集中于此避免复制粘贴） ----
+
+// REL-05 的可判定形式：区间排序后首尾相接（首 start=""、尾 end=""、相邻共享边界）
+[[nodiscard]] inline bool regions_contiguous(std::vector<tinykv::raftstore::Region> regions) {
+    std::sort(regions.begin(), regions.end(),
+              [](const tinykv::raftstore::Region& a, const tinykv::raftstore::Region& b) {
+                  return a.start_key < b.start_key;
+              });
+    if (regions.empty() || !regions.front().start_key.empty() ||
+        !regions.back().end_key.empty()) {
+        return false;
+    }
+    for (std::size_t i = 1; i < regions.size(); ++i) {
+        if (regions[i - 1].end_key != regions[i].start_key) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// region 视图指纹（跨副本一致性比对用）
+[[nodiscard]] inline std::string regions_fingerprint(
+    std::vector<tinykv::raftstore::Region> regions) {
+    std::sort(regions.begin(), regions.end(),
+              [](const tinykv::raftstore::Region& a, const tinykv::raftstore::Region& b) {
+                  return a.start_key < b.start_key;
+              });
+    std::string out;
+    for (const auto& r : regions) {
+        out += std::to_string(r.id.value) + ":" + r.start_key + ".." + r.end_key + ";";
+    }
+    return out;
+}
+
+// Split admin 提案构造（split_test/mr_chaos/bench 共用）
+[[nodiscard]] inline tinykv::cmdpb::RaftCmdRequest make_split_admin(
+    std::uint64_t client, std::uint64_t seq, const std::string& key, std::uint64_t new_region_id) {
+    tinykv::cmdpb::RaftCmdRequest req;
+    req.mutable_header()->set_client_id(client);
+    req.mutable_header()->set_sequence_id(seq);
+    auto* admin = req.mutable_admin();
+    admin->mutable_split()->set_split_key(key);
+    admin->mutable_split()->set_new_region_id(new_region_id);
+    return req;
+}
 
 class PeerCluster {
 public:
@@ -210,5 +258,14 @@ private:
     std::vector<std::unique_ptr<tinykv::raftstore::StoreMeta>> metas_;
     std::set<int> partition_;
 };
+
+// 唯一 leader 计数（收敛判据共用）
+[[nodiscard]] inline int count_leaders(PeerCluster& c) {
+    int n = 0;
+    for (int i = 0; i < c.size(); ++i) {
+        n += c.peer(i).is_leader() ? 1 : 0;
+    }
+    return n;
+}
 
 }  // namespace tinykv::testlib

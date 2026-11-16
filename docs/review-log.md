@@ -70,6 +70,9 @@
 | M4 | 31 | ⑦d可判定性：UX-04演练真注入+CLI定位 + 全量42 + CI13 | PASS | 注入 peer.cpp execute split 短路缺陷→cli_region 红（regions 无 id2/epoch 未推进）→还原→绿；演练记录 docs/notes-m4-troubleshoot.md；build/evidence/nightly/mr_chaos_150.txt 生成；ctest 42/42；run_ci PASS×13 |
 | M4 | 32 | ⑦d验收对照：§3.7 逐行核对（9✅/3挂账/2部分） | PASS | notes-m4 §4 逐行表：FUNC-07~12/ENG-05/UX-04/UX-06 全✅；FUNC-08 部分（1M规模挂PERF-07）；PERF-07/08/09 bench 未建如实挂账（§5 待用户决策）；SPEC 建议名↔实际登记名映射注明；登记名以 testing.md §4 为唯一事实来源 |
 | M4 | 33 | ⑦d文档收尾：notes-m4 UX-06 + guard/scope/docs + 契约待追认汇总 | PASS | docs PASS；guard PASS；scope 补 notes-m4-troubleshoot；notes-m4 含 P3 踩坑 6 条与 4 份契约草稿待追认清单；M4 30+3 轮 review 全 PASS |
+| M4 | 34 | bench补齐①：split_bench 1M key 6.3s + 心跳不变量 + 快照 11MB/s，全量45 | PASS | ctest 45/45；CI PASS×13；split 6.3s（S0≤60s 余10×）/ 心跳体积与日志长度无关（varint 增量合法，结构断言 entries==0）/ 快照 11MB/s（S0≥10）；证据物 build/evidence/bench/{split,heartbeat,snapshot}.txt |
+| M4 | 35 | bench补齐②：踩坑与修复（字典序≠数值序/分区忘解除/tick驱动缺失）+ 共享助手收口 | PASS | 三真坑：key 未补零致字典序≠数值序（split 点判断被打乱）→定宽7位补零；计时循环忘解除分区→set_partition({})；pump-only 循环 leader 永不发消息→补 tick。重复代码上收 testlib（regions_contiguous/fingerprint/make_split_admin/count_leaders）；implementation_plan 压缩回预算内 |
+| M4 | 36 | bench补齐③：notes-m4 验收表三项改✅实测 + 挂账仅剩 trace 埋点与契约追认 | PASS | notes-m4 §4 PERF-07/08/09 全改✅实测数字；§5 挂账移除 bench 项；ctest 45/45；CI PASS×13；登记 45⇄45 |
 <!-- review:end -->
 
 ## 约定
