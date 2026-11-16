@@ -121,6 +121,21 @@ best-effort 副本、租约过期读失败。理由见设计文档 §7 与 §3.7
 
 结论：⑦a 全程停在档 1–2；两处测试场景修正不涉及升档。
 
+## 4.4 [2026-11-16] M5 全程复核（①~⑥，按 §4"换里程碑时"触发）
+
+- **档 1 复用本仓**：kv.proto 事务消息骨架（M0 已核对版零改动）；Engine 三 CF（M0 预留
+  Default/Write/Lock）；encode_ts_key 大端编码（M0 骨架）；调度器位置兼任 TSO（架构图要求）；
+  Peer/raft 提案管线（SPEC-3）；Cluster/PeerCluster/TxnFixture 测试基建。
+- **档 2 语言机制**：std::variant/expected/optional/虚分派/全序加锁（std::mutex 槽位）；
+  确定性时钟注入（tick/now_ms 参数化）；零新依赖，不引 gRPC、不引 JSON 库、不生成 service stub。
+- **档 3/4 未触发**：无三方库引入，无自造数据结构（Lock 值用定长二进制布局，编码集中一处）。
+- **KVstorageBaseRaft-cpp 反模式复核**：其"事务无锁检测/读直连存储"未借鉴；本实现写写冲突
+  立即 abort（红线1）+ 锁冲突结构化上抛，X-1~X-6 无回潮。
+- **Mooncake 架构原则复核**：client 驱动 2PC + server 只保证单 key 原子性（白皮书原文），
+  控制面/数据面分离延续 M-1；TSO 批量授时窗口语义对齐 M-2。
+
+结论：M5 全程停在档 1–2；测试踩坑 8 条均为实现修正不涉升档。
+
 ## 5. 与对齐检查的关系
 
 `align` 阶段（`tools/ci/check_align.py`）只校验可判定项（契约集合、命令引用、违禁模式），

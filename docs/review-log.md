@@ -88,6 +88,9 @@
 | M5 | 13 | ⑥可判定性：CI13 + cli_txn_smoke 4例 + lincheck_si 5种子 + txn_chaos_n150 150轮 + 全量54 | PASS | run_ci PASS×13；ctest 54/54；cli_txn_smoke 4/4（--help/demo/顶层露出/交互式退码1）；lincheck_si 审计三条 SI 不变量（无脏读含读己之写/首提交不被覆盖/终态账本一致）；txn_chaos_n150 150/150（崩溃级联决议+三副本一致） |
 | M5 | 14 | ⑥契约与复用：CLI txn 契约（§11 --help+demo）+ 审计器 + 复杂度回修 | PASS | align 3/3；CLI txn 按 SPEC 验收口径（--help+示例）落版：一次性进程无法跨调用持事务→交互式子命令退码1指向用法（偏差记 notes-m5）；cli.md §11 契约文档；lincheck 审计器无脏读含读己之写分支；chaos 崩溃级联决议语义（prewrite 撞未过期锁→按编排先决议再重试）；复杂度 20/17→抽 crash_prewrite/resolve_and_verify |
 | M5 | 15 | ⑥文档与红线：红线3（决议后无永久锁）150轮证明 + 读己之写最后胜出修复 | PASS | docs PASS；guard PASS；红线3 经 150 轮崩溃级联决议证明（全部副本锁全清）；发现并修复 TxnClient::get 读己之写取首写而非末写（与 prewrite 落盘不一致）——lincheck 审计器捕获的第三个真实缺陷；登记 54⇄54 |
+| M5 | 16 | ⑦可判定性：CI13 + notes-m5 + 证据表逐行核对 + 全量54 | PASS | run_ci PASS×13；ctest 54/54；notes-m5 §4 逐行：8行✅（P0 全达）+ FUNC-17 P2 挂账；SPEC 建议名↔登记名映射注明；证据物 build/evidence/nightly/txn_chaos_150.txt |
+| M5 | 17 | ⑦契约与复用：M5 全程档1-2复核（复用判定顺序遵守） | PASS | align 3/3；复用台账：档1 复用 kv.proto 事务骨架（M0 已核对零改动）/Engine 三CF/encode_ts_key/scheduler 位置；档2 语言机制（variant/expected/optional/虚分派）；档3/4 未触发（零新依赖，不引 grpc/不做 JSON）；X-1~X-6 无回潮 |
+| M5 | 18 | ⑦文档收尾：挂账清单 + M5 累计18轮全PASS | PASS | 挂账：GC(FUNC-17 P2)/CLI 交互式事务(随daemon化)/txn读路径线性一致(ReadIndex结合)/M5-TXNERROR-DRAFT 追认；M5 18 轮全 PASS；ctest 54/54；CI PASS×13；登记 54⇄54 |
 <!-- review:end -->
 
 ## 约定
