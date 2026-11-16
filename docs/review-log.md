@@ -34,6 +34,12 @@
 | M2 | 10 | 可判定性：30 个测试 + 真 TCP 压测驱动 | PASS | ctest 30/30；CI PASS×13；tcp_perf_bench A/B/C 三阶段出数 |
 | M2 | 11 | 契约与复用：对齐三项 + 登记对账 | PASS | align 3/3；registry PASS |
 | M2 | 12 | 文档与红线：预算/查重/链接 + guard | PASS | docs PASS×4；guard PASS |
+| M2 | 13 | A-group commit 可判定性：CI 13 项 + wal_group_commit 3 例 + crash/wal 回归 | PASS | run_ci PASS×13；ctest 31/31（含 wal_group_commit 3 例、crash_recovery、raft_chaos_n150）；单机 write_bench 3184→74728 QPS |
+| M2 | 14 | A-group commit 契约与复用：对齐三项 + 登记对账 + 延迟窗口语义核对 | PASS | align 3/3；registry PASS（wal_group_commit_test 已登记）；behavior_change_approved 留痕；proto 契约未改 |
+| M2 | 15 | A-group commit 文档与红线：预算/查重/链接 + guard + 打开即持久语义回归 | PASS | docs PASS×4；guard PASS；crash_recovery_test 绿证明进程级崩溃不丢；notes-m2 §8.1 如实记 S0 未达标 |
+| M4 | 1 | ①可判定性：CI 13 项 + entry_batch 5 例 + 全量 32 测试 + PERF-01 达标 | PASS | run_ci PASS×13；ctest 32/32；entry_batch_test 5/5；管道化 batch=1 fsync=on 28433/s > S0 2000 |
+| M4 | 2 | ①契约与复用：proto 未改 + 对齐三项 + 回执不串/去重/非leader拒绝回归 | PASS | align 3/3；registry PASS；proto 零改动；raft_kv_test 非leader拒绝回归经全量测试抓出并修复 |
+| M4 | 3 | ①文档与红线：预算/查重/链接 + scope/guard + Envelope 向后兼容/无 detach | PASS | docs PASS×4；guard PASS；try_unpack 兼容旧 data；committer 无 detach；banned 0 命中 |
 <!-- review:end -->
 
 ## 约定

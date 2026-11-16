@@ -1,5 +1,5 @@
-// 文件用途：peer.h 的实现——提案序列化、apply 执行、按 client 去重。
-// 归属：TinyKV-CPP（M2 RaftKV，FUNC-04）。
+// 文件用途：peer.h 的实现——提案序列化、批量 propose、apply 执行、按 client 去重。
+// 归属：TinyKV-CPP（M2 RaftKV，FUNC-04；M4 第①层批量 propose）。
 
 #include "raftstore/peer.h"
 
@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "common/error.h"
+#include "raft/entry_batch.h"
 
 namespace tinykv::raftstore {
 namespace {
@@ -58,7 +59,31 @@ result<void> Peer::propose(const cmdpb::RaftCmdRequest& req) {
     if (!req.SerializeToString(&payload)) {
         return std::unexpected(Corrupted{.where = "peer:propose", .reason = "请求序列化失败"});
     }
+    if (batching_) {
+        // M4 第①层：攒批，等 on_ready 时合并成一次共识往返（Envelope）。
+        // 必须先查 role：入队绕过了 raft_->propose 的 NotLeader 检查，非 leader 要在此挡住，
+        // 否则非 leader 会"假成功"接收提案（raft_kv_test 的非 leader 拒绝语义会被破坏）。
+        if (!raft_->is_leader()) {
+            return std::unexpected(
+                NotLeader{.region_id = RegionId{0}, .leader_hint = std::nullopt});
+        }
+        pending_proposals_.push_back(std::move(payload));
+        return {};
+    }
     return raft_->propose(std::move(payload));
+}
+
+result<bool> Peer::flush_proposals() {
+    if (pending_proposals_.empty()) {
+        return false;
+    }
+    std::vector<std::string> batch;
+    batch.swap(pending_proposals_);
+    // 单条也走 Envelope（格式统一、解包路径单一）；仅一条时不额外增加往返
+    if (auto r = raft_->propose(raft::pack_entries(batch)); !r) {
+        return std::unexpected(r.error());
+    }
+    return true;
 }
 
 result<GetResult> Peer::get(Cf cf, std::string_view key) const {
@@ -181,6 +206,12 @@ result<GetResult> Peer::read_directly(Cf cf, std::string_view key) const {
 }
 
 result<std::size_t> Peer::on_ready() {
+    // M4 第①层：先把窗口内攒批的请求合成一次 propose，再取 Ready 推进共识
+    if (batching_) {
+        if (auto r = flush_proposals(); !r) {
+            return std::unexpected(r.error());
+        }
+    }
     auto ready = raft_->take_ready();
     for (auto& m : ready.messages) {
         outbox_.push_back(std::move(m));   // 交给传输层，不能丢
@@ -222,6 +253,22 @@ result<std::size_t> Peer::on_ready() {
 result<void> Peer::apply_entry(const raftpb::Entry& entry) {
     if (entry.data().empty()) {
         return {};   // 空条目（leader 占位）无需执行
+    }
+    // M4 第①层：Envelope 解包后逐条 execute——每条用各自 header 的 (client,seq) 登记回执，
+    // 批量不串回执；解包失败说明是旧的单条 protobuf data，走原路径（向后兼容崩溃重放）。
+    std::vector<std::string> items;
+    if (raft::try_unpack_entries(entry.data(), items)) {
+        for (const auto& data : items) {
+            cmdpb::RaftCmdRequest req;
+            if (!req.ParseFromString(data)) {
+                return std::unexpected(
+                    Corrupted{.where = "peer:apply-batch", .reason = "批内命令反序列化失败"});
+            }
+            if (auto r = execute(req); !r) {
+                return r;
+            }
+        }
+        return {};
     }
     cmdpb::RaftCmdRequest req;
     if (!req.ParseFromString(entry.data())) {

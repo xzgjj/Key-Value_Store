@@ -86,6 +86,11 @@ public:
     [[nodiscard]] raft::Raft& raft() { return *raft_; }
     [[nodiscard]] std::uint64_t applied_seq(std::uint64_t client_id) const;
 
+    // ---- M4 第①层：批量 propose（默认开启；关掉可作 batch=1 对比基线） ----
+    // 攒批窗口内多条请求合成一次共识往返（Envelope），apply 解包逐条执行、回执不串。
+    void enable_batching(bool on) { batching_ = on; }
+    [[nodiscard]] bool batching_enabled() const { return batching_; }
+
 private:
     Peer(std::unique_ptr<raft::RaftLog> log, Storage& storage, const raft::Config& cfg);
 
@@ -93,6 +98,8 @@ private:
 
     [[nodiscard]] result<void> apply_entry(const raftpb::Entry& entry);
     [[nodiscard]] result<void> execute(const cmdpb::RaftCmdRequest& req);
+    // 把攒批队列打包成 Envelope 一次 propose；返回是否产生了提案
+    [[nodiscard]] result<bool> flush_proposals();
     void fill_get_reply(const cmdpb::GetRequest& get, cmdpb::GetResponse* out);
     void fill_scan_reply(const cmdpb::ScanRequest& scan, cmdpb::ScanResponse* out);
 
@@ -114,6 +121,10 @@ private:
     std::vector<std::uint64_t> confirmed_reads_;
     std::map<std::pair<std::uint64_t, std::uint64_t>, cmdpb::RaftCmdResponse> replies_;
     std::uint64_t applied_{0};   // 已 apply 到的日志位点
+
+    // 批量 propose：待攒批的已序列化请求 + 开关（默认开启）
+    std::vector<std::string> pending_proposals_;
+    bool batching_{true};
 };
 
 }  // namespace tinykv::raftstore

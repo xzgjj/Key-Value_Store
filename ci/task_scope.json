@@ -1,25 +1,25 @@
 {
-  "task": "A：补 WAL group commit 收口 M2——WAL 提交队列+延迟确认窗口，压测修正为并发流水线，使 PERF-01(batch=1,fsync=on,3节点) 真实达标",
+  "task": "M4 第①层：Envelope 批量 propose——spike 验证通过后正式实现，把管道化 batch=1 fsync=on 推到 PERF-01 S0",
   "paths": [
-    "src/storage/wal.h",
-    "src/storage/wal.cpp",
+    "src/raft/entry_batch.h",
+    "src/raftstore/peer.h",
+    "src/raftstore/peer.cpp",
+    "tests/unit/raft/entry_batch_test.cpp",
+    "tests/unit/raft/CMakeLists.txt",
     "tests/bench/tcp_perf_bench_test.cpp",
-    "tests/unit/storage/CMakeLists.txt",
-    "tests/unit/storage/wal_group_commit_test.cpp",
     "docs/testing.md",
-    "docs/notes-m2.md",
-    "docs/bugs.md",
+    "docs/review-log.md",
     "implementation-notes.md",
     "implementation_plan.md",
     "diff.md",
     "notes.txt"
   ],
-  "reason": "依 HANDOVER §6.A 与用户授权。group commit 是 SPEC-1 §1.4.2 点名机制；基准串行口径无法测出并发合并收益，保持 batch=1/fsync=on/3节点不变仅修正测量模型。设计见 implementation-notes §6。",
+  "reason": "依用户指令『spike 验证通过后并入 M4 第①层』。Envelope 是 Entry.data 内部格式，不改 proto 契约；spike 已验证 batch=1 从 648→26289/s 且全量 31/31 通过。正式实现补齐单测与边界。设计见 implementation-notes §7 第①层。",
   "bugfix": false,
   "fixes": [],
   "overflow_approved": true,
   "behavior_change_approved": true,
   "rule_asset_approved": false,
-  "behavior_change_note": "用户 2026-11-16 会话明确选择『延迟确认窗口』：append 返回后允许 ≤2ms 掉电丢数据窗口，以提升吞吐。Wal::sync() 保留同步刷盘原语；进程级崩溃语义不变。契约同步写入 implementation-notes §6.3。",
-  "approver": "用户（2026-11-16：授权 WAL 核心区开工 + 同意并发压测口径修正 + 选择延迟确认窗口）"
+  "behavior_change_note": "Envelope 批处理默认开启：on_ready 前把攒批的多条 propose 合成一次共识往返。回执语义不变（每条用各自 header 的 client/seq 登记）；向后兼容旧的单条 protobuf data。用户 2026-11-16 指令：spike 验证通过后并入 M4 正式实现。",
+  "approver": "用户（2026-11-16：授权含义 A spike 验证通过后在 M4 第①层正式实现）"
 }
