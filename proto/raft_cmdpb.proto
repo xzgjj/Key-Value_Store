@@ -1,5 +1,5 @@
-// 文件用途：Raft 命令契约——客户端请求经 Raft 复制的载体（SPEC-0 §0.3.2）。
-// 归属：TinyKV-CPP（M0 基建；契约变更须先与用户核对，CLAUDE.md §15）。
+// 文件用途：Raft 命令契约——客户端请求经 Raft 复制的载体（SPEC-0 §0.3.2、SPEC-2 §2.3.2）。
+// 归属：TinyKV-CPP（M2 契约层；契约变更须先与用户核对，CLAUDE.md §15）。
 // 关键设计（白皮书作者 QPS 0 分教训）：requests[] 为一等公民——一次 Raft 提案可携带
 // 多条命令；服务端不得假设 requests.size()==1。
 
@@ -7,18 +7,12 @@ syntax = "proto3";
 
 package tinykv.cmdpb;
 
+import "common.proto";
 import "raft.proto";
-
-// region 世代：version 随 split/merge 递增、conf_ver 随成员变更递增（语义 SPEC-3）
-message RegionEpoch {
-    uint64 version = 1;   // 数据世代
-    uint64 conf_ver = 2;  // 配置世代
-}
 
 // region 级错误：KvError 变体的**子集**，不是全集——IoFailed / Corrupted / InvalidArgument
 // 当前不上线（服务端本地失败，尚未定义线上语义），刻意不对称在 ci/rules.toml [align].contract_exempt
 // 中声明并由 align 阶段检查可见列出；新增豁免需人工批准。UX-03 三要素进 hint 字段。
-// 定义在本文件以避免 kv.proto ↔ raft_cmdpb.proto 循环 import。
 message RegionError {
     message KeyNotInRegion {
         bytes key = 1;         // 越界 key 原文
@@ -26,8 +20,8 @@ message RegionError {
     }
     message StaleEpoch {
         uint64 region_id = 1;
-        RegionEpoch have = 2;  // 请求方携带的旧世代
-        RegionEpoch want = 3;  // region 当前世代（客户端刷新路由）
+        tinykv.commonpb.RegionEpoch have = 2;  // 请求方携带的旧世代
+        tinykv.commonpb.RegionEpoch want = 3;  // region 当前世代（客户端刷新路由）
     }
     message NotLeader {
         uint64 region_id = 1;
@@ -42,17 +36,17 @@ message RegionError {
 
 // 请求头：路由与幂等判定依据
 message RaftRequestHeader {
-    uint64 region_id = 1;          // RegionId：目标 region
-    RegionEpoch epoch = 2;         // 必填：客户端路由快照的世代（落后则回 StaleEpoch）
-    tinykv.raftpb.Peer peer = 3;         // 必填：客户端认为的 leader 副本（错则回 NotLeader+hint）
-    uint64 client_id = 4;          // ClientId：客户端会话标识（M2 去重表键之一）
-    uint64 sequence_id = 5;        // SeqNo：会话内单调递增（M2 去重表键之二；重试幂等）
+    uint64 region_id = 1;                    // RegionId：目标 region
+    tinykv.commonpb.RegionEpoch epoch = 2;   // 必填：客户端路由快照的世代（落后则回 StaleEpoch）
+    tinykv.raftpb.Peer peer = 3;             // 必填：客户端认为的 leader 副本（错则回 NotLeader+hint）
+    uint64 client_id = 4;                    // ClientId：客户端会话标识（去重表键之一）
+    uint64 sequence_id = 5;                  // SeqNo：会话内单调递增（去重表键之二；重试幂等）
 }
 
 // 读命令（leader 本地执行或 ReadIndex，见 SPEC-2）
 message GetRequest {
-    bytes key = 1;   // 必填：非空
-    bytes cf = 2;    // 可空：缺省 = Default 列（字符串名与 encode.h::Cf 一致）
+    bytes key = 1;                       // 必填：非空
+    tinykv.commonpb.CfName cf = 2;       // 可空：缺省 = CF_DEFAULT
 }
 message ScanRequest {
     bytes start_key = 1;  // 起点（含）；空 = region 起始
@@ -62,13 +56,13 @@ message ReadIndexRequest {}  // 无负载：M3 读线性化位点请求
 
 // 写命令（走 Raft 复制）
 message PutRequest {
-    bytes key = 1;      // 必填：非空
-    bytes value = 2;    // 必填：可空字节串（空 value 合法）
-    bytes cf = 3;       // 可空
+    bytes key = 1;                       // 必填：非空
+    bytes value = 2;                     // 必填：可空字节串（空 value 合法）
+    tinykv.commonpb.CfName cf = 3;       // 可空
 }
 message DeleteRequest {
-    bytes key = 1;      // 必填：非空（幂等）
-    bytes cf = 2;       // 可空
+    bytes key = 1;                       // 必填：非空（幂等）
+    tinykv.commonpb.CfName cf = 2;       // 可空
 }
 
 // 单条命令：oneof 定型（扩展 = 新增命令类型，开闭原则）
@@ -82,7 +76,7 @@ message Request {
     }
 }
 
-// 管理命令（M4 起生效；M0 仅占位定型）
+// 管理命令（M4 起生效；M2 仅 CompactLog 有实现）
 message SplitRequest {
     bytes split_key = 1;        // 必填：新 region 的起始 key（原 key 范围内）
     uint64 new_region_id = 2;   // RegionId：由调度器预分配
@@ -115,7 +109,7 @@ message RaftCmdRequest {
 // 命令回执：与 requests 顺序一一对应（批量请求批量回执）
 message ResponseHeader {
     uint64 region_id = 1;
-    RegionError error = 2;   // 可空：见 kv.proto RegionError（region 级失败时 cmd_responses 不可信）
+    RegionError error = 2;   // 可空：region 级失败时 cmd_responses 不可信
 }
 message GetResponse {
     bytes value = 1;   // 可空
@@ -132,7 +126,21 @@ message ReadIndexResponse {
 }
 message AdminResponse {}
 
+// 单条回执：与 Request 的 oneof 对称（M2-0 定版，替换此前的占位字节序列）。
+// 定版理由：M2 的提案回调要按序匹配回执，占位 bytes 会逼实现方自行发明序列化，
+// 最终契约与实现脱节；此刻无代码依赖，是唯一低成本窗口。
+message Response {
+    oneof cmd {
+        GetResponse get = 1;
+        PutResponse put = 2;
+        DeleteResponse delete_ = 3;
+        ScanResponse scan = 4;
+        ReadIndexResponse read_index = 5;
+        AdminResponse admin = 6;
+    }
+}
+
 message RaftCmdResponse {
-    ResponseHeader header = 1;              // 必填
-    repeated bytes cmd_responses = 2;       // 占位：M2 定版为 oneof 序列（顺序对应 requests）
+    ResponseHeader header = 1;            // 必填
+    repeated Response cmd_responses = 2;  // 与 requests 顺序严格一一对应
 }

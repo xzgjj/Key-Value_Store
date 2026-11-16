@@ -9,7 +9,7 @@ add_library(tinykv_proto STATIC)
 # CONFIG 模式：protobuf_generate 由 protobuf 包提供，生成源直接挂到目标上
 protobuf_generate(
     TARGET tinykv_proto
-    PROTOS raft.proto kv.proto raft_cmdpb.proto)
+    PROTOS common.proto raft.proto kv.proto raft_cmdpb.proto)
 
 target_include_directories(tinykv_proto PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
 target_link_libraries(tinykv_proto PUBLIC protobuf::libprotobuf)

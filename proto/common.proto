@@ -1,0 +1,25 @@
+// 文件用途：跨契约公共类型——列族与 region 世代（被 kv.proto 与 raft_cmdpb.proto 同时引用）。
+// 归属：TinyKV-CPP（M2 契约层；M2-0 契约统一）。
+//
+// 为什么单独成文件：kv.proto 与 raft_cmdpb.proto 需要同一套列族与 epoch 定义，
+// 但前者已 import 后者——反向再 import 会成环。抽第三份公共文件是唯一不成环的解法。
+// 语义唯一性：此后 CfName 与 RegionEpoch 只在此定义，禁止在业务 proto 里另立同义类型
+// （同一概念两套类型，服务层必然写出一层纯转发的转换代码，且会随时间分叉）。
+
+syntax = "proto3";
+
+package tinykv.commonpb;
+
+// 列族：与 src/common/encode.h 的 Cf 一一对应（默认数据 / 事务写 / 事务锁）
+enum CfName {
+    CF_DEFAULT = 0;  // 数据列（Raw API 与事务 data 共用）
+    CF_WRITE = 1;    // 事务 write 列（提交版本指针）
+    CF_LOCK = 2;     // 事务 lock 列（预写锁）
+}
+
+// region 世代：version 随 split/merge 递增，conf_ver 随成员变更递增。
+// 比较规则见 SPEC-3：两字段逐项 ≥ 才算不旧；任一落后 → StaleEpoch{have, want}。
+message RegionEpoch {
+    uint64 version = 1;   // 数据世代
+    uint64 conf_ver = 2;  // 配置世代
+}

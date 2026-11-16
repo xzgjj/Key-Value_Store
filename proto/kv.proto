@@ -7,20 +7,16 @@ syntax = "proto3";
 
 package tinykv.kvpb;
 
+import "common.proto";
 import "raft_cmdpb.proto";
 
-// 列族选择：语义与 src/common/encode.h::Cf 一致（事务列 Write/Lock 见 SPEC-4）
-enum CfName {
-    CF_DEFAULT = 0;  // 默认数据列（Raw API 与事务 data 列共用）
-    CF_WRITE = 1;    // 事务 write 列（提交版本指针）
-    CF_LOCK = 2;     // 事务 lock 列（预写锁）
-}
+// 列族与 region 世代复用 common.proto（M2-0 契约统一：禁止本文件另立同义类型）
 
 // ---------- Raw API（M1） ----------
 
 message RawGetRequest {
     bytes key = 1;        // 必填：非空（空 key 由服务端拒绝 InvalidArgument）
-    CfName cf = 2;        // 可空：缺省 = CF_DEFAULT
+    tinykv.commonpb.CfName cf = 2;        // 可空：缺省 = CF_DEFAULT
 }
 message RawGetResponse {
     bytes value = 1;      // 可空：key 不存在时 not set（存在性用 found 区分）
@@ -31,7 +27,7 @@ message RawGetResponse {
 message RawPutRequest {
     bytes key = 1;        // 必填：非空
     bytes value = 2;      // 必填：可空字节串（空 value 合法，与删除区分）
-    CfName cf = 3;
+    tinykv.commonpb.CfName cf = 3;
     uint64 ttl = 4;       // 秒；0 = 永不过期（M1 预留，服务端当前忽略）
 }
 message RawPutResponse {
@@ -40,7 +36,7 @@ message RawPutResponse {
 
 message RawDeleteRequest {
     bytes key = 1;        // 必填：非空；删除不存在的 key 视为成功（幂等）
-    CfName cf = 2;
+    tinykv.commonpb.CfName cf = 2;
 }
 message RawDeleteResponse {
     tinykv.cmdpb.RegionError region_error = 1;
@@ -49,7 +45,7 @@ message RawDeleteResponse {
 message RawScanRequest {
     bytes start_key = 1;  // 扫描起点（含）；空 = CF 起始
     uint32 limit = 2;     // 必填：本页最大返回条数（>0；服务端据此截断）
-    CfName cf = 3;
+    tinykv.commonpb.CfName cf = 3;
     bool key_only = 4;    // true 时不返回 value（省带宽）
 }
 message RawScanResponse {

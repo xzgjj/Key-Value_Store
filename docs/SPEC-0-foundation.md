@@ -28,7 +28,7 @@
 | 强类型 ID 库 | `Term/LogIndex/RegionId/PeerId/StoreId/ClientId/SeqNo/Ts` 禁隐式互转 | ENG-01（清单 #2/#10） |
 | 错误基建 | `KvError`（variant 结构化错误）+ `result<T>` 别名，全接口 `[[nodiscard]]` | ENG-01（#5/#6）、UX-03 |
 | 编码工具 | CF 前缀编码、事务时间戳编码（大端，保持字节序=比较序） | FUNC-01/13 前置 |
-| proto 骨架 | `raft.proto`（七字段消息）、`kv.proto`（Raw+Txn）、`raft_cmdpb.proto`（requests[] 批量一等公民） | FUNC-03/04/13 前置 |
+| proto 骨架 | `common.proto`（列族/世代）、`raft.proto`（七字段消息）、`kv.proto`（Raw+Txn）、`raft_cmdpb.proto`（requests[] 批量一等公民） | FUNC-03/04/13 前置 |
 | 测试四层接入 | `add_tinykv_test()` CMake 封装；`tools/check_test_registry.py` 进 CI 前置步骤 | testing.md §2/§7 |
 | CI | Windows+Linux 双平台矩阵：登记检查 → 静态检查 → 编译 → `ctest -L fast`；夜跑 job 骨架 | ENG-02/04、ENG-05 载体 |
 
@@ -37,7 +37,8 @@
 ```
 TinyKV-White-Paper-main/            # 仓库根 = 工程根（决策 D0-1，见 §0.8）
 ├── proto/                          # 消息定义即接口文档
-│   ├── raft.proto  raft_cmdpb.proto  kv.proto
+│   ├── common.proto  raft.proto  raft_cmdpb.proto  kv.proto
+│   │   （common.proto = 列族 CfName + RegionEpoch，被其余两文件共同引用，避免循环 import）
 ├── src/
 │   ├── common/     # 强类型 ID、KvError、编码、spdlog 封装 ← 被所有层依赖
 │   ├── storage/ wal/ raft/ raftstore/ scheduler/ txn/ server/ client/ cli/   # 按里程碑增量创建（CLAUDE.md §10），禁一次建空树

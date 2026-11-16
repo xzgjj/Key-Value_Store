@@ -91,10 +91,10 @@ public:
 ```cpp
 // raft_cmdpb.proto（字段即契约，变更先与用户核对——CLAUDE.md §15）
 message RaftCmdRequest {
-  message Header { uint64 region_id; RegionEpoch epoch; PeerInfo peer; }
+  message Header { uint64 region_id; tinykv.commonpb.RegionEpoch epoch; tinykv.raftpb.Peer peer; }
   Header header = 1;
   repeated Request requests = 2;      // Get/Put/Delete/Scan/ReadIndex —— 数组！批量一等公民
-  AdminRequest admin = 3;             // Split/TransferLeader/AddLearner/AddVoter/RemoveNode/CompactLog
+  AdminRequest admin = 3;             // Split/TransferLeader/CompactLog（M2 仅 CompactLog 落地）
 }
 ```
 
