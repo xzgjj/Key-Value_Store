@@ -10,7 +10,9 @@ notes.txt
 .handover/
 # 工作区代理自身数据（记忆/日志），非项目资产
 .workbuddy/
-# SPEC.md 为 TinyKV-CI 规则人读镜像（见 SPEC.md 头注），属仓库资产，入库。
+# 规则镜像与设计思路文档：本地维护、不入库不上传（CI 检查器按其逻辑运行，不依赖这两份文件存在）。
+SPEC.md
+TinyKV-CPP-设计思路与需求.md
 
 # ===== 日志（日志只在根 log/，spdlog 轮转）=====
 log/
