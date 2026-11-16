@@ -1,0 +1,13 @@
+# TinyKV 单机演示配置（UX-05：配置即文档，每项说明取值影响）
+# 用法：tinykv-cli --config demo.yaml status
+# 本文件只覆盖单机模式；集群相关项随 M2 增加 node.yaml。
+
+engine:
+  dir: ./demo.db              # 数据目录（内含 manifest / wal/ / sst/）；删掉即重置，无副本谨慎操作
+  fsync_on_commit: true       # REL-02 关键开关：关掉写更快但掉电会丢最近窗口数据，仅供基准对比
+  memtable_limit_mb: 64       # 内存表上限，超限触发 flush；越大写吞吐越高、重启恢复越慢
+  wal_segment_mb: 128         # WAL 段大小，决定重放粒度与单段损坏的影响面
+
+log:
+  level: info                 # trace/debug/info/warn/err/critical
+  dir: log                    # spdlog 轮转目录（单文件 10MB，保留 5 个）

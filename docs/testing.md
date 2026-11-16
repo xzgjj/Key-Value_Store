@@ -139,6 +139,7 @@ CI 用 `ctest -L unit|simulation|integration|bench` 选择，无需解析本页�
 | tests/unit/storage/engine_scan_test.cpp | unit | `engine_scan_test` | - | fast |
 | tests/unit/storage/engine_cf_test.cpp | unit | `engine_cf_test` | - | fast |
 | tests/unit/storage/engine_scan_concurrent_test.cpp | unit | `engine_scan_concurrent_test` | - | fast |
+| tests/unit/cli/cli_local_smoke_test.cpp | unit | `cli_local_smoke` | - | fast |
 <!-- registry:end -->
 
 > **M0 起步批次**（2026-11-16 落地登记，见上表）：encode / kv_error / strong_id / common_log 四个

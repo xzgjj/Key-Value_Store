@@ -2,4 +2,6 @@
 # 归属：TinyKV-CPP（M0 基建）。
 
 add_subdirectory(common)
+add_subdirectory(config)
 add_subdirectory(storage)
+add_subdirectory(cli)
