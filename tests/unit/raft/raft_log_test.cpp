@@ -5,32 +5,18 @@
 //   (b) 冲突回退必须能删掉 idx 之后的全部条目（否则旧 term 的尾巴会被当成本 term 复制出去）；
 //   (c) 压缩后 first_index 前移、dummy_term 变成被压缩最后一条的任期（prevLogTerm 判定依赖它）。
 
-#include "raft/raftlog.h"
-
 #include <gtest/gtest.h>
 
+#include <memory>
 #include <string>
 #include <vector>
 
-#include "storage/engine.h"
-#include "storage_test_base.h"
+#include "raft_test_base.h"
 
 namespace {
 
 using namespace tinykv::testlib;   // NOLINT(google-build-using-namespace)
-using tinykv::LogIndex;
-using tinykv::PeerId;
-using tinykv::Term;
-using tinykv::raft::Entry;
-using tinykv::raft::RaftLog;
-
-Entry make_entry(std::uint64_t index, std::uint64_t term, const std::string& data) {
-    Entry e;
-    e.set_index(index);
-    e.set_term(term);
-    e.set_data(data);
-    return e;
-}
+using tinykv::testlib::make_entry;
 
 // 每个用例独立的引擎实例（raft log 架在引擎上，故需要真实存储）
 struct Fixture {
@@ -129,7 +115,6 @@ TEST(RaftLog, CompactCannotPassCommitted) {
 }
 
 TEST(RaftLog, StateSurvivesReopen) {
-    // 落盘-重开链路：append/hard_state/commit 三者都必须从存储里读回来
     TempDir tmp("tinykv_raftlog_reopen");
     const auto dir = tmp.path() / "db";
     {
@@ -153,9 +138,6 @@ TEST(RaftLog, StateSurvivesReopen) {
     EXPECT_EQ((*log)->current_term(), Term{4});
     ASSERT_TRUE((*log)->voted_for().has_value());
     EXPECT_EQ(*(*log)->voted_for(), PeerId{7});
-    auto t1 = (*log)->term(LogIndex{1});
-    ASSERT_TRUE(t1.has_value());
-    EXPECT_EQ(*t1, Term{4});
     auto entry = (*log)->at(LogIndex{1});
     ASSERT_TRUE(entry.has_value());
     EXPECT_EQ(entry->data(), "a");

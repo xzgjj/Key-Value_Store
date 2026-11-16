@@ -2,3 +2,4 @@
 # 归属：TinyKV-CPP（M2 Raft 共识）。
 
 add_tinykv_test(raft_log_test SRCS raft_log_test.cpp LIBS tinykv_raft)
+add_tinykv_test(raft_step_test SRCS raft_step_test.cpp LIBS tinykv_raft)
