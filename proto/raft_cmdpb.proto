@@ -27,10 +27,26 @@ message RegionError {
         uint64 region_id = 1;
         tinykv.raftpb.Peer leader_hint = 2;  // 可空（not set）：未知 leader 时不得伪造
     }
+    message WriteConflict {
+        bytes key = 1;                 // 冲突 key
+        uint64 start_ts = 2;           // 本事务 start_ts
+        uint64 conflict_commit_ts = 3; // 对方 Write 的 commitTs（> start_ts 即冲突）
+    }
+    message LockConflict {
+        bytes key = 1;                 // 被锁住的 key
+        bytes primary = 2;             // 锁的 primary 指针（决议锚点）
+        uint64 lock_start_ts = 3;      // 持锁事务的 start_ts
+    }
+    message Retryable {
+        bytes what = 1;                // 决议后可安全重试的场合说明
+    }
     oneof detail {
         KeyNotInRegion key_not_in_region = 1;
         StaleEpoch stale_epoch = 2;
         NotLeader not_leader = 3;
+        WriteConflict write_conflict = 4;   // M5：SI 写写冲突（立即 abort，无等待）
+        LockConflict lock_conflict = 5;     // M5：他事务锁存在（等待/TTL 后决议）
+        Retryable retryable = 6;            // M5：决议后可安全重试
     }
 }
 

@@ -10,12 +10,14 @@
 
 #include <cstdint>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <vector>
 
 #include <scheduler.pb.h>
 
 #include "common/error.h"   // RegionEpoch（scheduler.proto 复用 common.proto 的 epoch）
+#include "scheduler/tso.h"  // TsProvider（调度器兼任 TSO，SPEC-4 架构）
 
 namespace tinykv::scheduler {
 
@@ -199,6 +201,30 @@ private:
     std::uint64_t next_peer_id_{0};        // 已分配/已见的最大 peer id
     std::uint64_t max_peer_id_{0};         // 心跳里见过的最大 peer id（抬升分配基线）
     std::uint64_t split_count_{0};
+};
+
+// 调度器兼任 TSO（SPEC-4 架构）：包一层 TsProvider 接口面，ts 与 region id 同源单调。
+class SchedulerTsProvider final : public tso::TsProvider {
+public:
+    explicit SchedulerTsProvider(Scheduler& owner) : owner_(owner) {}
+
+    [[nodiscard]] result<std::vector<Ts>> get_timestamps(std::size_t n) override {
+        if (n == 0) {
+            return std::unexpected(InvalidArgument{"批量授时 n 必须 > 0"});
+        }
+        std::lock_guard lock(mu_);
+        std::vector<Ts> out;
+        out.reserve(n);
+        for (std::size_t i = 0; i < n; ++i) {
+            out.push_back(Ts{++ts_counter_});
+        }
+        return out;
+    }
+
+private:
+    Scheduler& owner_;   // 预留：ts 分配与调度决策同生命周期（当前只挂计数器）
+    mutable std::mutex mu_;
+    std::uint64_t ts_counter_{0};
 };
 
 }  // namespace tinykv::scheduler

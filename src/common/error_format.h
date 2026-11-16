@@ -32,6 +32,12 @@ namespace tinykv {
                 return "IoFailed";
             } else if constexpr (std::same_as<T, Corrupted>) {
                 return "Corrupted";
+            } else if constexpr (std::same_as<T, WriteConflict>) {
+                return "WriteConflict";
+            } else if constexpr (std::same_as<T, LockConflict>) {
+                return "LockConflict";
+            } else if constexpr (std::same_as<T, Retryable>) {
+                return "Retryable";
             } else {
                 return "InvalidArgument";
             }
@@ -61,6 +67,16 @@ namespace tinykv {
             } else if constexpr (std::same_as<T, Corrupted>) {
                 return "Corrupted: 位置=" + v.where + "；原因=" + v.reason
                        + "；建议=从副本重拉或按快照恢复";
+            } else if constexpr (std::same_as<T, WriteConflict>) {
+                return "WriteConflict: key=" + v.key + " start_ts=" + std::to_string(v.start_ts)
+                       + " conflict_commit_ts=" + std::to_string(v.conflict_commit_ts)
+                       + "；原因=他事务已提交新版本（SI 写写冲突）；建议=换 start_ts 重试或报用户";
+            } else if constexpr (std::same_as<T, LockConflict>) {
+                return "LockConflict: key=" + v.key + " primary=" + v.primary
+                       + " lock_start_ts=" + std::to_string(v.lock_start_ts)
+                       + "；原因=他事务持锁；建议=等待 TTL 过期后 CheckTxnStatus 决议";
+            } else if constexpr (std::same_as<T, Retryable>) {
+                return "Retryable: " + v.what + "；原因=锁已决议清除；建议=安全重试";
             } else {
                 return "InvalidArgument: " + v.what + "；原因=调用方参数非法；建议=按字段修正后重试";
             }

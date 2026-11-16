@@ -73,6 +73,9 @@
 | M4 | 34 | bench补齐①：split_bench 1M key 6.3s + 心跳不变量 + 快照 11MB/s，全量45 | PASS | ctest 45/45；CI PASS×13；split 6.3s（S0≤60s 余10×）/ 心跳体积与日志长度无关（varint 增量合法，结构断言 entries==0）/ 快照 11MB/s（S0≥10）；证据物 build/evidence/bench/{split,heartbeat,snapshot}.txt |
 | M4 | 35 | bench补齐②：踩坑与修复（字典序≠数值序/分区忘解除/tick驱动缺失）+ 共享助手收口 | PASS | 三真坑：key 未补零致字典序≠数值序（split 点判断被打乱）→定宽7位补零；计时循环忘解除分区→set_partition({})；pump-only 循环 leader 永不发消息→补 tick。重复代码上收 testlib（regions_contiguous/fingerprint/make_split_admin/count_leaders）；implementation_plan 压缩回预算内 |
 | M4 | 36 | bench补齐③：notes-m4 验收表三项改✅实测 + 挂账仅剩 trace 埋点与契约追认 | PASS | notes-m4 §4 PERF-07/08/09 全改✅实测数字；§5 挂账移除 bench 项；ctest 45/45；CI PASS×13；登记 45⇄45 |
+| M5 | 1 | ①②可判定性：CI13 + tso 6例 + latch 4例 + 全量47 | PASS | run_ci PASS×13；ctest 47/47；tso 6/6（批量单调/跨调用不回退/空批量拒/fatal非单调/调度器适配/1e5 ts/s 吞吐）；latch 4/4（同key串行观察点/交叉key集无死锁/释放唤醒/重复key去重） |
+| M5 | 2 | ①②契约与复用：KvError 9变体⇄RegionError 对称 + 调度器兼任TSO + encode_ts_key 复用 | PASS | align 3/3；KvError 6→9 与 RegionError oneof 4/5/6 对称（不进豁免）；TsNotMonotonic 走 fatal 异常（SPEC-4 §4.3.3 明示 fatal 路径，不进 result）；留痕 M5-TXNERROR-DRAFT.md；Ts/encode_ts_key 复用 M0 骨架零改动；TSO 适配器挂 Scheduler（架构图要求） |
+| M5 | 3 | ①②文档与红线：红线4（latch 全序加锁防死锁）+ 红线6（TSO 单调）+ banned/scope 回修 | PASS | docs PASS；guard PASS；latch 排序加锁=全局全序（交叉 key 集无环的结构保证）；测试踩坑 2 处：同线程持有期间重取=自我死锁（测试语义错）、std::move 到局部变量生命周期到作用域尾（释放时机错）——均已记测试内注释；sleep_for 违禁（ENG-04）改 join 同步点；task_scope M5 重写生效 |
 <!-- review:end -->
 
 ## 约定

@@ -14,6 +14,7 @@
 
 #include <cstdint>
 #include <expected>
+#include <stdexcept>
 #include <optional>
 #include <string>
 #include <utility>
@@ -82,8 +83,43 @@ struct InvalidArgument {
     std::string what;  // 哪个参数、为何非法
 };
 
-using KvError =
-    std::variant<KeyNotInRegion, StaleEpoch, NotLeader, IoFailed, Corrupted, InvalidArgument>;
+// ---- M5 事务错误（SPEC-4 §4.3.3 错误矩阵；用户 2026-11-16 授权按 SPEC 落版） ----
+
+struct WriteConflict {
+    std::string key;            // 冲突 key
+    std::uint64_t start_ts{};   // 本事务 start_ts
+    std::uint64_t conflict_commit_ts{};  // 对方 Write 的 commitTs（> start_ts 即冲突）
+    // hint：立即 abort 自身（无死锁结构保证）；换 ts 重试或报用户
+};
+
+struct LockConflict {
+    std::string key;               // 被锁住的 key
+    std::string primary;           // 锁的 primary 指针（决议锚点）
+    std::uint64_t lock_start_ts{}; // 持锁事务的 start_ts
+    // hint：等待→TTL 过后 CheckTxnStatus 决议
+};
+
+struct Retryable {
+    std::string what;  // 决议后锁已清，可安全重试的场合
+};
+
+// TSO 严格单调是不变量（红线6）；破坏走 fatal 异常而非 result 错误通道
+// （异常分层见 CLAUDE.md §7-1：不变量破坏不进 result，直接拒绝服务并报告）
+class TsNotMonotonic final : public std::runtime_error {
+public:
+    explicit TsNotMonotonic(std::uint64_t got, std::uint64_t last)
+        : std::runtime_error("TSO 非严格单调: got=" + std::to_string(got) +
+                             " last=" + std::to_string(last)), got_(got), last_(last) {}
+    [[nodiscard]] std::uint64_t got() const noexcept { return got_; }
+    [[nodiscard]] std::uint64_t last() const noexcept { return last_; }
+
+private:
+    std::uint64_t got_;
+    std::uint64_t last_;
+};
+
+using KvError = std::variant<KeyNotInRegion, StaleEpoch, NotLeader, IoFailed, Corrupted,
+                             InvalidArgument, WriteConflict, LockConflict, Retryable>;
 
 // 全项目统一结果别名：API 边界一律 [[nodiscard]]（清单 #6；错误分层见 CLAUDE.md §7-1：
 // 不变量破坏/环境致命错误走异常，不进此通道）
