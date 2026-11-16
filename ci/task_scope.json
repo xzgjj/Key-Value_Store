@@ -27,7 +27,8 @@
     ".clang-format",
     ".clang-tidy",
     "demo.yaml",
-    "docs/cli.md"
+    "docs/cli.md",
+    "examples/"
   ],
   "reason": "按 SPEC-1 §1.1 交付物落地：接口与类型定义进 storage.h 复用 common 的 Cf/encode；WAL 遵守启动只读不改写红线；测试逐条登记 docs/testing.md §4",
   "bugfix": false,
