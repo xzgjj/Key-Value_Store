@@ -10,6 +10,9 @@
 <!-- review:begin v1 -->
 | 阶段 | 轮次 | 重点 | 结论 | 备注 |
 |---|---|---|---|---|
+| M0 | 1 | 可判定性：CI 全阶段 + 单元测试 | PASS | run_ci PASS×13；ctest 5/5 |
+| M0 | 2 | 契约与复用：对齐检查 + 登记对账 + 检查器自测 | PASS | align 三项全 PASS；registry PASS；selftest PASS |
+| M0 | 3 | 文档与红线：预算/查重/链接 + scope/guard + SPEC-0 红线抽查 | PASS | docs PASS×4；scope/guard PASS；src 无空目录、StrongId 无隐式转换 |
 <!-- review:end -->
 
 ## 约定
