@@ -55,6 +55,9 @@
 | M4 | 16 | ⑤可判定性：CI13 + snapshot_chunk 2例 + 全量绿 | PASS | run_ci PASS×13；ctest 全绿；snapshot_chunk 2/2（多块追平且数据落盘/坏块CRC拒绝）；M2 snapshot_test 兼容绿 |
 | M4 | 17 | ⑤契约与复用：SnapshotChunk proto落版 + 复用 install_snapshot/crc32c | PASS | align 3/3；proto 按 SPEC D3-3 默认(4MB+seq+CRC)；复用 crc32c/install_snapshot/restore_snapshot；MSG_SNAPSHOT单块保留兼容 |
 | M4 | 18 | ⑤文档与红线：分块CRC不装脏数据 + scope/guard | PASS | docs PASS；guard PASS；坏块Corrupted拒绝不安装(红线)；窗口流控防内存打爆；begin不重置防卡死 |
+| M4 | 19 | ⑥可判定性：CI13项 + sim_scheduler 4例 + 全量38 | PASS | run_ci PASS×13；ctest 38/38；sim_scheduler 4/4（心跳汇总/AskSplit分配/三轮单调收敛/限速1迁移） |
+| M4 | 20 | ⑥契约与复用：scheduler.proto 未改 + AskSplit不撞号(本轮修复) + 复用RegionEpoch | PASS | align 3/3(contract/doc_cmd/banned)；proto/scheduler.proto 保持用户核对版未动；复用 common. RegionEpoch 未新造；review 发现 next_region_id_ 从0起算会与已见region撞号→改为心跳抬升基线+新peer对齐已见max，用例 EXPECT_GT(new_region_id,5) 固化 |
+| M4 | 21 | ⑥文档与红线：控制面/数据面分离 + 限速 + docs/guard/scope | PASS | docs PASS×4；guard PASS；scope 已声明含 src/scheduler；调度器只产出 MovePeer 建议、不直接改数据不走数据通道(M-1)；限速 max_moves_per_round=1 由 BalanceRespectsRateLimit 证明；size 汇总只信 store 心跳，删除region回填兜底(会把空store算成有量) |
 <!-- review:end -->
 
 ## 约定

@@ -87,6 +87,25 @@ best-effort 副本、租约过期读失败。理由见设计文档 §7 与 §3.7
 
 结论：④b 全程停在档 1–2，无需进入引库/自造档；复用判定顺序得到遵守。
 
+## 4.2 [2026-11-16] M4 ⑥ 复核记录（PD-lite 调度器）
+
+本层（控制面调度器）按复用判定顺序落地，逐条核对：
+- **档 1 复用本仓**：心跳消息直接复用 `proto/scheduler.proto` 既有 `StoreHeartbeatReq`/
+  `RegionHeartbeatReq`/`AskSplitReq|Resp`（用户 2026-11-16 已核对版，本层**零 proto 改动**）；
+  epoch 复用 `common.proto` 的 `RegionEpoch` 经 `tinykv::RegionEpoch` 现成结构，未新造世代类型；
+  迁移建议刻意复用④层"AddLearner→AddVoter→RemoveNode"路径，调度器不新开迁移协议。
+- **档 2 语言机制**：`std::map` 做 store/region 视图（有序、便于确定性遍历与复现）、
+  `std::pair<const StoreStat*, const StoreStat*>` 做极值返回（免拷贝）、`constexpr` 常量、
+  `[[nodiscard]]` 标注建议接口——全为标准库，零新依赖，**不引 gRPC/不生成 service stub**（用户 A1）。
+- **档 3/4 未触发**：header-only 类足以表达"只动元数据"的调度逻辑，无需三方调度框架，也无需自造容器。
+- **KVstorageBaseRaft-cpp 反模式复核**：其"心跳携带全量数据/调度与数据面耦合"未借鉴；
+  本层心跳只带元数据与 size 标量，X-1~X-6 无回潮。
+- **Mooncake 架构原则复核**：M-1 控制面/数据面分离在本层是硬边界——调度器只产出 `MovePeer` 建议，
+  快照等数据走⑤层独立通道，不经调度器转发，也不阻塞数据通道。
+
+结论：⑥ 全程停在档 1–2；两处 review 发现（size 汇总回填、AskSplit 撞号）都是档 2 范围内的实现修正，
+未触发升档。
+
 ## 5. 与对齐检查的关系
 
 `align` 阶段（`tools/ci/check_align.py`）只校验可判定项（契约集合、命令引用、违禁模式），
