@@ -4,4 +4,5 @@
 add_subdirectory(common)
 add_subdirectory(proto)
 add_subdirectory(storage)
+add_subdirectory(raft)
 add_subdirectory(cli)

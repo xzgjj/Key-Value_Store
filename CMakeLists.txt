@@ -45,13 +45,14 @@ enable_testing()
 
 # src/ 子目录按里程碑增量创建（SPEC-0 红线 6，禁一次建空树）：
 # EXISTS 守卫保证任一提交点都可配置构建；目录落地后守卫即生效为常规接入。
+# proto 先于 src：raft 库链接 tinykv_proto，目标必须先存在
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/proto/CMakeLists.txt")
+    add_subdirectory(proto)
+endif()
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/CMakeLists.txt")
     add_subdirectory(src)
 endif()
 # proto 先于 tests：add_tinykv_test 需读取 protobuf 导入目标的 DLL 位置注入测试进程 PATH
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/proto/CMakeLists.txt")
-    add_subdirectory(proto)
-endif()
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/CMakeLists.txt")
     add_subdirectory(examples)
 endif()
