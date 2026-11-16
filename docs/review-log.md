@@ -40,6 +40,9 @@
 | M4 | 1 | ①可判定性：CI 13 项 + entry_batch 5 例 + 全量 32 测试 + PERF-01 达标 | PASS | run_ci PASS×13；ctest 32/32；entry_batch_test 5/5；管道化 batch=1 fsync=on 28433/s > S0 2000 |
 | M4 | 2 | ①契约与复用：proto 未改 + 对齐三项 + 回执不串/去重/非leader拒绝回归 | PASS | align 3/3；registry PASS；proto 零改动；raft_kv_test 非leader拒绝回归经全量测试抓出并修复 |
 | M4 | 3 | ①文档与红线：预算/查重/链接 + scope/guard + Envelope 向后兼容/无 detach | PASS | docs PASS×4；guard PASS；try_unpack 兼容旧 data；committer 无 detach；banned 0 命中 |
+| M4 | 4 | ②可判定性：CI 13 项 + region_route 8 例 + 全量 33 测试 | PASS | run_ci PASS×13；ctest 33/33；region_route 8/8（路由/epoch/split原子/并发读/重叠拒绝） |
+| M4 | 5 | ②契约与复用：复用 RegionEpoch/RegionId/错误变体 + 对齐三项 | PASS | align 3/3；registry PASS；复用 error.h 的 epoch 双判定与 6 变体错误；std::map 不引新库（语言机制优先） |
+| M4 | 6 | ②文档与红线：预算/查重/链接 + scope/guard + REL-05不变量 | PASS | docs PASS×4；guard PASS；每 key 恰好一 region 由区间索引+重叠拒绝双保险；shared_mutex 并发安全 |
 <!-- review:end -->
 
 ## 约定
