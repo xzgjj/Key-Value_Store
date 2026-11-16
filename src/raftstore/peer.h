@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include <map>
+#include <vector>
 #include <memory>
 #include <span>
 #include <string>
@@ -38,8 +39,15 @@ public:
 
     void tick();
 
-    // 把本轮 Ready 里的已提交条目全部 apply；返回真正 apply 的条目数
+    // 把本轮 Ready 里的已提交条目全部 apply；返回真正 apply 的条目数。
+    // 出站消息不在此丢弃——收进 outbox 由 take_messages() 取走交给传输层。
     [[nodiscard]] result<std::size_t> on_ready();
+
+    // 取走待发送消息（接网络前 on_ready 会把消息丢掉，那是 bug）
+    [[nodiscard]] std::vector<raftpb::Message> take_messages();
+
+    // 从传输层收到的消息交给状态机
+    [[nodiscard]] result<void> step_message(const raftpb::Message& msg);
 
     [[nodiscard]] bool is_leader() const { return raft_->is_leader(); }
     [[nodiscard]] raft::Raft& raft() { return *raft_; }
@@ -55,6 +63,7 @@ private:
     std::unique_ptr<raft::Raft> raft_;
     Storage& storage_;
     std::map<std::uint64_t, std::uint64_t> last_seq_;   // client_id → 已 apply 的最大 seq
+    std::vector<raftpb::Message> outbox_;
 };
 
 }  // namespace tinykv::raftstore

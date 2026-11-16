@@ -70,8 +70,20 @@ result<GetResult> Peer::get(Cf cf, std::string_view key) const {
 
 void Peer::tick() { raft_->tick(); }
 
+std::vector<raftpb::Message> Peer::take_messages() {
+    auto ready = raft_->take_ready();   // messages 已由 on_ready 收进 outbox；此处只清空
+    std::vector<raftpb::Message> out;
+    out.swap(outbox_);
+    return out;
+}
+
+result<void> Peer::step_message(const raftpb::Message& msg) { return raft_->step(msg); }
+
 result<std::size_t> Peer::on_ready() {
     auto ready = raft_->take_ready();
+    for (auto& m : ready.messages) {
+        outbox_.push_back(std::move(m));   // 交给传输层，不能丢
+    }
     std::size_t applied = 0;
     for (const raftpb::Entry& entry : ready.to_apply) {
         if (auto r = apply_entry(entry); !r) {
