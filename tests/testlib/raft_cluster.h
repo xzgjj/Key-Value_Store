@@ -59,7 +59,8 @@ inline tinykv::raftpb::Message make_msg(tinykv::raftpb::MessageId id, std::uint6
 class Cluster {
 public:
     explicit Cluster(int nodes, std::uint64_t election_timeout = 8,
-                     std::uint64_t heartbeat = 3) {
+                     std::uint64_t heartbeat = 3)
+        : election_timeout_(election_timeout), heartbeat_(heartbeat) {
         const std::vector<PeerId> voters = make_voters(nodes);
         for (int i = 0; i < nodes; ++i) {
             dirs_.push_back(std::make_unique<TempDir>("tinykv_cluster"));
@@ -78,6 +79,23 @@ public:
     [[nodiscard]] int size() const { return static_cast<int>(nodes_.size()); }
     [[nodiscard]] Raft& node(int i) { return *nodes_[static_cast<std::size_t>(i)]; }
     [[nodiscard]] RaftLog& log(int i) { return *logs_[static_cast<std::size_t>(i)]; }
+
+    // M4 第④层：动态加节点——新节点以空 voter 集构造，随后通过 ConfChange 加入集群。
+    // 返回新节点索引（= 之前的 size()）。新节点初始为 follower，不会自启动选举。
+    int add_node(std::uint64_t id) {
+        const int index = size();
+        dirs_.push_back(std::make_unique<TempDir>("tinykv_cluster_add"));
+        auto engine = tinykv::Engine::open({.dir = dirs_.back()->path() / "db"});
+        engines_.push_back(std::move(*engine));
+        auto log = RaftLog::open(*engines_.back());
+        logs_.push_back(std::move(*log));
+        Config cfg{.id = PeerId{id},
+                   .voters = {},   // 空：由 ConfChange 动态加入
+                   .election_timeout = election_timeout_,
+                   .heartbeat_interval = heartbeat_};
+        nodes_.push_back(std::make_unique<Raft>(cfg, *logs_.back()));
+        return index;
+    }
 
     // 一轮投递：先取全部 Ready，再统一下发（保证"同轮消息互不可见"，逼近真实时序）
     bool deliver_round() {
@@ -180,6 +198,8 @@ private:
     std::vector<std::unique_ptr<tinykv::Engine>> engines_;
     std::vector<std::unique_ptr<RaftLog>> logs_;
     std::vector<std::unique_ptr<Raft>> nodes_;
+    std::uint64_t election_timeout_{8};
+    std::uint64_t heartbeat_{3};
 };
 
 }  // namespace tinykv::testlib

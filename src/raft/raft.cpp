@@ -145,11 +145,63 @@ result<void> Raft::propose(std::string data) {
     return {};
 }
 
+result<void> Raft::propose_conf_change(const raftpb::ConfChange& cc) {
+    if (role_ != Role::Leader) {
+        return std::unexpected(NotLeader{.region_id = RegionId{0}, .leader_hint = std::nullopt});
+    }
+    // 成员变更作为 EntryConfChange 落盘：apply 时才生效，崩溃后可从日志重建
+    std::string data;
+    if (!cc.SerializeToString(&data)) {
+        return std::unexpected(Corrupted{.where = "raft:confchange", .reason = "序列化失败"});
+    }
+    Entry entry;
+    entry.set_index(log_.last_index().value + 1);
+    entry.set_term(term_);
+    entry.set_data(std::move(data));
+    entry.set_type(raftpb::EntryConfChange);
+    (void)log_.append(std::span<const Entry>(&entry, 1));
+    broadcast_append();
+    advance_commit();   // 单副本时靠自己推进；多副本由回执推进（无副作用）
+    return {};
+}
+
+void Raft::apply_conf_change(const raftpb::ConfChange& cc) {
+    const auto pid = PeerId{cc.node_id()};
+    auto erase_peer = [](std::vector<PeerId>& v, PeerId p) {
+        v.erase(std::remove(v.begin(), v.end(), p), v.end());
+    };
+    switch (cc.type()) {
+        case raftpb::ConfAddLearner:
+            if (!is_voter(pid) &&
+                std::find(learners_.begin(), learners_.end(), pid) == learners_.end()) {
+                learners_.push_back(pid);
+            }
+            break;
+        case raftpb::ConfAddVoter:
+            erase_peer(learners_, pid);                       // learner → voter
+            if (std::find(cfg_.voters.begin(), cfg_.voters.end(), pid) == cfg_.voters.end()) {
+                cfg_.voters.push_back(pid);
+                next_index_[pid.value] = log_.last_index().value + 1;
+                match_index_[pid.value] = 0;
+            }
+            break;
+        case raftpb::ConfRemoveNode:
+            erase_peer(learners_, pid);
+            erase_peer(cfg_.voters, pid);
+            next_index_.erase(pid.value);
+            match_index_.erase(pid.value);
+            break;
+        default:
+            break;
+    }
+}
+
 void Raft::append_entry_and_replicate(const std::string& data) {
     Entry entry;
     entry.set_index(log_.last_index().value + 1);
     entry.set_term(term_);
     entry.set_data(data);
+    // type 默认 EntryNormal（0），无需显式设置——旧 data/快照零改动兼容
     (void)log_.append(std::span<const Entry>(&entry, 1));
     broadcast_append();
     // 单副本集群没有 follower 回执，commit 只能靠自己推进；多副本时此调用不影响
@@ -224,6 +276,14 @@ void Raft::collect_apply() {
     for (std::uint64_t i = applied_ + 1; i <= committed; ++i) {
         auto entry = log_.at(LogIndex{i});
         if (entry) {
+            // M4 第④层：成员变更在 apply 时才生效——先更新 membership，再交给上层 apply。
+            // 幂等设计：崩溃恢复重放日志会再次走到这里，结果一致。
+            if (entry->type() == raftpb::EntryConfChange) {
+                raftpb::ConfChange cc;
+                if (cc.ParseFromString(entry->data())) {
+                    apply_conf_change(cc);
+                }
+            }
             to_apply_.push_back(std::move(*entry));
         }
     }

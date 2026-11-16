@@ -40,11 +40,29 @@ message Peer {
     uint64 store_id = 2;  // StoreId：副本所在物理节点（路由/传输用；M4 调度器维护）
 }
 
-// 日志条目：序列化载荷为 raft_cmdpb.RaftCmdRequest
+// 日志条目类型：默认 Normal 保证向后兼容旧日志/快照（M4 第④层，用户 2026-11-16 核对）
+enum EntryType {
+    EntryNormal = 0;       // 普通日志：序列化载荷为 raft_cmdpb.RaftCmdRequest（含 Envelope 批处理）
+    EntryConfChange = 1;   // 单步成员变更：data 为 ConfChange 序列化字节
+}
+
+// 单步成员变更载荷（用户确认放 raft.proto，紧耦合 EntryType）
+enum ConfChangeType {
+    ConfAddLearner = 0;
+    ConfAddVoter = 1;
+    ConfRemoveNode = 2;
+}
+message ConfChange {
+    ConfChangeType type = 1;
+    uint64 node_id = 2;   // PeerId：目标副本
+}
+
+// 日志条目
 message Entry {
     uint64 index = 1;  // LogIndex：全局日志槽位，从 1 起；0 非法
     uint64 term = 2;   // Term：条目写入时的任期；0 非法
     bytes data = 3;    // 可空：empty entry 合法（leader 提交占位），data 为空时不可执行
+    EntryType type = 4;  // 默认 EntryNormal：旧日志/快照零改动兼容
 }
 
 // 快照元数据（载荷文件本体走 Store 分发，不经 Raft 消息；M3 落地分块流）

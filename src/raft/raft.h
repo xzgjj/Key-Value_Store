@@ -59,6 +59,10 @@ public:
     // leader 提案：追加一条 entry 并广播（非 leader 返回 NotLeader）
     [[nodiscard]] result<void> propose(std::string data);
 
+    // M4 第④层：单步成员变更提案（仅 leader）。Entry 以 EntryConfChange 落盘，
+    // apply 时才更新 membership（保证崩溃后可从日志重建）。
+    [[nodiscard]] result<void> propose_conf_change(const raftpb::ConfChange& cc);
+
     // 取走本轮输出（消息 + 待 apply），并推进 applied 指针
     [[nodiscard]] Ready take_ready();
 
@@ -82,6 +86,7 @@ public:
     [[nodiscard]] std::uint64_t election_elapsed() const { return election_elapsed_; }
     [[nodiscard]] LogIndex committed() const { return log_.committed(); }
     [[nodiscard]] const std::vector<PeerId>& voters() const { return cfg_.voters; }
+    [[nodiscard]] const std::vector<PeerId>& learners() const { return learners_; }
 
 private:
     [[nodiscard]] bool is_voter(PeerId p) const;
@@ -107,10 +112,13 @@ private:
     void handle_heartbeat_response(const raftpb::Message& msg);
     void append_entry_and_replicate(const std::string& data);
 
-    // 把 [applied+1, committed] 的条目收进待 apply 队列
+    // 把 [applied+1, committed] 的条目收进待 apply 队列；apply 时处理 ConfChange
     void collect_apply();
+    // apply 一条 ConfChange：更新 voters/learners（幂等，支撑日志重放重建）
+    void apply_conf_change(const raftpb::ConfChange& cc);
 
     Config cfg_;
+    std::vector<PeerId> learners_;   // M4 第④层：只收日志、不投票不计入 majority
     RaftLog& log_;
     Role role_{Role::Follower};
     std::uint64_t term_{0};

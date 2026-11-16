@@ -46,6 +46,9 @@
 | M4 | 7 | ③可判定性：CI 13 + region_route 11 + split 3 + 全量 34 | PASS | ctest 34/34；split 端到端 3/3（切分/边界拒绝/数据保留）；run_ci PASS×13 |
 | M4 | 8 | ③契约与复用：复用 SplitRequest proto + epoch + 对齐三项 | PASS | align 3/3；proto 复用现有 SplitRequest 未改；split_region 纯函数复用 RegionEpoch 推进 |
 | M4 | 9 | ③文档与红线：预算/查重/链接 + scope/guard + 红线1/2 | PASS | docs/guard PASS；红线1开区间校验+红线2 apply后立即更新路由经 split_test 证明 |
+| M4 | 10 | ④a可判定性：CI 13 + confchange 5 + 全量 35 | PASS | ctest 35/35；confchange 5/5（AddLearner/AddVoter/RemoveNode/落盘type/非leader拒绝）；run_ci PASS×13 |
+| M4 | 11 | ④a契约与复用：Entry.type proto 已核对 + 复用 Cluster fixture + 对齐三项 | PASS | align 3/3；Entry.type/ConfChange proto 用户核对通过(M4-CONFCHANGE-DRAFT)；复用 add_node 扩展 fixture |
+| M4 | 12 | ④a文档与红线：预算/查重/链接 + scope/guard + apply时才生效 | PASS | docs/guard PASS；ConfChange 在 collect_apply 时生效，幂等可重建；已知遗留(learner追平门槛/两节点移除边界)留④b |
 <!-- review:end -->
 
 ## 约定
