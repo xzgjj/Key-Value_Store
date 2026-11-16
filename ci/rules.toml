@@ -1,0 +1,98 @@
+# ======================================================================
+# TinyKV-CI 规则（机器可读唯一事实来源）
+# 人读镜像见 SPEC.md；两者不一致时以本文件为准，并须同步修订 SPEC.md。
+#
+# 治理（对齐 SPEC.md）：
+#   * 本文件与 tools/ci/** 受 check_guard 保护：任何改动 → 退出码 2，人工批准后才能继续；
+#   * 阈值收紧（数字变小 / 白名单变短）在报告中标注"收紧"，直接放行；
+#     阈值放松标注"放松"，同样走人工批准；
+#   * 首次引入即基线：新增规则文件不触发守卫，随基线提交。
+# ======================================================================
+
+version = 1
+
+[ignore]
+# 工具噪声：所有阶段一律无视（不算改动、不进守卫、不进统计）
+paths = [
+    "**/__pycache__/**",
+    "**/*.pyc",
+]
+
+[retry]
+# 单任务内 CI 修复重试上限；超过必须人工介入，防止"改到绿为止"无限循环。
+max_rounds = 2
+
+[doc_budget]
+# 字数口径：CJK 字符每个计 1，拉丁/数字连续串每词计 1；围栏代码块不计。
+planning_max_chars = 3000
+# 规划文档按文件名匹配（大小写不敏感）；未列出的 markdown 一律按"分析/记录文档"处理，不设字数上限。
+planning_files = [
+    "claude.md",
+    "agents.md",
+    "implementation_plan.md",
+    "agent_execution_protocol.md",
+    "spec.md",
+    "ci.md",
+    "cli.md",
+]
+# 重复段落：规范化（去空白/标点/大小写）后长度 ≥ min_chars 的段落，
+# 在非冻结文档间出现 > max_para_occurrences 次即报。
+analysis_min_para_chars = 40
+analysis_max_para_occurrences = 1
+# 上游参考材料冻结：仅作重复检测的来源之一，自身不被预算/重复/一致性检查报错。
+reference_freeze = [
+    "docs/README.md",
+    "docs/Project1-Standalone-KV.md",
+    "docs/Project2-RaftKV.md",
+    "docs/Project3-MultiRaftKV.md",
+    "docs/Project4-Transaction.md",
+    "image/",
+]
+
+[registry]
+# 兼容补充：既有测试登记表一致性检查（docs/testing.md §7），并入 CI 作为 docs 阶段一项。
+script = "tools/check_test_registry.py"
+
+[scope]
+# 任务改动声明文件：每个任务开始时由执行者写入（格式见 SPEC.md / CI.md）。
+task_scope_file = "ci/task_scope.json"
+max_diff_lines = 600      # 单任务改动行数预算（新增+删除，未跟踪文本文件按整文件行数计）
+max_changed_files = 15    # 单任务改动文件数预算
+always_allowed = [        # 与任务声明无关、永远放行的路径（工具噪声类）
+    "ci/task_scope.json",
+    ".zcode/",
+]
+test_globs = [            # 以下对象被删除 → 测试删除告警（除非声明行为变更获批）
+    "tests/**/*_test.*",
+    "tests/testlib/**",
+]
+registry_file = "docs/testing.md"   # 登记表行被删也视为测试删除
+
+[guard]
+# 规则资产：以下对象一旦有已跟踪改动 → 退出码 2（需人工批准）。
+# 未跟踪的新规则文件 = 首次引入，只在报告中提示，不拦截。
+rule_files = [
+    "ci/rules.toml",
+    "tools/ci/**",
+    "tools/check_test_registry.py",
+    "SPEC.md",
+    "CLAUDE.md",
+    "AGENT_EXECUTION_PROTOCOL.md",
+]
+
+[code]
+# 武装条件：出现以下任一文件后，构建/静态检查生效；此前整阶段 SKIP(NOT_ARMED)。
+arm_globs = [
+    "src/**/*.cpp", "src/**/*.cc", "src/**/*.cxx",
+    "src/**/*.h", "src/**/*.hpp",
+    "tests/**/*.cpp", "tests/**/*.cc", "tests/**/*.cxx",
+    "tests/**/*.h", "tests/**/*.hpp",
+]
+build_dir = "build/ci"
+cxx_flags = ["-Wall", "-Wextra", "-Werror"]   # 未使用代码/可疑构造经编译警告暴露，警告即失败
+ctest_label = "fast"
+func_max_lines = 80          # 函数体行数上限（src/）
+func_max_lines_test = 160    # tests/ 下放宽一档（fixture 较长）
+func_max_complexity = 15     # 圈复杂度近似值上限：1 + if/for/while/case/catch + &&/||/? 
+dup_code_window = 8          # 规范化后 ≥8 行的连续代码块
+dup_code_max_copies = 1      # 出现 > 1 处即报（复制粘贴检测）

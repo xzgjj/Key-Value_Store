@@ -1,0 +1,49 @@
+# ===== 代理工作文档（本地维护，不入库不上传）=====
+CLAUDE.md
+AGENT_EXECUTION_PROTOCOL.md
+implementation-notes.md
+implementation_plan.md
+diff.md
+notes.txt
+# SPEC.md 为 TinyKV-CI 规则人读镜像（见 SPEC.md 头注），属仓库资产，入库。
+
+# ===== 日志（日志只在根 log/，spdlog 轮转）=====
+log/
+logs/
+*.log
+
+# ===== 构建产物 / 编译临时文件 =====
+build/
+build-*/
+cmake-build-*/
+out/
+bin/
+obj/
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.ilk
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+cmake_install.cmake
+compile_commands.json
+vcpkg_installed/
+
+# ===== Python 工具运行产物 =====
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# ===== IDE / 编辑器 =====
+.idea/
+.vs/
+.vscode/
+.zcode/

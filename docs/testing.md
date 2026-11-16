@@ -1,0 +1,239 @@
+# TinyKV-CPP 测试策略与登记表
+
+> **本页地位**：本项目测试策略的**唯一事实来源**（single source of truth）。
+> 任何"有哪些测试、怎么跑、跑多快、要不要特殊环境"的问题，以 §4 登记表为准；
+> 本页与仓库实际不一致时，以一致性检查（`tools/check_test_registry.py`）**明确失败**的形式暴露，不允许静默漂移。
+>
+> **配套材料**：设计总纲见 [TinyKV-CPP-设计思路与需求.md](../TinyKV-CPP-设计思路与需求.md) §8（测什么、达到什么）；
+> 登记表机器解析标记为 `<!-- registry:begin v1 -->` / `<!-- registry:end -->`，仅供检查脚本使用，人读以表格为准。
+
+---
+
+## 1. 参考项目调研结论（本方案的来源）
+
+调研对象：[KVstorageBaseRaft-cpp](https://github.com/youngyangyang04/KVstorageBaseRaft-cpp)（教学 Raft-KV）与
+[Mooncake](https://github.com/kvcache-ai/Mooncake)（KVCache 分离式存储，Apache-2.0）。结论按"继承 / 避开"归档。
+
+### 1.1 KVstorageBaseRaft-cpp —— 反面教材：无框架、无注册的代价
+
+其 `test/` 目录全部内容仅 4 个文件：`run.cpp`（boost 序列化 demo）、`defer_run.cpp`（defer 宏 demo）、
+`format.cpp`（格式化 demo）、`测试文件运行说明.md`（手写"用 g++ 手动编译"的说明）。根 `CMakeLists.txt`
+中没有任何 test 相关目标。真正的 Raft 行为验证靠 README 指导的手动流程：单机 fork 多进程 + `sleep` 对齐启动 + 人眼观察。
+
+| 缺陷 | 后果 | 本项目对策 |
+|---|---|---|
+| 测试无框架（无断言库） | "测试"只是可运行 demo，失败无信号 | GoogleTest 全覆盖，断言可累积、可过滤 |
+| 无注册（无 add_test/ctest） | 无法一条命令跑全部；CI 无从谈起 | 一切测试进 ctest，登记表管全量 |
+| 无元数据 | 无法分层执行（快/慢、需网络/本地混跑） | 登记表 Metadata 列 + ctest LABEL 同源 |
+| 真行为验证靠手动 fork+sleep | 白皮书作者被迫以"150 轮手跑"为纪律 | 集成随机测试脚本化、进夜跑 CI |
+
+> 正面遗产仅两条：`.clang-format` / `format.sh` 的风格纪律，以及"测试文件运行说明"这种**把跑法写进文档**的意识——
+> 本方案把该意识制度化成了登记表本身。
+
+### 1.2 Mooncake —— 正面机制：ctest 中心化 + 元数据内建
+
+Mooncake 是多模块大仓（store / transfer-engine / common / integration…），每个模块带自己的 `tests/` 目录，
+测试体系围绕 **gtest + CTest** 展开：
+
+1. **一测试文件一可执行，统一注册**：每模块 `tests/CMakeLists.txt` 用封装函数
+   （`add_store_test` / `add_ha_test`）统一"建可执行 + 链接依赖 + `add_test(NAME x COMMAND x)`"，
+   消除逐个手写链接库的漂移。
+2. **ctest 属性即元数据**：`TIMEOUT 90`、`ENVIRONMENT "MC_USE_TENT=1"`、`SKIP_RETURN_CODE 77`
+   （硬件缺失时测试自己返回 77 → ctest 记为 skipped 而非 failed）、`if(USE_CUDA)` 条件注册。
+3. **同一二进制多种跑法 = 多条登记**：如 `replica_selection_test` 以默认 env 跑一遍，再以
+   `--gtest_filter=...` + `MC_STORE_REPLICA_SCORING=1` 注册为独立的 `replica_selection_env_opt_in_test`。
+   **Runner/Args 与测试代码解耦**——这正是"一条登记 = 一种执行方式"的范式。
+4. **LABELS 供 CI 筛选**：`rdma`、`gpu`、`nvlink_gpu`、`integration` 等标签，CI 用
+   `ctest --label-exclude` / `-L` 分流（无 RDMA 网卡的 PR 机器自动排除 `rdma` 标签）。
+5. **目录按层级分**：`tests/e2e/`、`tests/ha/`、`tests/conf/`、`tests/utils/`、`tests/fault-tolerant/`，
+   层级一眼可辨；共享 fixture/helper 以头文件与 test-peer 库形式复用
+   （`master_service_test_fixture.h`、`test_server_helpers.h`）。
+6. **chaos 工具族**：`chaosctl`（拉起多 master/client，随机 kill/重启，结束后出报告）、
+   `chaos_test`（预定义故障场景）、`e2e_rand_test`（小时级随机长稳）——分布式正确性测试的成熟形态。
+7. **硬件依赖分层外移**：需要 A10 GPU 服务器的 E2E 用例放 `scripts/tone_tests/`，在外部 T-One 平台跑，
+   本地 CI 只保留可模拟部分。
+
+### 1.3 本方案 = Mooncake 骨架 + 登记表补上它缺的一环
+
+Mooncake 的事实来源仍然是**散落在各模块 CMakeLists.txt 的 add_test 调用**（200+ 处），
+"哪些测试存在、为什么这么跑"没有集中视图，跨模块查测试要 grep。本方案在其骨架上加一层：
+
+> **登记表（docs/testing.md §4）是唯一事实来源，CMake 注册是它的投影；两者由检查脚本双向对账，不一致即失败。**
+
+---
+
+## 2. 测试目录框架（目标布局）
+
+```
+TinyKV-White-Paper-main/
+├── docs/
+│   └── testing.md              # 本页：策略 + 登记表（唯一事实来源）
+├── tools/
+│   └── check_test_registry.py  # 仓库 ⇆ 登记表一致性检查（CI 门槛）
+└── tests/                      # 测试总目录（M0 落地时创建）
+    ├── testlib/                # 共享测试基建：fixture、模拟网络/时钟接口、线性一致性检查器封装
+    ├── unit/                   # L1 单元：gtest，进程内，无网络无磁盘 IO（或临时目录）
+    ├── simulation/             # L2 确定性模拟：虚拟时钟 + 虚拟网络，进程内，种子可复现
+    ├── integration/            # L3 集成：多进程真网络，故障注入 + 操作历史落盘 + lin-check
+    │   └── scripts/            #   集成测试 runner 脚本（bash/python，被 add_test 调起）
+    └── bench/                  # L4 基准：QPS/延迟/恢复时间，产出数字，不做硬失败断言
+```
+
+**取代关系**：设计文档 §4.3 草稿中顶层 `bench/` 与 `tests/` 的拆分，自本文档起统一为 `tests/bench/`，
+以便"所有可执行测试资产一个登记表管全"。设计文档处已加注记。
+
+### 命名与注册规范（硬规则）
+
+| 规则 | 内容 |
+|---|---|
+| 文件命名 | `<module>_<topic>_test.{cpp,sh,py}`，如 `raft_step_test.cpp`、`wal_crash_test.sh` |
+| 一文件一职责 | 一个 `_test.cpp` 编译为一个可执行（gtest main）；一个 runner 脚本对应一类集成场景 |
+| 注册入口 | CMake 中只允许通过项目封装函数 `add_tinykv_test(NAME <name> ...)` 注册（M0 落地，语义等同 Mooncake 的 `add_store_test`） |
+| 一登记一跑法 | 同一二进制换参数/换环境 = 新起一行登记（继承 Mooncake 的 env_opt_in 范式），不共用登记 |
+| 登记先行 | **新增测试文件或 add_test 的 PR，必须同时修改 §4 登记表**，并通过 §7 一致性检查 |
+
+---
+
+## 3. Level 分层定义（受控词表）
+
+| Level | 定义 | 依赖 | 时长预算 | 触发 | 质量门槛 |
+|---|---|---|---|---|---|
+| `unit` | 单模块行为断言：Raft 状态机消息序列、WAL 记录编解码、CF 前缀编码、事务 CF 操作 | 进程内；临时目录可用 | 单测 ≤ 10s | 每次 PR | 全绿，零容忍 flaky |
+| `simulation` | 确定性模拟器（虚拟时钟+虚拟网络：延迟/分区/丢包/重启），P2/P3 全特性先在此跑通 | 进程内，随机种子入参 | 单场景 ≤ 60s | 每次 PR | 全绿；失败可用种子精确复现 |
+| `integration` | 多进程 3~5 节点真网络：随机 kill/分区/恢复，客户端历史落盘 → 离线线性一致性检查 | 独占端口/目录，需隔离 | 分钟~小时级 | 夜跑（`nightly`）；PR 只跑冒烟子集 | **里程碑交付：连续 150 轮无 FAIL**（设计文档 §8.1） |
+| `bench` | 性能采数：批量提交曲线、ReadIndex 对比、崩溃恢复时间、split 耗时 | 独占机器防抖动 | 分钟级 | 夜跑 + 手动 | 不做硬失败；与设计文档 §3.4 PERF 指标对照出报告 |
+
+Level 与 ctest LABEL 一一对应（`add_tinykv_test` 内部把 Level 写成 LABEL），
+CI 用 `ctest -L unit|simulation|integration|bench` 选择，无需解析本页。
+
+---
+
+## 4. 登记表（唯一事实来源）
+
+> **表格语法约定**（检查脚本按此解析）：
+> - 每行 = 一个 ctest 测试 = 一种执行方式；列内多值用 `;` 分隔。
+> - `Scope`：测试资产路径（相对仓库根，文件或目录；目录则覆盖其下全部 `*_test.*`）。
+> - `Level`：§3 词表之一。
+> - `Runner`：**首个反引号 token = 该行的 ctest 测试名（全表唯一）**，其后可跟 ` = ` 与 COMMAND 说明：
+>   - gtest 可执行直跑（ctest 名 = 可执行名）：`` `raft_step_test` ``；
+>   - 同一二进制的参数/脚本变体：`` `sim_election_s42` = sim_election_test ``、
+>     `` `raft_chaos_n150` = bash tests/integration/scripts/run_chaos.sh ``。
+> - `Args`：传给 COMMAND 的参数与环境变量（`VAR=x --flag=v`），无则写 `-`。
+> - `Metadata`：§6 词表中的标签，`;` 分隔，必含一个速度标签（fast/slow/nightly）。
+
+<!-- registry:begin v1 -->
+| Scope | Level | Runner | Args | Metadata |
+|---|---|---|---|---|
+<!-- registry:end -->
+
+> **当前为空是正确的**：仓库尚无代码。M0 基建落地时按下表首批登记（届时移入正式表）：
+>
+> | Scope | Level | Runner | Args | Metadata |
+> |---|---|---|---|---|
+> | `tests/unit/common/encode_test.cpp` | unit | `encode_test` | - | fast |
+> | `tests/unit/common/kv_error_test.cpp` | unit | `kv_error_test` | - | fast |
+> | `tests/unit/wal/wal_record_test.cpp` | unit | `wal_record_test` | - | fast |
+> | `tests/unit/raft/raft_step_test.cpp` | unit | `raft_step_test` | - | fast |
+
+**与 SPEC 的证据链联动**：各阶段规格（`docs/SPEC-0~4-*.md` §x.7）引用本表登记名构成
+"需求 → 验收口径 → 登记测试 → 证据物"四环节证据链（规范见 SPEC-0 §0.7）。
+SPEC 中出现的测试名在对应功能实现时**必须真实登记进本表**方可称为完成；检查脚本保证表与仓库不漂移。
+
+---
+
+## 5. 新增测试 SOP（强制流程）
+
+1. **写测试**：按 §2 规范放入对应 Level 目录，命名 `<module>_<topic>_test.*`。
+2. **CMake 注册**：用 `add_tinykv_test()` 封装函数注册进 ctest（禁止散装 `add_test`）。
+3. **登记**：在 §4 表格标记区加一行，五列填全；同一二进制的每种跑法各一行。
+4. **自检**：跑 `python tools/check_test_registry.py`，必须 PASS 才可提交。
+5. **审查**：PR 模板含"已更新 docs/testing.md 登记表"勾选项；CI 中一致性检查失败即 PR 失败。
+
+**示例（P2 时期典型登记）**：
+
+```markdown
+| tests/unit/raft/raft_step_test.cpp | unit | `raft_step_test` | - | fast |
+| tests/simulation/sim_election_test.cpp | simulation | `sim_election_n3` = sim_election_test | `--seed=42 --nodes=3` | fast |
+| tests/simulation/sim_election_test.cpp | simulation | `sim_election_n5` = sim_election_test | `--seed=777 --nodes=5` | fast |
+| tests/integration/raft_chaos_test.py | integration | `raft_chaos_n150` = bash tests/integration/scripts/run_chaos.sh | `--nodes=3 --rounds=150` | nightly;needs-linux;serial;timeout:3600s |
+```
+
+> 注意：同一 `sim_election_test.cpp` 以不同参数注册为两个 ctest 测试名（`sim_election_n3` / `sim_election_n5`）——
+> ctest 要求注册名唯一，"一登记一跑法"由此落地（继承 Mooncake `replica_selection_env_opt_in_test` 的范式）。
+
+---
+
+## 6. Metadata 词表（受控，禁止自造）
+
+| 标签 | 语义 | 消费方 |
+|---|---|---|
+| `fast` | ≤ 60s，PR 必跑 | CI：PR job |
+| `slow` | ≤ 30min，PR 可选 / 合并必跑 | CI：合并 job |
+| `nightly` | 小时级或含随机长跑（150 轮纪律在此） | CI：夜跑 job |
+| `needs-linux` | 依赖 Linux 语义（fdatasync 等），Windows 跳过 | CI：平台矩阵 |
+| `serial` | 独占端口/目录/CPU，禁止与其测试并行（RUN_SERIAL） | ctest |
+| `skippable` | 环境缺失时以退出码 77 优雅跳过而非失败（继承 Mooncake SKIP_RETURN_CODE） | ctest |
+| `manual` | 交互式工具（chaosctl 类），不进任何 CI | 人 |
+| `quarantine` | 已知 flaky 隔离观察中，不计入门槛，修复 PR 必须引用 issue | ctest + 人 |
+| `timeout:<N>s` | ctest TIMEOUT 属性（秒） | ctest |
+
+词表扩展规则：新增标签必须先在本节登记语义与消费方，再投入使用；检查脚本对未知标签报错。
+
+---
+
+## 7. 一致性检查（遗漏产生明确失败）
+
+**工具**：`tools/check_test_registry.py`（Python 3 标准库，跨平台，不依赖构建）。
+
+**检查项（双向对账）**：
+
+| # | 方向 | 规则 | 失败信息 |
+|---|---|---|---|
+| 1 | 仓库 → 表 | 所有 `add_test(NAME ...)` 注册名必须等于某行 Runner 首个反引号 token（ctest 名） | `未登记测试: <name>（注册于 <cmake文件>）` |
+| 2 | 仓库 → 表 | `tests/` 下所有 `*_test.{cpp,sh,py}` 必须被某行 Scope 覆盖 | `测试文件未登记: <path>` |
+| 3 | 表 → 仓库 | 每行 Scope 指向的文件/目录必须存在 | `幽灵登记（路径不存在）: <scope>` |
+| 4 | 表 → 仓库 | Runner 为脚本（`.sh`/`.py`）时文件必须存在 | `Runner 脚本不存在: <runner>` |
+| 5 | 词表 | Level ∈ {unit, simulation, integration, bench}；Metadata ∈ §6 词表 | `非法 Level / 未知 Metadata 标签: <值>` |
+| 6 | 结构 | 测试名唯一；每行 Metadata 至少含一个速度标签；标记区表格可解析 | 对应语法错误提示 |
+
+**调用**：
+
+```bash
+python tools/check_test_registry.py            # 检查当前仓库
+python tools/check_test_registry.py --root <路径>   # 检查任意仓库副本（CI/脚本复用）
+```
+
+**CI 挂接（M0 落地）**：
+- PR job：编译前先跑本检查（秒级），失败即 PR 失败——遗漏在进入构建之前就被拦下；
+- 夜跑 job：跑测试前再跑一次，防止夜跑窗口期间登记漂移；
+- M0 时可加 CMake 自定义 target `check_test_registry` 便于本地 `cmake --build build --target check_test_registry`。
+
+**失败输出示例**：
+
+```
+FAIL: 登记表与仓库不一致 (docs/testing.md §4)
+  [E1] 未登记测试: sim_split_test（注册于 tests/simulation/CMakeLists.txt:41）
+  [E2] 测试文件未登记: tests/unit/txn/prewrite_test.cpp
+  [E3] 幽灵登记（路径不存在）: tests/unit/raft/raft_old_test.cpp
+  [E5] 未知 Metadata 标签: very-fast（第 12 行）
+共 4 处不一致；修复后重跑 python tools/check_test_registry.py
+```
+
+---
+
+## 8. CI 分发策略（消费登记表的方式）
+
+| Job | 选择器 | 内容 |
+|---|---|---|
+| PR（Windows + Linux 矩阵） | `ctest -L fast` + 平台排除 `needs-linux` | unit + simulation 全部、integration 冒烟子集 |
+| 合并 | `+ slow` | 补跑慢速集成场景 |
+| 夜跑（Linux） | `-L nightly` | 150 轮随机一致性测试、长稳、全量 bench 采数 |
+| 手动 | `manual` | chaosctl 类交互工具，本机调试用 |
+
+---
+
+## 9. 变更记录
+
+| 日期 | 变更 | 依据 |
+|---|---|---|
+| 2026-11-16 | 初版：调研两参考项目测试体系，确立"登记表唯一事实来源 + 双向一致性检查"范式 | KVstorageBaseRaft-cpp `test/` 反例调研 + Mooncake `*/tests/` 机制调研（§1） |
