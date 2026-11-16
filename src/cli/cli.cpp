@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "common/error.h"
+#include "cli/http_client.h"
 #include "common/error_format.h"
 #include "config/config.h"
 #include "server/raw.h"
@@ -30,6 +31,7 @@ constexpr const char* kDefaultConfig = "demo.yaml";
 // 已解析的全局参数
 struct Globals {
     std::string config{kDefaultConfig};
+    std::string endpoint;     // 非空 = 集群模式（当前只支持 status）
     Cf cf{Cf::Default};
     std::size_t limit{10};
 };
@@ -47,6 +49,7 @@ std::string_view usage() {
         "\n"
         "选项:\n"
         "  --config <path>          配置文件路径（默认 demo.yaml）\n"
+        "  --endpoint <host:port>   集群模式：取该节点的 /status（当前只支持 status）\n"
         "  --cf <default|write|lock> 列族（默认 default）\n"
         "  --limit <n>              scan 返回条数上限\n"
         "  --help                   显示本帮助\n";
@@ -70,13 +73,15 @@ result<std::vector<std::string>> split_globals(std::vector<std::string> args, Gl
     std::vector<std::string> positional;
     for (std::size_t i = 0; i < args.size(); ++i) {
         const std::string& a = args[i];
-        if (a == "--cf" || a == "--limit" || a == "--config") {
+        if (a == "--cf" || a == "--limit" || a == "--config" || a == "--endpoint") {
             if (i + 1 >= args.size()) {
                 return std::unexpected(InvalidArgument{"选项 " + a + " 缺少取值"});
             }
             const std::string& v = args[++i];
             if (a == "--config") {
                 g.config = v;
+            } else if (a == "--endpoint") {
+                g.endpoint = v;
             } else if (a == "--cf") {
                 const auto cf = parse_cf(v);
                 if (!cf) {
@@ -181,6 +186,32 @@ int cmd_status(const Config& cfg, const Globals& g, std::ostream& out) {
 
 }  // namespace
 
+
+// 集群模式：目前只开放只读 status；写需提案回调（M3 与 ReadIndex 同链路），明确拒绝而非假成功
+int cmd_cluster(const Globals& g, const std::string& cmd, std::ostream& out, std::ostream& err) {
+    if (cmd != "status") {
+        err << "集群模式当前只支持 status；写入需提案回调，见 docs/cli.md\n";
+        return kExitUsage;
+    }
+    const auto colon = g.endpoint.rfind(':');
+    if (colon == std::string::npos) {
+        err << "--endpoint 需为 host:port\n";
+        return kExitUsage;
+    }
+    const std::string host = g.endpoint.substr(0, colon);
+    const auto port = static_cast<std::uint16_t>(std::stoul(g.endpoint.substr(colon + 1)));
+    auto body = http_get(host, port, "/status");
+    if (!body) {
+        err << "取 /status 失败：" << describe(body.error()) << "\n";
+        return kExitRuntime;
+    }
+    out << *body;
+    if (!body->empty() && body->back() != '\n') {
+        out << "\n";
+    }
+    return kExitOk;
+}
+
 int run_cli(std::span<const std::string> args, std::ostream& out, std::ostream& err) {
     std::vector<std::string> argv(args.begin(), args.end());
     Globals g;
@@ -194,12 +225,16 @@ int run_cli(std::span<const std::string> args, std::ostream& out, std::ostream& 
         return kExitOk;
     }
 
+    const std::string& cmd = (*positional)[0];
+    if (!g.endpoint.empty()) {
+        return cmd_cluster(g, cmd, out, err);   // 集群模式不需要本地配置
+    }
+
     auto cfg = load_config(g.config);
     if (!cfg) {
         err << "配置加载失败：" << describe_kind(cfg.error()) << "\n";
         return kExitRuntime;
     }
-    const std::string& cmd = (*positional)[0];
     if (cmd == "status") {
         return cmd_status(*cfg, g, out);
     }

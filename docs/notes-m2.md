@@ -18,11 +18,11 @@
 |---|---|
 | FUNC-03 选举/复制 | ✅ `raft_step_test`（3/5 节点收敛、拒绝不重置计时器、整段回退、旧 term 不提交、压缩后回 prevCommit） |
 | FUNC-04 3 节点读写 + 重试幂等 | ✅ 单副本链路 `raft_kv_test`；3 节点写读走同一代码路径（消息总线已覆盖复制） |
-| ENG-05 150 轮 | ⚠️ 只做了**秒级丢包冒烟**（`sim_chaos_test`，30% 丢包 × 5 种子）。150 轮长跑需真实网络与进程级 kill -9，未做 |
-| REL-02 崩溃恢复 | ✅ raft log 与 hard state 落盘可重开读回（`raft_log_test` 的 StateSurvivesReopen）；**进程级 kill -9 注入未做** |
+| ENG-05 150 轮 | ⚠️ `raft_chaos_n150` 已跑通 150 种子（14s，丢包+提案+重启）；**进程级 kill -9 仍用关闭重建模拟** |
+| REL-02 崩溃恢复 | ✅ 落盘可读回 + `raft_chaos_n150` 的 CommittedDataSurvivesRestart；**进程级 kill -9 未做** |
 | 快照与 CompactLog | ⚠️ `RaftLog::compact` 已实现并有测试；**快照生成/分块传输/安装未做** |
-| UX-04 `/status` 端点 | ❌ 未做（已有 TCP 层，但 HTTP 端点未实现） |
-| UX-01/02 集群 CLI | ❌ 未做（集群子命令未接传输层） |
+| UX-04 `/status` 端点 | ✅ `StatusServer`（极简 HTTP，手写不引框架）+ `cli_status_test`；端口独立于 Raft 帧端口（偏差已记） |
+| UX-01/02 集群 CLI | ⚠️ 集群模式**只读**：`--endpoint ... status` 可用；`put/del/scan` 明确拒绝（需提案回调，与 M3 ReadIndex 同链路一起做） |
 | PERF-01/02/05/06/08 | ⚠️ 仅 M1 的单机写基准；集群档位未测（无网络层） |
 | Transport（asio 传输） | ✅ `TcpTransport`：长度前缀分帧、io 线程收、异步短连接发；三节点真 socket 上选主+复制+apply 通过（`tcp_cluster_test`） |
 

@@ -18,17 +18,6 @@ namespace cmdpb = tinykv::cmdpb;
 using namespace tinykv::testlib;   // NOLINT(google-build-using-namespace)
 using tinykv::raftstore::Peer;
 
-cmdpb::RaftCmdRequest make_put(std::uint64_t client, std::uint64_t seq, const std::string& key,
-                               const std::string& value) {
-    cmdpb::RaftCmdRequest req;
-    req.mutable_header()->set_client_id(client);
-    req.mutable_header()->set_sequence_id(seq);
-    auto* one = req.add_requests();
-    one->mutable_put()->set_key(key);
-    one->mutable_put()->set_value(value);
-    return req;
-}
-
 cmdpb::RaftCmdRequest make_delete(std::uint64_t client, std::uint64_t seq,
                                   const std::string& key) {
     cmdpb::RaftCmdRequest req;
@@ -72,7 +61,7 @@ TEST(RaftKv, SingleVoterBecomesLeaderOnFirstTick) {
 
 TEST(RaftKv, PutGoesThroughLogThenApplies) {
     SinglePeer f;
-    ASSERT_TRUE(f.peer->propose(make_put(7, 1, "k1", "v1")).has_value());
+    ASSERT_TRUE(f.peer->propose(make_put_request(7, 1, "k1", "v1")).has_value());
     auto applied = f.peer->on_ready();
     ASSERT_TRUE(applied.has_value());
     EXPECT_EQ(*applied, 1U);
@@ -85,11 +74,11 @@ TEST(RaftKv, PutGoesThroughLogThenApplies) {
 
 TEST(RaftKv, DuplicateSequenceIsNotReapplied) {
     SinglePeer f;
-    ASSERT_TRUE(f.peer->propose(make_put(7, 1, "k1", "v1")).has_value());
+    ASSERT_TRUE(f.peer->propose(make_put_request(7, 1, "k1", "v1")).has_value());
     ASSERT_TRUE(f.peer->on_ready().has_value());
 
     // 同 client 同 seq 的重试：不得产生新提案，也不得覆盖已提交的值
-    ASSERT_TRUE(f.peer->propose(make_put(7, 1, "k1", "v2")).has_value());
+    ASSERT_TRUE(f.peer->propose(make_put_request(7, 1, "k1", "v2")).has_value());
     auto applied = f.peer->on_ready();
     ASSERT_TRUE(applied.has_value());
     EXPECT_EQ(*applied, 0U);
@@ -102,7 +91,7 @@ TEST(RaftKv, DuplicateSequenceIsNotReapplied) {
 
 TEST(RaftKv, DeleteAppliesAndLeavesNoValue) {
     SinglePeer f;
-    ASSERT_TRUE(f.peer->propose(make_put(9, 1, "k2", "v2")).has_value());
+    ASSERT_TRUE(f.peer->propose(make_put_request(9, 1, "k2", "v2")).has_value());
     ASSERT_TRUE(f.peer->on_ready().has_value());
     ASSERT_TRUE(f.peer->propose(make_delete(9, 2, "k2")).has_value());
     ASSERT_TRUE(f.peer->on_ready().has_value());
@@ -121,7 +110,7 @@ TEST(RaftKv, NonLeaderRejectsReadAndProposal) {
     ASSERT_FALSE(got.has_value());
     EXPECT_TRUE(std::holds_alternative<tinykv::NotLeader>(got.error()));
 
-    auto r = f.peer->propose(make_put(1, 1, "k", "v"));
+    auto r = f.peer->propose(make_put_request(1, 1, "k", "v"));
     ASSERT_FALSE(r.has_value());
     EXPECT_TRUE(std::holds_alternative<tinykv::NotLeader>(r.error()));
 }

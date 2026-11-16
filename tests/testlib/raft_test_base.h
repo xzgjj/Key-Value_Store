@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <raft_cmdpb.pb.h>
+
 #include "raft_cluster.h"
 #include "storage_test_base.h"
 
@@ -18,5 +20,19 @@ using tinykv::raft::Entry;
 using tinykv::raft::Raft;
 using tinykv::raft::RaftLog;
 using tinykv::raftpb::Message;
+
+// 构造一条 Put 提案（客户端去重键 + 单条命令；一条命令设全字段，避免造出空 key）
+[[nodiscard]] inline ::tinykv::cmdpb::RaftCmdRequest make_put_request(std::uint64_t client,
+                                                                     std::uint64_t seq,
+                                                                     const std::string& key,
+                                                                     const std::string& value) {
+    ::tinykv::cmdpb::RaftCmdRequest req;
+    req.mutable_header()->set_client_id(client);
+    req.mutable_header()->set_sequence_id(seq);
+    auto* one = req.add_requests();
+    one->mutable_put()->set_key(key);
+    one->mutable_put()->set_value(value);
+    return req;
+}
 
 }  // namespace tinykv::testlib

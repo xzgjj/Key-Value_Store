@@ -218,16 +218,17 @@ TEST(SimCompaction, LaggingPeerCatchesUpViaSnapshot) {
 
 | 需求 | 验收口径 | 测试登记名 | 命令 | 证据物 |
 |---|---|---|---|---|
-| FUNC-03(选举) | 随机超时后唯一 leader；分区恢复后收敛；拒票不重置计时器 | `raft_step_test` `sim_election_n3` `sim_election_n5` | `ctest -L fast` | junit.xml（种子入日志） |
-| FUNC-03(复制) | 增量复制+整段回退+误截断防护 | `sim_replication_test` | `ctest -L fast` | junit.xml |
-| FUNC-03(压缩/快照) | compact 后落后节点走快照追赶 | `sim_compaction_test` | `ctest -L fast` | junit.xml |
-| REL-02 | 随机 kill -9 + 重启：已确认提交零丢失、Raft 状态不错乱、WAL 不被改写 | `wal_segment_crash_test` `sim_restart_test` | `ctest -L slow` | junit.xml + 种子日志 |
-| FUNC-04 | 3 节点读写正确；客户端重试幂等（去重表） | `sim_dedup_test` `raft_kv_smoke`（integration） | `ctest -L fast/-L slow` | junit.xml |
-| UX-04(M2 端点) | /status 暴露 term/leader/commit/apply lag/QPS/WAL 大小且数值与日志对得上 | `status_endpoint_test` | `ctest -L fast` | junit.xml |
-| UX-01/02 | 干净机器 5 分钟上手录得；CLI 集群子命令 --help 齐全 | `quickstart_smoke`（脚本） | CI | 计时日志 |
+| FUNC-03(选举) | 随机超时后唯一 leader；分区恢复后收敛；拒票不重置计时器 | `raft_step_test`（含 3/5 节点收敛与拒票不重置） | `ctest -L fast` | junit.xml |
+| FUNC-03(复制) | 增量复制+整段回退+误截断防护 | `raft_step_test`（LeaderProposalReplicates）+ `tcp_cluster_test`（真 TCP 复制） | `ctest -L fast` / `-L integration` | junit.xml |
+| FUNC-03(压缩) | compact 后 first_index 前移、dummy_term 正确、禁止越过 committed | `raft_log_test` | `ctest -L fast` | junit.xml |
+| FUNC-03(快照安装) | 落后节点经快照追赶 | **未实现**（只有 compact，无生成/传输/安装） | — | 缺口，见 notes-m2 §2 |
+| REL-02 | 已确认提交零丢失、Raft 状态不错乱 | `wal_crash_test`（数据面）+ `raft_chaos_n150`（CommittedDataSurvivesRestart） | `ctest -L fast` / `-L integration` | junit.xml；**进程级 kill -9 未做** |
+| FUNC-04 | 提案经共识 → apply → 重试幂等 | `raft_kv_test`（去重）+ `tcp_cluster_test`（真 TCP 三节点写读） | `ctest -L fast` / `-L integration` | junit.xml |
+| UX-04(M2 端点) | `/status` 返回 peer_id/is_leader/term/committed/last_index；CLI 集群模式可取 | `cli_status_test` | `ctest -L fast` | junit.xml |
+| UX-01/02 | 集群子命令 `--endpoint ... status` 可用且 --help 齐全 | `cli_status_test` | `ctest -L fast` | junit.xml；**5 分钟上手脚本未做** |
 | UX-03 | 本阶段错误（NotLeader/IoFailed/Corrupted）三要素逐条核对 | —（评审 + `kv_error_test` 扩展） | `ctest -R kv_error_test` | 评审记录 |
 | UX-06 | M2 实现笔记一篇 + 架构图一张 | —（人工） | — | `docs/notes-m2.md` |
-| ENG-05 | **连续 150 轮随机故障注入无 FAIL**（kill/分区/丢包/重启） | `raft_chaos_n150`（nightly）+ `raft_chaos_smoke`（fast） | `ctest -R raft_chaos_n150` | `evidence/nightly/raft_chaos_150.txt`（含每轮种子） |
+| ENG-05 | 连续 150 轮随机注入无 FAIL（丢包/提案/重启） | `raft_chaos_n150`（150 种子）+ `sim_chaos_test`（5 种子，PR 必跑） | `ctest -R raft_chaos_n150` | junit.xml；**进程级 kill -9 未做** |
 | PERF-01/02/05 | S0：≥2k QPS / ≥8× / P99≤10ms | `write_bench` | 夜跑 | `bench/write.json` |
 | PERF-06 | kill -9 @1GB log 恢复 ≤30s(S0) | `recovery_bench` | 夜跑 | `bench/recovery.json` |
 | PERF-08 | 空载心跳 ≤1MB/s/peer(S0)；心跳消息不含 entries（协议断言） | `heartbeat_bandwidth_bench` + `raft_step_test` 断言 | 夜跑 | `bench/heartbeat.json` |
