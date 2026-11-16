@@ -1,0 +1,141 @@
+# 文件用途：TinyKV-CI 双平台流水线（ENG-02）——登记检查 → 静态检查 → 违禁扫描 → 构建 → fast 测试；夜跑 job 骨架。
+# 归属：TinyKV-CPP（M0 基建，SPEC-0 §0.4 CI 六步 + ENG-05 载体）。
+#
+# 设计取舍：
+#   * Windows 走 MSYS2 ucrt64（与本机开发工具链同源，行为一致，不引入第二套编译器差异）；
+#   * Linux 走发行版包（无 vcpkg 拉取，冷启动快）；
+#   * 两条线都只用 CMake preset 构建，命令与本地 CLAUDE.md §8 完全一致，避免"CI 能过、本地不能"；
+#   * 夜跑 job 只调度 ctest -L nightly（当前为空集，空集通过即骨架达标），150 轮纪律随 M2 接入。
+
+name: TinyKV-CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  schedule:
+    - cron: "0 18 * * *"   # 每日 02:00 (UTC+8) 夜跑
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux · g++ · fast
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0     # guard/scope 阶段需要基线提交
+
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build clang-format clang-tidy \
+            libprotobuf-dev protobuf-compiler libspdlog-dev
+
+      - name: 登记表对账（编译前失败）
+        run: python3 tools/check_test_registry.py
+
+      - name: 文档与对齐阶段
+        run: |
+          python3 tools/ci/run_ci.py --stage docs
+          python3 tools/ci/run_ci.py --stage align
+
+      - name: 配置
+        run: cmake --preset linux-debug
+
+      - name: 格式检查
+        run: |
+          find src tests -name '*.cpp' -o -name '*.h' \
+            | xargs clang-format --dry-run -Werror
+
+      - name: 静态检查
+        run: |
+          find src -name '*.cpp' \
+            | xargs clang-tidy -p build/linux-debug --quiet
+
+      - name: 构建
+        run: cmake --build --preset linux-debug
+
+      - name: 快速测试（fast）
+        run: ctest --test-dir build/linux-debug -L fast --output-on-failure
+
+      - name: 归档测试证据
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-linux
+          path: build/evidence/
+          if-no-files-found: ignore
+
+  windows:
+    name: Windows · MSYS2 g++ · fast
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 安装 MSYS2 工具链与依赖
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-protobuf
+            mingw-w64-ucrt-x86_64-spdlog
+            mingw-w64-ucrt-x86_64-clang-tools-extra
+            python
+
+      - name: 登记表 + 对齐 + 构建 + 测试
+        shell: msys2 {0}
+        env:
+          CMAKE_GENERATOR: Ninja
+        run: |
+          export CC=gcc CXX=g++
+          python tools/check_test_registry.py
+          python tools/ci/run_ci.py --stage docs
+          python tools/ci/run_ci.py --stage align
+          cmake --preset win-debug
+          cmake --build --preset win-debug
+          ctest --test-dir build/win-debug -L fast --output-on-failure
+
+  nightly:
+    name: 夜跑骨架（nightly）
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build libprotobuf-dev protobuf-compiler libspdlog-dev
+
+      - name: 配置与构建
+        run: |
+          cmake --preset linux-debug
+          cmake --build --preset linux-debug
+
+      - name: 夜跑（当前为空集，空集通过即骨架达标）
+        run: |
+          mkdir -p build/evidence/nightly
+          ctest --test-dir build/linux-debug -L nightly --output-on-failure \
+            | tee build/evidence/nightly/nightly.txt
+
+      - name: 归档夜跑证据
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-nightly
+          path: build/evidence/nightly/
+          if-no-files-found: ignore
