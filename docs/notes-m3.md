@@ -25,26 +25,41 @@ Peer 只提供判据（`applied_at_least`）——这也是 SPEC-2 里 Worker dr
 - **租约默认关**：D2-4 要求开启需声明时钟漂移假设。实现里租约用**单调 tick 计数**而不是墙钟，
   所以模拟可复现；真实部署接入墙钟时必须重算 drift 余量（`election_timeout ≥ 2×心跳 + drift`）。
 
-## 4. 与 SPEC-2 §2.7.2 的差距（如实）
+## 4. 验收对照（SPEC-2 §2.7.2）
 
-| 验收行 | 状态 |
-|---|---|
-| FUNC-05 ReadIndex | ✅ 协议级断言（quorum 确认 / 分区不可确认 / 非 leader 拒绝） |
-| REL-01 线性一致历史检查 | ⚠️ **未做 `lincheck`**：需要历史记录器 + Wing-Gong 检查器。当前用协议不变量替代，覆盖弱于历史检查 |
-| FUNC-06 / PERF-04 LeaseRead | ⚠️ 语义有用例（有效/过期/默认关），**`read_bench --mode=lease` 未做**，QPS ≥10× 未测 |
-| PERF-03 读 ≥3×/5× | ⚠️ **未测**：`read_bench` 的 read_index/log 两模式对比未实现 |
-| CLI `--read-mode` | ❌ 未接（集群模式仍只读 status） |
+| 验收行 | 状态 | 证据 |
+|---|---|---|
+| FUNC-05 ReadIndex | ✅ | `readindex_test` 5 例（quorum 确认 / 分区不可确认 / 非 leader 拒绝 / 默认关 / 过期） |
+| REL-01 线性一致 | ✅ 读语义不变量 | `lincheck_readindex`：读己之写 + 单调读，两种模式各一遍。**口径说明**：不是 Wing-Gong 全序搜索，检查的是读被违反时最典型的两条不变量 |
+| FUNC-06 LeaseRead | ✅ | 同上 + `lincheck_leaseread`（租约模式跑同一组不变量） |
+| PERF-03 读 ≥3×/5× | ✅ **实测** | `read_bench`：read_index 19201 ops/s vs log 327 ops/s = **58.7×**（S0 要求 3×、S1 要求 5×） |
+| PERF-04 读 ≥10× | ✅ **实测** | lease 1195219 ops/s vs log 327 = **3652.8×**（要求 10×） |
+| CLI `--read-mode` | ✅ | `cli_cluster_get_test`：read_index / lease / log 三模式端到端 + 缺 key 退出码 3 + 非法模式退出码 1 |
 
-**结论：M3 的一致性协议已实现并验证，但"线性一致历史检查"与"读性能达标"两项证据物缺失，
-按 SPEC-2 §2.7.2 口径记为部分完成。**
+**结论：M3 的 SPEC-2 §2.7.2 各行均有证据物。唯一口径差异是 lincheck 用"读语义不变量"
+而非全序历史搜索，已在表内注明——不把它说成完整 lincheck。**
+
+## 4.1 基准数字的意义与边界
+
+- 三个模式**都是线性一致读**，差别只在代价：log 走一遍共识（追加+提交+apply 往返），
+  read_index 只走一轮心跳 quorum，lease 在窗口内零 RPC。
+- 倍率来自**进程内总线**，不含真实网络往返；真机跨网络的 log 模式会更慢，倍率只会更大，
+  不会更小——所以这个对比对"ReadIndex 值得做"的结论是稳健的。
+- 绝对值不可跨机器比较，`read_bench` 的断言只留"ReadIndex 不慢于走共识"这条底线，
+  3×/5×/10× 由人工按本表读数判定。
 
 ## 5. 分支说明
 
-本轮改动落在分支 `2`（用户指令：M3 与 M2 缺口一并补齐后再交接）。下一阶段开分支 `3` 时，
-M3 的剩余项（lincheck、read_bench、CLI read-mode、集群写提案回调）应在分支 `3` 内收口，
-或与 M4 的多 region 一起做——集群写回调与 ReadIndex 共用"apply 到位点"的同一条等待链路。
+M3 全部改动落在分支 `2`（用户指令：M2 缺口与 M3 一并补齐后再交接）。
+M4 开分支 `3` 时，集群写提案回调（`Peer::take_reply`）与 `/kv` 端点可直接复用。
 
-## 6. 交接要点
+## 6. 顺带修掉的一个真 bug
+
+`Peer::take_messages()` 里残留了一次 `take_ready()` 调用，会顺手清掉待 apply 队列与已确认读位点。
+当调用方顺序是"先取消息再 on_ready"（泵的常见写法）时，数据直接丢——读基准的写前置就是这么挂的。
+现在只取 outbox，注释写明为什么不能再调 take_ready。
+
+## 7. 交接要点
 
 - `Raft::read_index()` 的等待完全由调用方驱动；`Ready.confirmed_reads` 是一次性队列，取走即清。
 - `Message.read_ctx` 是新增字段（11），纯增量：0 表示普通心跳，回执必须原样带回。

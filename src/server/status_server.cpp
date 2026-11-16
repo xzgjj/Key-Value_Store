@@ -20,9 +20,11 @@ constexpr const char* kNotFound =
 }  // namespace
 
 result<std::unique_ptr<StatusServer>> StatusServer::start(
-    const std::string& host, std::uint16_t port, std::function<std::string()> provider) {
+    const std::string& host, std::uint16_t port, std::function<std::string()> provider,
+    KvHandler kv_handler) {
     auto server = std::unique_ptr<StatusServer>(new StatusServer());   // NOLINT：构造私有
     server->provider_ = std::move(provider);
+    server->kv_handler_ = std::move(kv_handler);
 
     asio::error_code ec;
     const asio::ip::tcp::endpoint endpoint(asio::ip::make_address(host, ec), port);
@@ -85,8 +87,20 @@ void StatusServer::serve(std::shared_ptr<asio::ip::tcp::socket> sock) {
             return;
         }
         const std::string request(buf->data(), n);
-        const bool is_status = request.rfind("GET /status", 0) == 0;
-        const std::string resp = is_status ? http_response(provider_()) : std::string(kNotFound);
+        std::string body;
+        bool ok = false;
+        if (request.rfind("GET /status", 0) == 0) {
+            body = provider_();
+            ok = true;
+        } else if (kv_handler_ && request.rfind("GET /kv?", 0) == 0) {
+            const auto line_end = request.find(" HTTP/");
+            const auto qmark = request.find('?');
+            if (line_end != std::string::npos && qmark != std::string::npos && qmark < line_end) {
+                body = kv_handler_(request.substr(qmark + 1, line_end - qmark - 1));
+                ok = true;
+            }
+        }
+        const std::string resp = ok ? http_response(body) : std::string(kNotFound);
         asio::async_write(*sock, asio::buffer(resp), [sock](const asio::error_code&, std::size_t) {
             asio::error_code ig;
             sock->shutdown(asio::ip::tcp::socket::shutdown_both, ig);

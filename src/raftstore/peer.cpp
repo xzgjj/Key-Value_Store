@@ -71,7 +71,8 @@ result<GetResult> Peer::get(Cf cf, std::string_view key) const {
 void Peer::tick() { raft_->tick(); }
 
 std::vector<raftpb::Message> Peer::take_messages() {
-    auto ready = raft_->take_ready();   // messages 已由 on_ready 收进 outbox；此处只清空
+    // 只取 outbox，**不要**再调用 take_ready()：那会顺手清掉待 apply 队列与已确认读位点，
+    // 一旦调用方先 take_messages 再 on_ready（泵的常见顺序），数据就丢了。
     std::vector<raftpb::Message> out;
     out.swap(outbox_);
     return out;
@@ -125,9 +126,43 @@ result<void> Peer::apply_entry(const raftpb::Entry& entry) {
     return execute(req);
 }
 
+void Peer::fill_get_reply(const cmdpb::GetRequest& get, cmdpb::GetResponse* out) {
+    // log 模式读：读也在日志里定序，apply 时才真正取数
+    auto got = storage_.get(to_cf(get.cf()),
+                            std::as_bytes(std::span{get.key().data(), get.key().size()}));
+    if (got.has_value() && got->value.has_value()) {
+        out->set_found(true);
+        out->set_value(*got->value);
+    }
+}
+
+void Peer::fill_scan_reply(const cmdpb::ScanRequest& scan, cmdpb::ScanResponse* out) {
+    if (scan.limit() == 0) {
+        return;
+    }
+    auto reader = storage_.create_reader();
+    if (!reader.has_value()) {
+        return;
+    }
+    auto it = (*reader)->scan(Cf::Default,
+                              std::as_bytes(std::span{scan.start_key().data(),
+                                                      scan.start_key().size()}),
+                              scan.limit());
+    if (!it.has_value()) {
+        return;
+    }
+    for (; (**it).valid(); (**it).next()) {
+        out->add_keys(std::string((**it).key()));
+        out->add_values(std::string((**it).value()));
+    }
+}
+
 result<void> Peer::execute(const cmdpb::RaftCmdRequest& req) {
     ModifyVec batch;
+    cmdpb::RaftCmdResponse resp;   // 与 requests 顺序一一对应的回执
+    resp.mutable_header()->set_region_id(req.header().region_id());
     batch.reserve(static_cast<std::size_t>(req.requests_size()));
+
     for (const cmdpb::Request& one : req.requests()) {
         switch (one.cmd_case()) {
             case cmdpb::Request::kPut: {
@@ -135,20 +170,24 @@ result<void> Peer::execute(const cmdpb::RaftCmdRequest& req) {
                 batch.push_back(Modify{Put{.cf = to_cf(put.cf()),
                                            .key = as_string(put.key()),
                                            .value = as_string(put.value())}});
+                resp.add_cmd_responses()->mutable_put();
                 break;
             }
             case cmdpb::Request::kDelete: {
                 const auto& del = one.delete_();
                 batch.push_back(Modify{Delete{.cf = to_cf(del.cf()), .key = as_string(del.key())}});
+                resp.add_cmd_responses()->mutable_delete_();
                 break;
             }
             case cmdpb::Request::kGet:
+                fill_get_reply(one.get(), resp.add_cmd_responses()->mutable_get());
+                break;
             case cmdpb::Request::kScan:
+                fill_scan_reply(one.scan(), resp.add_cmd_responses()->mutable_scan());
+                break;
             case cmdpb::Request::kReadIndex:
             case cmdpb::Request::CMD_NOT_SET:
-                // 读命令不应进入日志；出现即视为契约误用
-                return std::unexpected(
-                    InvalidArgument{"读命令不应被提案复制（M2 读走 leader 本地）"});
+                return std::unexpected(InvalidArgument{"ReadIndex 不进日志；空命令视为契约误用"});
             default:
                 return std::unexpected(InvalidArgument{"未知命令类型"});
         }
@@ -158,12 +197,28 @@ result<void> Peer::execute(const cmdpb::RaftCmdRequest& req) {
             return r;
         }
     }
-    // 去重位点只在 apply 成功后推进
     const std::uint64_t client_id = req.header().client_id();
     if (client_id != 0) {
         last_seq_[client_id] = req.header().sequence_id();
+        replies_[{client_id, req.header().sequence_id()}] = std::move(resp);
     }
     return {};
+}
+
+std::optional<cmdpb::RaftCmdResponse> Peer::take_reply(std::uint64_t client_id,
+                                                      std::uint64_t seq) {
+    const auto it = replies_.find({client_id, seq});
+    if (it == replies_.end()) {
+        return std::nullopt;
+    }
+    auto out = std::move(it->second);
+    replies_.erase(it);
+    return out;
+}
+
+std::optional<cmdpb::RaftCmdResponse> Peer::take_read_reply(std::uint64_t client_id,
+                                                            std::uint64_t seq) {
+    return take_reply(client_id, seq);   // log 模式读与写共用回执表，语义一致
 }
 
 }  // namespace tinykv::raftstore

@@ -3,3 +3,4 @@
 
 add_tinykv_test(cli_local_smoke SRCS cli_local_smoke_test.cpp LIBS tinykv_cli tinykv_config)
 add_tinykv_test(cli_status_test SRCS cli_status_test.cpp LIBS tinykv_cli tinykv_config tinykv_server)
+add_tinykv_test(cli_cluster_get_test SRCS cli_cluster_get_test.cpp LIBS tinykv_cli tinykv_config tinykv_server tinykv_raftstore)

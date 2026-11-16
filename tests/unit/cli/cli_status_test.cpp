@@ -47,7 +47,8 @@ TEST(CliClusterStatus, WriteRejectedInClusterMode) {
     const int code =
         run({"--endpoint", "127.0.0.1:1", "put", "k", "v"}, out, err);
     EXPECT_EQ(code, 1);
-    EXPECT_NE(err.str().find("只支持 status"), std::string::npos) << err.str();
+    EXPECT_NE(err.str().find("status"), std::string::npos) << err.str();
+    EXPECT_NE(err.str().find("get"), std::string::npos) << err.str();
 }
 
 TEST(CliClusterStatus, UnknownEndpointReportsRuntimeError) {

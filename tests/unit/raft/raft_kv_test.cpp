@@ -115,13 +115,13 @@ TEST(RaftKv, NonLeaderRejectsReadAndProposal) {
     EXPECT_TRUE(std::holds_alternative<tinykv::NotLeader>(r.error()));
 }
 
-TEST(RaftKv, ReadCommandInLogIsRejected) {
-    // 读命令不应进入日志：apply 时遇到必须报错，而不是静默跳过
+TEST(RaftKv, ReadIndexCommandInLogIsRejected) {
+    // ReadIndex 标记不应进日志（它只是读协调器）；Get 可以进日志——那是 log 模式读
     SinglePeer f;
     cmdpb::RaftCmdRequest req;
     req.mutable_header()->set_client_id(3);
     req.mutable_header()->set_sequence_id(1);
-    req.add_requests()->mutable_get()->set_key("k");
+    req.add_requests()->mutable_read_index();
     ASSERT_TRUE(f.peer->propose(req).has_value());
 
     auto applied = f.peer->on_ready();

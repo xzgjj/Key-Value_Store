@@ -1,0 +1,186 @@
+// 文件用途：三节点 Peer 集群夹具（进程内总线）——供读基准与线性一致检查共用。
+// 归属：TinyKV-CPP（tests/testlib 共享基建，登记表豁免；docs/testing.md §2）。
+//
+// 与 raft_cluster.h 的区别：那个只连 Raft 状态机，这个连完整 Peer（提案→apply→存储），
+// 因此能做"真读真写"的基准与一致性检查。消息仍在进程内路由，避免把网络抖动混进读延迟。
+
+#pragma once
+
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include "raft/raft.h"
+#include "raft_test_base.h"
+#include "raftstore/peer.h"
+#include "storage/engine.h"
+#include "temp_dir.h"
+
+namespace tinykv::testlib {
+
+using tinykv::raft::ReadMode;
+using tinykv::raftstore::Peer;
+
+class PeerCluster {
+public:
+    explicit PeerCluster(int nodes, std::uint64_t election_timeout = 8,
+                         std::uint64_t heartbeat = 3) {
+        const std::vector<PeerId> voters = make_voters(nodes);
+        for (int i = 0; i < nodes; ++i) {
+            dirs_.push_back(std::make_unique<TempDir>("tinykv_peers"));
+            auto engine = tinykv::Engine::open({.dir = dirs_.back()->path() / "db"});
+            engines_.push_back(std::move(*engine));
+            tinykv::raft::Config cfg{.id = voters[static_cast<std::size_t>(i)],
+                                     .voters = voters,
+                                     .election_timeout = election_timeout,
+                                     .heartbeat_interval = heartbeat};
+            auto peer = Peer::open(cfg, *engines_.back());
+            peers_.push_back(std::move(*peer));
+        }
+    }
+
+    [[nodiscard]] int size() const { return static_cast<int>(peers_.size()); }
+    [[nodiscard]] Peer& peer(int i) { return *peers_[static_cast<std::size_t>(i)]; }
+
+    // 一轮：逐节点"发完即投递、随后 apply"。单趟而非两趟——真实 Worker 也是按 region
+    // 各自 drain，同轮消息不保证互相可见（两趟会让同轮消息立刻可见，比真机更"顺"）。
+    void pump() {
+        for (auto& p : peers_) {
+            for (auto& m : p->take_messages()) {
+                const int to = static_cast<int>(m.to()) - 1;
+                if (to >= 0 && to < size()) {
+                    (void)peers_[static_cast<std::size_t>(to)]->step_message(m);
+                }
+            }
+            (void)p->on_ready();
+        }
+    }
+
+    void pump(int rounds) {
+        for (int i = 0; i < rounds; ++i) {
+            pump();
+        }
+    }
+
+    bool elect(int max_ticks = 400) {
+        for (int i = 0; i < max_ticks; ++i) {
+            for (auto& p : peers_) {
+                p->tick();
+            }
+            pump();
+            if (leader() >= 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    [[nodiscard]] int leader() const {
+        for (int i = 0; i < size(); ++i) {
+            if (peers_[static_cast<std::size_t>(i)]->is_leader()) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    // 带等待的写：提案后泵到回执出现（返回 false 表示超时，测试里按失败处理）
+    bool write(int node, std::uint64_t client, std::uint64_t seq, const std::string& key,
+               const std::string& value, int max_pumps = 200) {
+        auto req = make_put_request(client, seq, key, value);
+        if (!peers_[static_cast<std::size_t>(node)]->propose(req).has_value()) {
+            return false;
+        }
+        for (int i = 0; i < max_pumps; ++i) {
+            pump();
+            if (peers_[static_cast<std::size_t>(node)]->take_reply(client, seq).has_value()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // 三种读模式：Lease / ReadIndex / Log（Log 走共识，是 PERF-03 的对比基线）
+    [[nodiscard]] tinykv::result<std::optional<std::string>> read(int node, const std::string& key,
+                                                                  ReadMode mode,
+                                                                  std::uint64_t client,
+                                                                  std::uint64_t seq) {
+        Peer& p = peer(node);
+        if (mode == ReadMode::Lease && p.lease_valid()) {
+            return direct(p, key);
+        }
+        if (mode == ReadMode::Log) {
+            return read_via_log(p, key, client, seq);
+        }
+        return read_index_mode(p, key);
+    }
+
+private:
+    [[nodiscard]] static tinykv::result<std::optional<std::string>> direct(Peer& p,
+                                                                          const std::string& key) {
+        auto got = p.read_directly(tinykv::Cf::Default, key);
+        if (!got) {
+            return std::unexpected(got.error());
+        }
+        return got->value;
+    }
+
+    [[nodiscard]] tinykv::result<std::optional<std::string>> read_via_log(Peer& p,
+                                                                         const std::string& key,
+                                                                         std::uint64_t client,
+                                                                         std::uint64_t seq) {
+        tinykv::cmdpb::RaftCmdRequest req;
+        req.mutable_header()->set_client_id(client);
+        req.mutable_header()->set_sequence_id(seq);
+        req.add_requests()->mutable_get()->set_key(key);
+        if (!p.propose(req).has_value()) {
+            return std::unexpected(
+                tinykv::NotLeader{.region_id = tinykv::RegionId{0}, .leader_hint = std::nullopt});
+        }
+        for (int i = 0; i < 200; ++i) {
+            pump();
+            auto reply = p.take_read_reply(client, seq);
+            if (!reply.has_value()) {
+                continue;
+            }
+            if (reply->cmd_responses_size() == 0 || !reply->cmd_responses(0).get().found()) {
+                return std::optional<std::string>{};
+            }
+            return std::optional<std::string>{reply->cmd_responses(0).get().value()};
+        }
+        return std::unexpected(tinykv::IoFailed{.path = "peer_cluster", .reason = "log 读超时"});
+    }
+
+    [[nodiscard]] tinykv::result<std::optional<std::string>> read_index_mode(Peer& p,
+                                                                            const std::string& key) {
+        if (!p.begin_read_index().has_value()) {
+            return std::unexpected(
+                tinykv::NotLeader{.region_id = tinykv::RegionId{0}, .leader_hint = std::nullopt});
+        }
+        std::uint64_t confirmed = 0;
+        bool have = false;
+        for (int i = 0; i < 200 && !have; ++i) {
+            pump();
+            for (const auto idx : p.take_confirmed_reads()) {
+                confirmed = idx;
+                have = true;
+            }
+        }
+        if (!have) {
+            return std::unexpected(
+                tinykv::IoFailed{.path = "peer_cluster", .reason = "ReadIndex 未确认"});
+        }
+        for (int i = 0; i < 200 && !p.applied_at_least(confirmed); ++i) {
+            pump();
+        }
+        return direct(p, key);
+    }
+
+    std::vector<std::unique_ptr<TempDir>> dirs_;
+    std::vector<std::unique_ptr<tinykv::Engine>> engines_;
+    std::vector<std::unique_ptr<Peer>> peers_;
+};
+
+}  // namespace tinykv::testlib

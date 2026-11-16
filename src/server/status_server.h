@@ -24,8 +24,12 @@ namespace tinykv::server {
 class StatusServer {
 public:
     // provider 每次请求被调用一次，返回 JSON 文本（由调用方决定暴露哪些字段）
+    // kv_handler 可选：处理 `GET /kv?key=&mode=`，为空时该路径返回 404。
+    // 读语义由 handler 自行决定（read_index / lease / log），端点只负责传输。
+    using KvHandler = std::function<std::string(const std::string& query)>;
     [[nodiscard]] static result<std::unique_ptr<StatusServer>> start(
-        const std::string& host, std::uint16_t port, std::function<std::string()> provider);
+        const std::string& host, std::uint16_t port, std::function<std::string()> provider,
+        KvHandler kv_handler = {});
 
     [[nodiscard]] std::uint16_t port() const { return bound_port_; }
 
@@ -46,6 +50,7 @@ private:
     std::thread thread_;
     std::uint16_t bound_port_{0};
     std::function<std::string()> provider_;
+    KvHandler kv_handler_;
 };
 
 }  // namespace tinykv::server

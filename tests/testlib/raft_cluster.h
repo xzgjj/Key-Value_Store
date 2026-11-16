@@ -46,14 +46,21 @@ inline tinykv::raftpb::Message make_msg(tinykv::raftpb::MessageId id, std::uint6
     return m;
 }
 
+// PeerId 1..n：两个夹具的成员构造完全一致，集中一处（复制粘贴会被 CI 判重复）
+[[nodiscard]] inline std::vector<PeerId> make_voters(int n) {
+    std::vector<PeerId> voters;
+    voters.reserve(static_cast<std::size_t>(n));
+    for (int i = 0; i < n; ++i) {
+        voters.push_back(PeerId{static_cast<std::uint64_t>(i) + 1});
+    }
+    return voters;
+}
+
 class Cluster {
 public:
     explicit Cluster(int nodes, std::uint64_t election_timeout = 8,
                      std::uint64_t heartbeat = 3) {
-        std::vector<PeerId> voters;
-        for (int i = 0; i < nodes; ++i) {
-            voters.push_back(PeerId{static_cast<std::uint64_t>(i) + 1});
-        }
+        const std::vector<PeerId> voters = make_voters(nodes);
         for (int i = 0; i < nodes; ++i) {
             dirs_.push_back(std::make_unique<TempDir>("tinykv_cluster"));
             auto engine = tinykv::Engine::open({.dir = dirs_.back()->path() / "db"});

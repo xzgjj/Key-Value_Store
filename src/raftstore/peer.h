@@ -12,6 +12,8 @@
 
 #include <cstdint>
 #include <map>
+#include <optional>
+#include <utility>
 #include <vector>
 #include <memory>
 #include <span>
@@ -66,6 +68,16 @@ public:
     // 直接读状态机（调用方保证 applied ≥ read_index，否则读到的可能不是线性一致点）
     [[nodiscard]] result<GetResult> read_directly(Cf cf, std::string_view key) const;
 
+    // ---- 提案回执（集群写与 log 模式读的公共底座） ----
+    // apply 时把结果按 (client_id, seq) 存进回执表，调用方泵若干轮后取走。
+    // 不提供阻塞版本：Peer 不持有传输层，阻塞就得在状态机里起线程。
+    [[nodiscard]] std::optional<cmdpb::RaftCmdResponse> take_reply(std::uint64_t client_id,
+                                                                  std::uint64_t seq);
+
+    // log 模式读：把 Get/Scan 作为提案走一遍共识，回执里带结果（PERF-03 的对比基线）
+    [[nodiscard]] std::optional<cmdpb::RaftCmdResponse> take_read_reply(std::uint64_t client_id,
+                                                                        std::uint64_t seq);
+
     [[nodiscard]] bool is_leader() const { return raft_->is_leader(); }
     [[nodiscard]] raft::Raft& raft() { return *raft_; }
     [[nodiscard]] std::uint64_t applied_seq(std::uint64_t client_id) const;
@@ -75,6 +87,8 @@ private:
 
     [[nodiscard]] result<void> apply_entry(const raftpb::Entry& entry);
     [[nodiscard]] result<void> execute(const cmdpb::RaftCmdRequest& req);
+    void fill_get_reply(const cmdpb::GetRequest& get, cmdpb::GetResponse* out);
+    void fill_scan_reply(const cmdpb::ScanRequest& scan, cmdpb::ScanResponse* out);
 
     std::unique_ptr<raft::RaftLog> log_;
     std::unique_ptr<raft::Raft> raft_;
@@ -82,6 +96,7 @@ private:
     std::map<std::uint64_t, std::uint64_t> last_seq_;   // client_id → 已 apply 的最大 seq
     std::vector<raftpb::Message> outbox_;
     std::vector<std::uint64_t> confirmed_reads_;
+    std::map<std::pair<std::uint64_t, std::uint64_t>, cmdpb::RaftCmdResponse> replies_;
     std::uint64_t applied_{0};   // 已 apply 到的日志位点
 };
 
