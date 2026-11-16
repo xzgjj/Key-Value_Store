@@ -1,8 +1,10 @@
 # tinykv-cli 使用契约
 
-> **状态：已与实现对齐（M1 本地模式）**。本文件是 CLI 的对外契约：子命令、参数、退出码与配置加载方式
-> 以本文为准；改动任一子命令或退出码必须先改本文、再改实现（反之视为文档漂移）。
+> **状态：本地模式 + M2 集群命令已与实现对齐；§10 的 region 观测命令契约定版、实现随 M4 推进**。
+> 本文件是 CLI 的对外契约：子命令、参数、退出码与配置加载方式以本文为准；
+> 改动任一子命令或退出码必须先改本文、再改实现（反之视为文档漂移）。
 > 集群模式（M2 起）在本文追加"集群子命令"一节，不推翻现有本地语义。
+> M4 region 观测命令经用户 2026-11-16 核对定版（见 `docs/M4-CONTRACT-DRAFT.md`）。
 
 ## 1. 入口模式
 
@@ -136,4 +138,69 @@ fi
 while IFS=$'\t' read -r k v; do
   tinykv-cli --config demo.yaml put "$k" "$v" || break
 done < seed.tsv
+```
+
+---
+
+## 10. Region 观测命令（M4，契约已定版，实现随 M4 对应层交付）
+
+> 用户 2026-11-16 核对通过（证据 `docs/M4-CONTRACT-DRAFT.md`）。这些命令**尚未实现**，
+> 随 M4 第②~⑦层逐步交付；未实现前调用返回退出码 1（用法错误）。
+
+### 10.1 命令列表
+
+| 命令 | 作用 | 交付层 |
+|---|---|---|
+| `tinykv-cli --endpoint <host:port> regions` | 列出该 store 全部 region | 第②层 |
+| `tinykv-cli --endpoint <host:port> region <id>` | 单个 region 详情（range/leader/term/commit/apply_lag/size_hint/epoch） | 第②层 |
+| `tinykv-cli --endpoint <host:port> region peers <id>` | 副本分布（每 peer：store_id / voter\|learner / 是否 leader） | 第④层 |
+| `tinykv-cli --endpoint <host:port> region split <id> <key>` | 手动触发 split（调试用，走 admin 提案） | 第③层 |
+| `tinykv-cli --endpoint <host:port> scheduler status` | 调度器状态（节点数/region 数/待迁移队列/最近动作） | 第⑥层 |
+| `tinykv-cli trace region <id> on\|off` | region 级 trace 开关 | 第⑦层 |
+
+### 10.2 参数与语义
+
+- `<id>`：RegionId（十进制正整数）。非法格式 → 退出码 1。
+- `region split <id> <key>` 的 `<key>` 必须落在 `(start_key, end_key)` 开区间，否则服务端回 `StaleEpoch`/`InvalidArgument`。
+- 退出码沿用 §4（0/1/2/3），不新增。
+
+### 10.3 trace 日志位置
+
+`trace region <id> on` 后，region 粒度的 trace 日志写 `log/trace-region-<id>.log`
+（spdlog 轮转：单文件 ≤10MB、保留 ≤5 个，CLAUDE.md §4 硬约束）。
+
+### 10.4 典型示例（实现后可直接复制执行）
+
+列出 region：
+
+```bash
+tinykv-cli --endpoint 127.0.0.1:3380 regions
+```
+
+查看单个 region 与其副本分布：
+
+```bash
+tinykv-cli --endpoint 127.0.0.1:3380 region 7
+tinykv-cli --endpoint 127.0.0.1:3380 region peers 7
+```
+
+手动触发 split（调试）：
+
+```bash
+tinykv-cli --endpoint 127.0.0.1:3380 region split 7 user:m
+```
+
+调度器状态：
+
+```bash
+tinykv-cli --endpoint 127.0.0.1:3380 scheduler status
+```
+
+开启 region trace 后复现问题：
+
+```bash
+tinykv-cli trace region 7 on
+# ... 复现操作 ...
+tinykv-cli trace region 7 off
+# 日志在 log/trace-region-7.log
 ```

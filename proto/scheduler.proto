@@ -1,0 +1,50 @@
+// 文件用途：PD-lite 调度器消息契约——store/region 心跳与 AskSplit（SPEC-3 §3.3.2，M4）。
+// 归属：TinyKV-CPP（M4 Multi-Raft 控制面；契约已由用户 2026-11-16 核对）。
+//
+// 设计原则（Mooncake 控制面/数据面分离，复用台账 M-1）：调度器只动元数据，
+// 快照等数据走独立通道，不经此转发。
+// 用户确认 A1：本 proto 只定义消息，不生成 service stub；调度器先做进程内 C++ 对象，
+// 不引 gRPC、不开新 RPC 通道。SPEC-3 的 service Scheduler 留待后续确需跨进程时再评估。
+
+syntax = "proto3";
+
+package tinykv.schedulerpb;
+
+import "common.proto";
+import "raft.proto";
+
+// 存储节点心跳：容量与负载（store → 调度器）
+message StoreHeartbeatReq {
+    uint64 store_id = 1;
+    uint32 region_count = 2;
+    uint64 total_size = 3;   // 字节
+    uint64 capacity = 4;     // 字节
+}
+
+// region 心跳：世代、副本、范围与估算大小（store → 调度器）
+message RegionHeartbeatReq {
+    uint64 region_id = 1;
+    tinykv.commonpb.RegionEpoch epoch = 2;
+    repeated tinykv.raftpb.Peer peers = 3;
+    bytes start_key = 4;
+    bytes end_key = 5;       // 空 = 无限
+    uint64 approximate_size = 6;
+}
+
+// 确认回执：accepted=false 时 reason 给出原因
+message Ack {
+    bool accepted = 1;
+    string reason = 2;
+}
+
+// AskSplit：store 请求调度器为新 region 预分配 id
+message AskSplitReq {
+    uint64 region_id = 1;
+    bytes split_key = 2;
+}
+
+// 用户确认 A2：一次分配一个 region；未来 merge 需要批量时再扩展（保留字段号兼容）
+message AskSplitResp {
+    uint64 new_region_id = 1;
+    repeated uint64 new_peer_ids = 2;   // 与新 region 副本数等长
+}

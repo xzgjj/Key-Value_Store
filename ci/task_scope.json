@@ -1,5 +1,5 @@
 {
-  "task": "M4 第①层：Envelope 批量 propose——spike 验证通过后正式实现，把管道化 batch=1 fsync=on 推到 PERF-01 S0",
+  "task": "M4 第①层收尾 + 第②层契约落地：Envelope 批量 propose 已达标；scheduler.proto(仅消息)+CLI region 观测命令契约经用户核对后落版",
   "paths": [
     "src/raft/entry_batch.h",
     "src/raftstore/peer.h",
@@ -7,6 +7,10 @@
     "tests/unit/raft/entry_batch_test.cpp",
     "tests/unit/raft/CMakeLists.txt",
     "tests/bench/tcp_perf_bench_test.cpp",
+    "docs/M4-CONTRACT-DRAFT.md",
+    "docs/cli.md",
+    "proto/CMakeLists.txt",
+    "proto/scheduler.proto",
     "docs/testing.md",
     "docs/review-log.md",
     "implementation-notes.md",
