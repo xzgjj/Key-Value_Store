@@ -3,3 +3,4 @@
 
 add_tinykv_test(strong_id_test SRCS strong_id_test.cpp)
 add_tinykv_test(kv_error_test SRCS kv_error_test.cpp)
+add_tinykv_test(encode_test SRCS encode_test.cpp)

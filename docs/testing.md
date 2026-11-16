@@ -127,6 +127,7 @@ CI 用 `ctest -L unit|simulation|integration|bench` 选择，无需解析本页�
 | Scope | Level | Runner | Args | Metadata |
 |---|---|---|---|---|
 | tests/unit/common/strong_id_test.cpp | unit | `strong_id_test` | - | fast |
+| tests/unit/common/encode_test.cpp | unit | `encode_test` | - | fast |
 | tests/unit/common/kv_error_test.cpp | unit | `kv_error_test` | - | fast |
 <!-- registry:end -->
 
