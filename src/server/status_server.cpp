@@ -21,10 +21,11 @@ constexpr const char* kNotFound =
 
 result<std::unique_ptr<StatusServer>> StatusServer::start(
     const std::string& host, std::uint16_t port, std::function<std::string()> provider,
-    KvHandler kv_handler) {
+    KvHandler kv_handler, KvWriteHandler kv_write) {
     auto server = std::unique_ptr<StatusServer>(new StatusServer());   // NOLINT：构造私有
     server->provider_ = std::move(provider);
     server->kv_handler_ = std::move(kv_handler);
+    server->kv_write_ = std::move(kv_write);
 
     asio::error_code ec;
     const asio::ip::tcp::endpoint endpoint(asio::ip::make_address(host, ec), port);
@@ -79,6 +80,19 @@ void StatusServer::accept_loop() {
     });
 }
 
+void StatusServer::serve_write(std::shared_ptr<asio::ip::tcp::socket> sock,
+                               const std::string& req) {
+    // 只支持一次读到的完整请求（帧很小，CLI 一次 write 就发完）
+    const auto sep = req.find("\r\n\r\n");
+    const std::string body = sep == std::string::npos ? std::string{} : req.substr(sep + 4);
+    const std::string resp = http_response(kv_write_(body));
+    asio::async_write(*sock, asio::buffer(resp), [sock](const asio::error_code&, std::size_t) {
+        asio::error_code ig;
+        sock->shutdown(asio::ip::tcp::socket::shutdown_both, ig);
+        sock->close(ig);
+    });
+}
+
 void StatusServer::serve(std::shared_ptr<asio::ip::tcp::socket> sock) {
     auto buf = std::make_shared<std::array<char, 1024>>();
     sock->async_read_some(asio::buffer(*buf), [this, sock, buf](const asio::error_code& ec,
@@ -87,6 +101,10 @@ void StatusServer::serve(std::shared_ptr<asio::ip::tcp::socket> sock) {
             return;
         }
         const std::string request(buf->data(), n);
+        if (kv_write_ && request.rfind("POST /kv", 0) == 0) {
+            serve_write(sock, request);
+            return;
+        }
         std::string body;
         bool ok = false;
         if (request.rfind("GET /status", 0) == 0) {

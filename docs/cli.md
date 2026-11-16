@@ -9,7 +9,7 @@
 | 模式 | 调用形态 | 说明 |
 |---|---|---|
 | 一次性执行 | `tinykv-cli <命令> [参数]` | 每条命令独立进程、独立打开引擎；适合脚本 |
-| 集群模式（只读） | `tinykv-cli --endpoint <host:port> status` | 取该节点 `/status` 的 JSON；写操作尚未开放（见 §9） |
+| 集群模式 | `tinykv-cli --endpoint <host:port> <status|get|put|del>` | 状态走 `/status`，读写走 `/kv`；`scan` 未开放 |
 
 无交互式 shell、无常驻子命令——单机场景下"每条命令一个进程"最简单也最不容易留下不一致状态。
 
@@ -68,10 +68,12 @@
 
 `--endpoint` 非空即切到集群模式：读该节点 HTTP `/status` 并原样打印 JSON，便于脚本消费。
 
-**为什么集群模式暂时只读**：写入必须经 Raft 共识并在 apply 后回执给调用方，这需要"提案回调"
-（把 `apply` 结果按序号还给等待者）。该机制与 M3 的 ReadIndex 共用同一条等待链路，一起做
-才不会写两遍。因此 `put/del/scan` 在集群模式下**明确返回用法错误**（退出码 1），而不是
-假装成功——假成功会让脚本以为数据已落库。
+写入走 `POST /kv`，请求体是制表符分隔的简单文本（`put\tkey\tvalue` / `del\tkey`）。
+刻意不引 JSON 库：CLI 只需表达两三种写操作，文本协议两端都能一眼看懂、也便于用 curl 手测。
+服务端在 apply 后按 (client, seq) 回执，CLI 收到 `OK` 才算成功——写成功即已提交，不是"已发出"。
+
+`scan` 在集群模式下**未开放**（退出码 1）：范围读要处理分页游标与 region 边界，
+留到 M4 多 region 一起做。
 
 `/status` 返回字段（M2）：`peer_id`、`is_leader`、`term`、`committed`、`last_index`。
 `/status` 端口独立于 Raft 帧端口（SPEC-2 D2-6 原意是复用，偏差原因见 implementation-notes）。

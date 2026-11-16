@@ -10,6 +10,9 @@
 #include <cstddef>
 #include <string>
 
+#include "storage/engine.h"
+#include "storage/wal.h"
+
 #include "bytes.h"
 #include "storage_fixture.h"
 #include "temp_dir.h"

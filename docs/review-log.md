@@ -28,6 +28,9 @@
 | M3 | 4 | 可判定性：CI 全阶段 + 26 个测试 + 三模式基准 | PASS | run_ci PASS×13；ctest 26/26；read_bench 58.7x/3652.8x |
 | M3 | 5 | 契约与复用：对齐三项 + 登记对账 + 自测 | PASS | align 3/3；registry/selftest PASS |
 | M3 | 6 | 文档与红线：预算/查重/链接 + guard + 租约默认关 | PASS | docs PASS×4；guard PASS |
+| M2 | 7 | 可判定性：29 个测试 + 四项欠账证据 | PASS | ctest 29/29；CI PASS×13；snapshot/crash/bench/cluster-write 全绿 |
+| M2 | 8 | 契约与复用：对齐三项 + 登记对账 | PASS | align 3/3；registry PASS |
+| M2 | 9 | 文档与红线：预算/查重/链接 + guard | PASS | docs PASS×4；guard PASS |
 <!-- review:end -->
 
 ## 约定

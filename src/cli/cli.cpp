@@ -50,7 +50,7 @@ std::string_view usage() {
         "\n"
         "选项:\n"
         "  --config <path>          配置文件路径（默认 demo.yaml）\n"
-        "  --endpoint <host:port>   集群模式：status 取节点状态，get 按读模式读\n"
+        "  --endpoint <host:port>   集群模式：status/get/put/del（scan 暂未开放）\n"
         "  --read-mode <m>          read_index（默认）/ lease / log，仅集群 get 生效\n"
         "  --cf <default|write|lock> 列族（默认 default）\n"
         "  --limit <n>              scan 返回条数上限\n"
@@ -203,10 +203,34 @@ int cmd_status(const Config& cfg, const Globals& g, std::ostream& out) {
 
 
 // 集群模式：目前只开放只读 status；写需提案回调（M3 与 ReadIndex 同链路），明确拒绝而非假成功
+// 集群写：制表符文本协议 → POST /kv；写入必须经共识，回执由服务端 apply 后给出
+int cmd_cluster_write(const std::string& cmd, const std::vector<std::string>& pos,
+                      const std::string& host, std::uint16_t port, std::ostream& out,
+                      std::ostream& err) {
+    const std::size_t want = cmd == "put" ? 3U : 2U;
+    if (pos.size() != want) {
+        err << "用法: " << cmd << (cmd == "put" ? " <key> <value>\n" : " <key>\n");
+        return kExitUsage;
+    }
+    const std::string body =
+        cmd == "put" ? "put\t" + pos[1] + "\t" + pos[2] : "del\t" + pos[1];
+    auto resp = http_post(host, port, "/kv", body);
+    if (!resp) {
+        err << "写入失败：" << describe(resp.error()) << "\n";
+        return kExitRuntime;
+    }
+    if (resp->rfind("ERR", 0) == 0) {
+        err << *resp << "\n";
+        return kExitRuntime;
+    }
+    out << *resp << "\n";
+    return kExitOk;
+}
+
 int cmd_cluster(const Globals& g, const std::string& cmd, const std::vector<std::string>& pos,
                 std::ostream& out, std::ostream& err) {
-    if (cmd != "status" && cmd != "get") {
-        err << "集群模式当前支持 status / get；写入与扫描见 docs/cli.md\n";
+    if (cmd != "status" && cmd != "get" && cmd != "put" && cmd != "del") {
+        err << "集群模式支持 status / get / put / del；scan 见 docs/cli.md\n";
         return kExitUsage;
     }
     const auto colon = g.endpoint.rfind(':');
@@ -216,6 +240,10 @@ int cmd_cluster(const Globals& g, const std::string& cmd, const std::vector<std:
     }
     const std::string host = g.endpoint.substr(0, colon);
     const auto port = static_cast<std::uint16_t>(std::stoul(g.endpoint.substr(colon + 1)));
+    if (cmd == "put" || cmd == "del") {
+        return cmd_cluster_write(cmd, pos, host, port, out, err);
+    }
+
     std::string path = "/status";
     if (cmd == "get") {
         if (pos.size() != 2) {

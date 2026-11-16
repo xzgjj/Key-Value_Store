@@ -4,3 +4,4 @@
 add_tinykv_test(write_bench SRCS write_bench_test.cpp LIBS tinykv_storage LEVEL bench)
 
 add_tinykv_test(read_bench SRCS read_bench_test.cpp LIBS tinykv_raftstore LEVEL bench)
+add_tinykv_test(cluster_bench SRCS cluster_bench_test.cpp LIBS tinykv_raftstore LEVEL bench)

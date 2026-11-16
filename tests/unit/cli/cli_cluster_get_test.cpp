@@ -36,6 +36,62 @@ int run(std::vector<std::string> args, std::ostream& out, std::ostream& err) {
     return tinykv::cli::run_cli(args, out, err);
 }
 
+// 解析制表符文本：put\tkey\tvalue / del\tkey
+struct WriteOp {
+    std::string op;
+    std::string key;
+    std::string value;
+    bool ok{false};
+};
+
+WriteOp parse_write(const std::string& body) {
+    WriteOp out;
+    const auto first = body.find('\t');
+    if (first == std::string::npos) {
+        return out;
+    }
+    out.op = body.substr(0, first);
+    const auto second = body.find('\t', first + 1);
+    if (second == std::string::npos) {
+        out.key = body.substr(first + 1);
+    } else {
+        out.key = body.substr(first + 1, second - first - 1);
+        out.value = body.substr(second + 1);
+    }
+    out.ok = out.op == "put" || out.op == "del";
+    return out;
+}
+
+// 执行一次集群写：提案 → 泵到回执 → 文本响应
+std::string do_write(PeerCluster& c, std::uint64_t& seq, const std::string& body) {
+    const WriteOp op = parse_write(body);
+    if (!op.ok || c.leader() < 0) {
+        return "ERR bad-request";
+    }
+    Peer& p = c.peer(c.leader());
+    tinykv::cmdpb::RaftCmdRequest req;
+    req.mutable_header()->set_client_id(11);
+    req.mutable_header()->set_sequence_id(++seq);
+    auto* one = req.add_requests();
+    if (op.op == "put") {
+        one->mutable_put()->set_key(op.key);
+        one->mutable_put()->set_value(op.value);
+    } else {
+        one->mutable_delete_()->set_key(op.key);
+    }
+    if (!p.propose(req).has_value()) {
+        return "ERR not-leader";
+    }
+    const auto want = seq;
+    for (int i = 0; i < 50; ++i) {
+        c.pump();
+        if (p.take_reply(11, want).has_value()) {
+            return "OK";
+        }
+    }
+    return "ERR timeout";
+}
+
 // 单节点集群 + 状态端点（handler 直接调 Peer）
 struct Fixture {
     std::unique_ptr<PeerCluster> cluster;
@@ -98,8 +154,12 @@ struct Fixture {
                    ",\"value\":\"" + value + "\"}";
         };
 
+        auto writer = [this](const std::string& body) {
+            return do_write(*cluster, seq, body);
+        };
+
         auto started = StatusServer::start(
-            "127.0.0.1", 0, [] { return std::string("{\"leader\":1}"); }, handler);
+            "127.0.0.1", 0, [] { return std::string("{\"leader\":1}"); }, handler, writer);
         EXPECT_TRUE(started.has_value());
         server = std::move(*started);
     }
@@ -142,6 +202,30 @@ TEST(CliClusterGet, MissingKeyExitCodeThree) {
     std::ostringstream out;
     std::ostringstream err;
     EXPECT_EQ(run({"--endpoint", f.endpoint(), "get", "absent"}, out, err), 3);
+}
+
+TEST(CliClusterGet, PutThenGetSeesValue) {
+    Fixture f;
+    std::ostringstream out;
+    std::ostringstream err;
+    EXPECT_EQ(run({"--endpoint", f.endpoint(), "put", "k2", "v2"}, out, err), 0) << err.str();
+    EXPECT_NE(out.str().find("OK"), std::string::npos) << out.str();
+
+    std::ostringstream out2;
+    std::ostringstream err2;
+    EXPECT_EQ(run({"--endpoint", f.endpoint(), "--read-mode", "read_index", "get", "k2"}, out2, err2), 0)
+        << err2.str();
+    EXPECT_NE(out2.str().find("v2"), std::string::npos) << out2.str();
+}
+
+TEST(CliClusterGet, DeleteThenGetNotFound) {
+    Fixture f;
+    std::ostringstream out;
+    std::ostringstream err;
+    EXPECT_EQ(run({"--endpoint", f.endpoint(), "del", "k1"}, out, err), 0) << err.str();
+    std::ostringstream out2;
+    std::ostringstream err2;
+    EXPECT_EQ(run({"--endpoint", f.endpoint(), "get", "k1"}, out2, err2), 3);
 }
 
 TEST(CliClusterGet, InvalidReadModeRejected) {

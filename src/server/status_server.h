@@ -27,9 +27,12 @@ public:
     // kv_handler 可选：处理 `GET /kv?key=&mode=`，为空时该路径返回 404。
     // 读语义由 handler 自行决定（read_index / lease / log），端点只负责传输。
     using KvHandler = std::function<std::string(const std::string& query)>;
+    // 写处理器：请求体为制表符分隔的简单文本（put\tkey\tvalue / del\tkey）。
+    // 刻意不引 JSON 库：CLI 只需表达两三种写操作，文本协议足够且两端都能一眼看懂。
+    using KvWriteHandler = std::function<std::string(const std::string& body)>;
     [[nodiscard]] static result<std::unique_ptr<StatusServer>> start(
         const std::string& host, std::uint16_t port, std::function<std::string()> provider,
-        KvHandler kv_handler = {});
+        KvHandler kv_handler = {}, KvWriteHandler kv_write = {});
 
     [[nodiscard]] std::uint16_t port() const { return bound_port_; }
 
@@ -43,6 +46,7 @@ private:
     StatusServer() = default;
     void accept_loop();
     void serve(std::shared_ptr<asio::ip::tcp::socket> sock);
+    void serve_write(std::shared_ptr<asio::ip::tcp::socket> sock, const std::string& req);
 
     asio::io_context ctx_{1};
     std::unique_ptr<asio::ip::tcp::acceptor> acceptor_;
@@ -51,6 +55,7 @@ private:
     std::uint16_t bound_port_{0};
     std::function<std::string()> provider_;
     KvHandler kv_handler_;
+    KvWriteHandler kv_write_;
 };
 
 }  // namespace tinykv::server

@@ -221,11 +221,11 @@ TEST(SimCompaction, LaggingPeerCatchesUpViaSnapshot) {
 | FUNC-03(选举) | 随机超时后唯一 leader；分区恢复后收敛；拒票不重置计时器 | `raft_step_test`（含 3/5 节点收敛与拒票不重置） | `ctest -L fast` | junit.xml |
 | FUNC-03(复制) | 增量复制+整段回退+误截断防护 | `raft_step_test`（LeaderProposalReplicates）+ `tcp_cluster_test`（真 TCP 复制） | `ctest -L fast` / `-L integration` | junit.xml |
 | FUNC-03(压缩) | compact 后 first_index 前移、dummy_term 正确、禁止越过 committed | `raft_log_test` | `ctest -L fast` | junit.xml |
-| FUNC-03(快照安装) | 落后节点经快照追赶 | **未实现**（只有 compact，无生成/传输/安装） | — | 缺口，见 notes-m2 §2 |
-| REL-02 | 已确认提交零丢失、Raft 状态不错乱 | `wal_crash_test`（数据面）+ `raft_chaos_n150`（CommittedDataSurvivesRestart） | `ctest -L fast` / `-L integration` | junit.xml；**进程级 kill -9 未做** |
+| FUNC-03(快照安装) | 落后节点经快照追赶；快照外的键被清除 | `snapshot_test` | `ctest -L integration` | junit.xml |
+| REL-02 | 进程级崩溃（跳过析构）后只靠 WAL 复原 | `crash_recovery_test`（子进程 `_Exit`）+ `wal_crash_test` | `ctest -L integration` / `-L fast` | junit.xml |
 | FUNC-04 | 提案经共识 → apply → 重试幂等 | `raft_kv_test`（去重）+ `tcp_cluster_test`（真 TCP 三节点写读） | `ctest -L fast` / `-L integration` | junit.xml |
 | UX-04(M2 端点) | `/status` 返回 peer_id/is_leader/term/committed/last_index；CLI 集群模式可取 | `cli_status_test` | `ctest -L fast` | junit.xml |
-| UX-01/02 | 集群子命令 `--endpoint ... status` 可用且 --help 齐全 | `cli_status_test` | `ctest -L fast` | junit.xml；**5 分钟上手脚本未做** |
+| UX-01/02 | 集群子命令 status/get/put/del 可用 | `cli_status_test` `cli_cluster_get_test` | `ctest -L fast` | junit.xml；**5 分钟上手脚本仍缺** |
 | UX-03 | 本阶段错误（NotLeader/IoFailed/Corrupted）三要素逐条核对 | —（评审 + `kv_error_test` 扩展） | `ctest -R kv_error_test` | 评审记录 |
 | UX-06 | M2 实现笔记一篇 + 架构图一张 | —（人工） | — | `docs/notes-m2.md` |
 | ENG-05 | 连续 150 轮随机注入无 FAIL（丢包/提案/重启） | `raft_chaos_n150`（150 种子）+ `sim_chaos_test`（5 种子，PR 必跑） | `ctest -R raft_chaos_n150` | junit.xml；**进程级 kill -9 未做** |

@@ -40,15 +40,13 @@ TEST(CliClusterStatus, FetchesJsonFromEndpoint) {
     EXPECT_NE(out.str().find("\"term\":3"), std::string::npos) << out.str();
 }
 
-TEST(CliClusterStatus, WriteRejectedInClusterMode) {
-    // 集群模式写需要提案回调（apply 后回执），当前未实现——必须报用法错误而不是静默忽略
+TEST(CliClusterStatus, WriteToUnreachableEndpointReportsRuntimeError) {
+    // 写已支持，但端点不可达时必须报运行错误（退出码 2），不能假装写成功
     std::ostringstream out;
     std::ostringstream err;
-    const int code =
-        run({"--endpoint", "127.0.0.1:1", "put", "k", "v"}, out, err);
-    EXPECT_EQ(code, 1);
-    EXPECT_NE(err.str().find("status"), std::string::npos) << err.str();
-    EXPECT_NE(err.str().find("get"), std::string::npos) << err.str();
+    const int code = run({"--endpoint", "127.0.0.1:1", "put", "k", "v"}, out, err);
+    EXPECT_EQ(code, 2) << err.str();
+    EXPECT_FALSE(err.str().empty());
 }
 
 TEST(CliClusterStatus, UnknownEndpointReportsRuntimeError) {

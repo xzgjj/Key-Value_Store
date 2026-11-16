@@ -19,10 +19,10 @@
 | FUNC-03 选举/复制 | ✅ `raft_step_test`（3/5 节点收敛、拒绝不重置计时器、整段回退、旧 term 不提交、压缩后回 prevCommit） |
 | FUNC-04 3 节点读写 + 重试幂等 | ✅ 单副本链路 `raft_kv_test`；3 节点写读走同一代码路径（消息总线已覆盖复制） |
 | ENG-05 150 轮 | ⚠️ `raft_chaos_n150` 已跑通 150 种子（14s，丢包+提案+重启）；**进程级 kill -9 仍用关闭重建模拟** |
-| REL-02 崩溃恢复 | ✅ 落盘可读回 + `raft_chaos_n150` 的 CommittedDataSurvivesRestart；**进程级 kill -9 未做** |
-| 快照与 CompactLog | ⚠️ `RaftLog::compact` 已实现并有测试；**快照生成/分块传输/安装未做** |
+| REL-02 崩溃恢复 | ✅ 进程级：子进程写完 `_Exit(0)`（跳过析构），重开只靠 WAL 复原 200 条（`crash_recovery_test`），并断言崩溃时确实没有 SST |
+| 快照与 CompactLog | ✅ compact + 生成/传输/安装（`snapshot_test`：隔离→压缩→解开→靠快照追平；快照外的键被清除） |
 | UX-04 `/status` 端点 | ✅ `StatusServer`（极简 HTTP，手写不引框架）+ `cli_status_test`；端口独立于 Raft 帧端口（偏差已记） |
-| UX-01/02 集群 CLI | ⚠️ 集群模式**只读**：`--endpoint ... status` 可用；`put/del/scan` 明确拒绝（需提案回调，与 M3 ReadIndex 同链路一起做） |
+| UX-01/02 集群 CLI | ✅ `status` / `get`（三读模式）/ `put` / `del` 全部可用（POST /kv，回执由 apply 给出）；`scan` 仍缺 |
 | PERF-01/02/05/06/08 | ⚠️ 仅 M1 的单机写基准；集群档位未测（无网络层） |
 | Transport（asio 传输） | ✅ `TcpTransport`：长度前缀分帧、io 线程收、异步短连接发；三节点真 socket 上选主+复制+apply 通过（`tcp_cluster_test`） |
 
@@ -73,3 +73,18 @@
 
 另记一个测试自身的 bug：`add_requests()` 调两次会造出"只有 value、key 为空"的第二条命令，
 apply 时被 `encode_key` 拒绝。这类错误只有真跑 apply 才暴露——只断言"committed 推进"会漏掉。
+
+## 8. 四件欠账的收口（2026-11-16 追加）
+
+| 欠账 | 收口方式 | 证据 |
+|---|---|---|
+| 快照生成/传输/安装 | protobuf 承载（不与 SST 编码重复）、MSG_SNAPSHOT 单块、安装时清掉快照外的键 | `snapshot_test` 2 例 |
+| 集群写 | POST /kv（制表符文本）+ 回执表；CLI put/del | `cli_cluster_get_test` 7 例 |
+| 进程级崩溃 | 独立 `crash_writer` 子进程 + `std::_Exit(0)`，跳过一切析构 | `crash_recovery_test` |
+| 集群性能 | 写 QPS / 心跳字节 / 恢复时间 | `cluster_bench` |
+
+**PERF-01 未达标的诚实结论**：batch=1 实测 **251 ops/s**，低于 S0 的 2k。原因不在引擎
+（单机基准 3184 ops/s），而在**测量装置**：每次写都要把消息泵到回执，泵的粒度是"整轮"，
+一轮内只能推进一跳 RTT。这是进程内夹具的固有开销，不是产品结论。要给出可用于验收的
+PERF-01 数字，需要真实 TCP 三节点 + 独立客户端压测（`tcp_transport` 已具备，缺驱动脚本）。
+批次=64 的 13346 records/s 与 53× 加速比则说明**共识路径本身没有结构性缺陷**。
