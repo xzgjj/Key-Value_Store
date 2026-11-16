@@ -12,6 +12,13 @@ namespace {
 
 bool same(const PeerId& a, const PeerId& b) { return a == b; }
 
+// M4 ④b / D3-5：learner 追平门槛。日志差 <100 entry 且该状态持续 5s。
+// 模拟器按 100ms/tick 约定 → 5s = 50 tick；用 tick 而非墙钟保证可复现。
+constexpr std::uint64_t kCatchUpLagLimit = 100;
+constexpr std::uint64_t kCatchUpTicks = 50;
+// 红线 5：两节点集群移除 leader 自己 → 剩余单节点无法形成多数派，写会永久卡死。
+constexpr std::size_t kRemoveLeaderMinVoters = 2;
+
 }  // namespace
 
 Raft::Raft(Config cfg, RaftLog& log) : cfg_(std::move(cfg)), log_(log) {
@@ -27,6 +34,31 @@ Raft::Raft(Config cfg, RaftLog& log) : cfg_(std::move(cfg)), log_(log) {
 bool Raft::is_voter(PeerId p) const {
     return std::any_of(cfg_.voters.begin(), cfg_.voters.end(),
                        [&](const PeerId& v) { return same(v, p); });
+}
+
+bool Raft::is_learner(PeerId p) const {
+    return std::find(learners_.begin(), learners_.end(), p) != learners_.end();
+}
+
+bool Raft::is_learner_caught_up(PeerId p) const {
+    if (!is_learner(p)) {
+        return false;
+    }
+    // match_index_ 缺失视为 0（从未复制过任何日志）。leader 自己不在 learners_ 中。
+    const auto it = match_index_.find(p.value);
+    const std::uint64_t matched = it == match_index_.end() ? 0 : it->second;
+    const std::uint64_t lag = log_.last_index().value > matched
+                                  ? log_.last_index().value - matched
+                                  : 0;
+    if (lag >= kCatchUpLagLimit) {
+        return false;   // 日志差过大，未达标
+    }
+    const auto since = learner_catch_since_.find(p.value);
+    if (since == learner_catch_since_.end()) {
+        return false;   // 差虽小，但还没连续保持 5s
+    }
+    return now_ticks_ >= since->second &&
+           now_ticks_ - since->second >= kCatchUpTicks;
 }
 
 raftpb::Message Raft::make(raftpb::MessageId id, PeerId to) const {
@@ -88,9 +120,35 @@ void Raft::become_leader() {
     broadcast_append();
 }
 
+void Raft::refresh_learner_catchup() {
+    // 追平计时只由 leader 维护：它掌握全体 match_index_。每拍刷新一次，
+    // 让"持续 5s"用 now_ticks_ 度量而非墙钟（模拟器种子可复现）。
+    for (const PeerId& p : learners_) {
+        const auto it = match_index_.find(p.value);
+        const std::uint64_t matched = it == match_index_.end() ? 0 : it->second;
+        const std::uint64_t lag = log_.last_index().value > matched
+                                      ? log_.last_index().value - matched
+                                      : 0;
+        if (lag >= kCatchUpLagLimit) {
+            learner_catch_since_.erase(p.value);   // 掉队：重新计时
+        } else {
+            learner_catch_since_.try_emplace(p.value, now_ticks_);   // 首次达标记起点
+        }
+    }
+    // 已被移除的 learner 不留残项（apply_conf_change 摘除后同步清理）
+    for (auto it = learner_catch_since_.begin(); it != learner_catch_since_.end();) {
+        if (!is_learner(PeerId{it->first})) {
+            it = learner_catch_since_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
 void Raft::tick() {
-    ++now_ticks_;   // 单调 tick 计数：租约用 tick 而非墙钟，保证模拟可复现
+    ++now_ticks_;   // 单调 tick 计数：租约/追平判定用 tick 而非墙钟，保证模拟可复现
     if (role_ == Role::Leader) {
+        refresh_learner_catchup();
         if (++heartbeat_elapsed_ >= cfg_.heartbeat_interval) {
             heartbeat_elapsed_ = 0;
             broadcast_heartbeat();
@@ -149,6 +207,22 @@ result<void> Raft::propose_conf_change(const raftpb::ConfChange& cc) {
     if (role_ != Role::Leader) {
         return std::unexpected(NotLeader{.region_id = RegionId{0}, .leader_hint = std::nullopt});
     }
+    const PeerId target{cc.node_id()};
+    // 红线 5 / D3-5 前置守卫（在落盘前拒绝，避免把注定卡死的变更写进日志）：
+    if (cc.type() == raftpb::ConfAddVoter) {
+        // AddVoter 门槛：目标须是 learner 且已追平（日志差 <100 且持续 5s）。
+        // 已经是 voter 的重复提案放行（幂等，apply_conf_change 本就去重）。
+        if (is_learner(target) && !is_learner_caught_up(target)) {
+            return std::unexpected(InvalidArgument{"learner 未追平，拒绝 AddVoter"});
+        }
+    } else if (cc.type() == raftpb::ConfRemoveNode) {
+        // 两节点集群移除 leader 自己 → 剩余单节点无法形成多数派，写永久卡死。
+        // TransferLeader 按既定拆到第⑦层；本层只守卫拒绝，不改 leader。
+        if (same(target, cfg_.id) && cfg_.voters.size() <= kRemoveLeaderMinVoters) {
+            return std::unexpected(
+                InvalidArgument{"两节点集群不可移除 leader 自己（需先 TransferLeader）"});
+        }
+    }
     // 成员变更作为 EntryConfChange 落盘：apply 时才生效，崩溃后可从日志重建
     std::string data;
     if (!cc.SerializeToString(&data)) {
@@ -172,9 +246,11 @@ void Raft::apply_conf_change(const raftpb::ConfChange& cc) {
     };
     switch (cc.type()) {
         case raftpb::ConfAddLearner:
-            if (!is_voter(pid) &&
-                std::find(learners_.begin(), learners_.end(), pid) == learners_.end()) {
+            if (!is_voter(pid) && !is_learner(pid)) {
                 learners_.push_back(pid);
+                // 初始化复制指针，leader 才能开始向 learner 追日志（否则 match 恒为 0，永远追不平）
+                next_index_[pid.value] = log_.last_index().value + 1;
+                match_index_[pid.value] = 0;
             }
             break;
         case raftpb::ConfAddVoter:
@@ -248,6 +324,11 @@ void Raft::broadcast_append() {
         if (!same(p, cfg_.id)) {
             send_append(p);
         }
+    }
+    // M4 ④b：learner 也要收日志才能追平。它不在 voters 中不参与多数派，
+    // 但复制链路与 voter 共用 send_append（由 next_index_ 驱动）。
+    for (const PeerId& p : learners_) {
+        send_append(p);
     }
 }
 
@@ -468,7 +549,9 @@ void Raft::handle_append_response(const raftpb::Message& msg) {
         return;
     }
     const PeerId from{msg.from()};
-    if (!is_voter(from)) {
+    // M4 ④b：voter 与 learner 的复制回执都要处理——learner 靠它推进 match_index_ 追平。
+    const bool from_voter = is_voter(from);
+    if (!from_voter && !is_learner(from)) {
         return;
     }
     if (msg.reject()) {
@@ -500,7 +583,11 @@ void Raft::handle_append_response(const raftpb::Message& msg) {
     }
     match_index_[from.value] = msg.index();
     next_index_[from.value] = msg.index() + 1;
-    advance_commit();
+    // 只有 voter 的回执能推进 commit：learner 不计入多数派（红线：learner 不投票）。
+    // 若让 learner 回执也调 advance_commit，region 会出现"少数派写入已提交"的严重错误。
+    if (from_voter) {
+        advance_commit();
+    }
 }
 
 void Raft::handle_heartbeat_response(const raftpb::Message& msg) {

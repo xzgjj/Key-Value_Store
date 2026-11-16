@@ -49,6 +49,9 @@
 | M4 | 10 | ④a可判定性：CI 13 + confchange 5 + 全量 35 | PASS | ctest 35/35；confchange 5/5（AddLearner/AddVoter/RemoveNode/落盘type/非leader拒绝）；run_ci PASS×13 |
 | M4 | 11 | ④a契约与复用：Entry.type proto 已核对 + 复用 Cluster fixture + 对齐三项 | PASS | align 3/3；Entry.type/ConfChange proto 用户核对通过(M4-CONFCHANGE-DRAFT)；复用 add_node 扩展 fixture |
 | M4 | 12 | ④a文档与红线：预算/查重/链接 + scope/guard + apply时才生效 | PASS | docs/guard PASS；ConfChange 在 collect_apply 时生效，幂等可重建；已知遗留(learner追平门槛/两节点移除边界)留④b |
+| M4 | 13 | ④b可判定性：CI13项 + sim_confchange 3例 + 全量36 + confchange追平升级 | PASS | run_ci PASS×13；ctest 36/36；sim_confchange 3/3（未追平拒绝/两节点移除leader拒绝/三节点移除允许）；confchange AddVoterPromotes 升级为真实追平后提升 |
+| M4 | 14 | ④b契约与复用：proto未改 + 对齐三项 + 登记对账 + 门槛语义核对 | PASS | align 3/3（contract/doc_cmd/banned）；registry 36/36；proto未改；InvalidArgument复用现成变体未扩契约；D3-5=差<100持续5s按tick可复现 |
+| M4 | 15 | ④b文档与红线：预算/查重/链接 + scope/guard + 红线5与learner不计majority | PASS | docs PASS×4；guard PASS；scope 278行/6文件在预算；红线5两节点移除leader守卫经用例证明；learner回执不调advance_commit不污染多数派 |
 <!-- review:end -->
 
 ## 约定

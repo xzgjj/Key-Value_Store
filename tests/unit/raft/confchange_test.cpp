@@ -2,7 +2,7 @@
 // 归属：TinyKV-CPP（M4 Multi-Raft 成员变更）。
 // 使用场景理解：ConfChange 必须"apply 时才生效"（崩溃后可从日志重建），且：
 //   (a) AddLearner 只加 learner，不改 voters / majority；
-//   (b) AddVoter 把 learner 提升为 voter；
+//   (b) AddVoter 在 learner 追平后（差<100 且持续5s）把它提升为 voter，未追平则拒绝；
 //   (c) RemoveNode 同时从 voters 与 learners 摘除；
 //   (d) apply 是幂等的（重放同一日志不改变结果）；
 //   (e) 非 leader 拒绝 ConfChange。
@@ -49,19 +49,36 @@ TEST(ConfChange, AddLearnerDoesNotJoinVoters) {
 }
 
 TEST(ConfChange, AddVoterPromotesLearnerIntoVoters) {
-    SoloLeader f;
-    ASSERT_TRUE(f.ready());
-    ASSERT_TRUE(f.cluster.node(0).propose_conf_change(
-        make_cc(tinykv::raftpb::ConfAddLearner, 2)).has_value());
-    (void)f.cluster.node(0).take_ready();
-    ASSERT_TRUE(contains(f.cluster.node(0).learners(), 2));
+    // M4 ④b：AddVoter 现在有追平门槛（D3-5，日志差<100 且持续5s）。
+    // 用真实 learner 实例 + 只 tick leader 驱动追平，再验证提升——保留本用例"AddVoter 提升"的本意。
+    Cluster c(3);
+    ASSERT_TRUE(c.elect());
+    const int leader = c.leader_index();
+    ASSERT_GE(leader, 0);
+    c.add_node(4);   // id=4 的真实节点（voters 空，作 learner）
 
-    ASSERT_TRUE(f.cluster.node(0).propose_conf_change(
-        make_cc(tinykv::raftpb::ConfAddVoter, 2)).has_value());
-    (void)f.cluster.node(0).take_ready();
+    ASSERT_TRUE(c.node(leader).propose_conf_change(
+        make_cc(tinykv::raftpb::ConfAddLearner, 4)).has_value());
+    c.flush();
+    ASSERT_TRUE(contains(c.node(leader).learners(), 4));
 
-    EXPECT_TRUE(contains(f.cluster.node(0).voters(), 2));
-    EXPECT_FALSE(contains(f.cluster.node(0).learners(), 2));
+    // 追平前 AddVoter 应被门槛拒绝（差为 0 但持续不足 5s）
+    auto early = c.node(leader).propose_conf_change(make_cc(tinykv::raftpb::ConfAddVoter, 4));
+    EXPECT_FALSE(early.has_value());
+
+    // 只 tick leader（避免空 voters 的 learner 节点自发动选举）：复制日志 + 推进追平计时
+    for (int i = 0; i < 60; ++i) {
+        (void)c.node(leader).propose("sync");
+        c.tick_one(leader);
+        c.flush();
+    }
+    // 追平后提升成功
+    ASSERT_TRUE(c.node(leader).propose_conf_change(
+        make_cc(tinykv::raftpb::ConfAddVoter, 4)).has_value());
+    c.flush();
+
+    EXPECT_TRUE(contains(c.node(leader).voters(), 4));
+    EXPECT_FALSE(contains(c.node(leader).learners(), 4));
 }
 
 TEST(ConfChange, RemoveNodeDropsFromBothSets) {

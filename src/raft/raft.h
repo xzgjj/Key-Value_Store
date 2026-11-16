@@ -90,6 +90,13 @@ public:
 
 private:
     [[nodiscard]] bool is_voter(PeerId p) const;
+    // M4 ④b：是否 learner（只收日志、不投票不计 majority）
+    [[nodiscard]] bool is_learner(PeerId p) const;
+    // M4 ④b：learner 是否已追平——日志差 <100 且该状态持续 >=5s（now_ticks 单调计数）。
+    // 这是 AddVoter 的前置门槛（D3-5）：未追平就提升会把落后节点计入多数派、拉低可用性。
+    [[nodiscard]] bool is_learner_caught_up(PeerId p) const;
+    // 每拍刷新追平计时：差首次 <100 记起点，退回 >=100 清零（仅 leader 需要）
+    void refresh_learner_catchup();
     [[nodiscard]] std::size_t majority() const { return cfg_.voters.size() / 2 + 1; }
     [[nodiscard]] raftpb::Message make(raftpb::MessageId id, PeerId to) const;
 
@@ -142,9 +149,12 @@ private:
     std::vector<PeerId> snapshot_targets_;
     std::map<std::uint64_t, PendingRead> pending_reads_;
     std::uint64_t read_ctx_seq_{0};
-    std::uint64_t now_ticks_{0};        // 单调 tick 计数（租约用，不读墙钟保证可复现）
+    std::uint64_t now_ticks_{0};        // 单调 tick 计数（租约/追平判定用，不读墙钟保证可复现）
     std::uint64_t lease_deadline_{0};
     bool lease_enabled_{false};
+    // M4 ④b：learner 追平计时——记录"日志差首次进入 <100"的 tick，持续够 5s 才算追平。
+    // 差重新 >=100 时清零重计；用 tick 而非墙钟，模拟器可复现。
+    std::map<std::uint64_t, std::uint64_t> learner_catch_since_;  // peer_id → tick
 };
 
 }  // namespace tinykv::raft
