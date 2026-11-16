@@ -19,6 +19,7 @@
 <!-- bugs:begin v1 -->
 | Bug | 触发场景 | 复现 | 回归测试 | 修复 |
 |---|---|---|---|---|
+| BUG-0001 | flush 写出 SST 后重开引擎必然读到 Corrupted：finish() 先 put_u32(条数) 再计算 CRC，此时 body 已被撑大 4 字节而校验长度仍按旧口径，读端按“总长-8”校验必然不匹配；正常读写全绿、只有重开校验才暴露 | `ctest --test-dir build/win-debug -R sst_test`（写 3 条→finish→重开，断言 CRC 自洽） | sst_test | 2026-11-16 |
 <!-- bugs:end -->
 
 > 空表 = 尚无缺陷登记。修第一个 bug 时按上面六步补第一行。

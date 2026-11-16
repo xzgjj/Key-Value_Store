@@ -133,6 +133,12 @@ CI 用 `ctest -L unit|simulation|integration|bench` 选择，无需解析本页�
 | tests/unit/common/kv_error_test.cpp | unit | `kv_error_test` | - | fast |
 | tests/unit/storage/memtable_test.cpp | unit | `memtable_test` | - | fast |
 | tests/unit/storage/wal_test.cpp | unit | `wal_test` | - | fast |
+| tests/unit/storage/sst_test.cpp | unit | `sst_test` | - | fast |
+| tests/unit/storage/wal_crash_test.cpp | unit | `wal_crash_test` | - | fast |
+| tests/unit/storage/engine_get_put_test.cpp | unit | `engine_get_put_test` | - | fast |
+| tests/unit/storage/engine_scan_test.cpp | unit | `engine_scan_test` | - | fast |
+| tests/unit/storage/engine_cf_test.cpp | unit | `engine_cf_test` | - | fast |
+| tests/unit/storage/engine_scan_concurrent_test.cpp | unit | `engine_scan_concurrent_test` | - | fast |
 <!-- registry:end -->
 
 > **M0 起步批次**（2026-11-16 落地登记，见上表）：encode / kv_error / strong_id / common_log 四个

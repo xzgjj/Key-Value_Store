@@ -10,6 +10,7 @@
 #include <utility>
 
 #include "common/crc32c.h"
+#include "common/varint.h"
 
 #ifdef _WIN32
 #include <io.h>
@@ -36,28 +37,6 @@ std::uint32_t get_u32(const char* p) {
         v |= static_cast<std::uint32_t>(static_cast<std::uint8_t>(p[i])) << (8 * i);
     }
     return v;
-}
-
-void put_varint(std::string& out, std::uint64_t v) {
-    while (v >= 0x80U) {
-        out.push_back(static_cast<char>((v & 0x7FU) | 0x80U));
-        v >>= 7U;
-    }
-    out.push_back(static_cast<char>(v & 0x7FU));
-}
-
-bool get_varint(std::string_view in, std::size_t& pos, std::uint64_t& v) {
-    v = 0;
-    int shift = 0;
-    while (pos < in.size() && shift <= 63) {
-        const auto byte = static_cast<std::uint8_t>(in[pos++]);
-        v |= static_cast<std::uint64_t>(byte & 0x7FU) << shift;
-        if ((byte & 0x80U) == 0U) {
-            return true;
-        }
-        shift += 7;
-    }
-    return false;
 }
 
 // 载荷布局：[varint 条数] 后逐条 [kind][cf][varint klen][key][varint vlen][value(仅 put)]
