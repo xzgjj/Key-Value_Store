@@ -3,14 +3,22 @@
 
 #include "raftstore/peer.h"
 
+#include <algorithm>
+#include <memory>
+#include <span>
+#include <string_view>
 #include <utility>
 #include <vector>
 
+#include "common/crc32c.h"
 #include "common/error.h"
 #include "raft/entry_batch.h"
 
 namespace tinykv::raftstore {
 namespace {
+
+// M4 第⑤层：快照分块在途窗口（流控）——未确认块数上限，防止把接收端内存打爆
+constexpr std::uint32_t kSnapshotWindow = 4;
 
 // proto 列族 → 存储层列族（唯一转换点；两侧定义见 proto/common.proto 与 common/encode.h）
 Cf to_cf(commonpb::CfName name) {
@@ -104,6 +112,14 @@ std::vector<raftpb::Message> Peer::take_messages() {
 }
 
 result<void> Peer::step_message(const raftpb::Message& msg) {
+    // M4 第⑤层：分块快照在 Peer 层收发（状态机不碰存储）
+    if (msg.id() == raftpb::MSG_SNAPSHOT_CHUNK) {
+        return handle_snapshot_chunk(msg);
+    }
+    if (msg.id() == raftpb::MSG_SNAPSHOT_ACK) {
+        handle_snapshot_ack(msg);
+        return {};
+    }
     if (msg.id() != raftpb::MSG_SNAPSHOT) {
         return raft_->step(msg);
     }
@@ -219,26 +235,13 @@ result<std::size_t> Peer::on_ready() {
     for (const auto idx : ready.confirmed_reads) {
         confirmed_reads_.push_back(idx);
     }
+    // M4 第⑤层：快照按 4MB 分块 + 逐块 CRC + 窗口流控发送（替代 M2 单块全量）
     if (!ready.snapshot_targets.empty()) {
-        auto data = dump_snapshot();
-        if (data.has_value()) {
-            std::string blob;
-            if (data->SerializeToString(&blob)) {
-                const auto last = raft_->last_index();
-                for (const PeerId& target : ready.snapshot_targets) {
-                    raftpb::Message msg;
-                    msg.set_id(raftpb::MSG_SNAPSHOT);
-                    msg.set_term(raft_->term().value);
-                    msg.set_from(self_.value);
-                    msg.set_to(target.value);
-                    msg.set_index(last.value);
-                    msg.set_log_term(raft_->term().value);
-                    msg.set_snapshot_data(blob);
-                    outbox_.push_back(std::move(msg));
-                }
-            }
+        for (const PeerId& target : ready.snapshot_targets) {
+            begin_snapshot_send(target);
         }
     }
+    pump_snapshot_sends();
     std::size_t applied = 0;
     for (const raftpb::Entry& entry : ready.to_apply) {
         if (auto r = apply_entry(entry); !r) {
@@ -400,6 +403,164 @@ std::optional<cmdpb::RaftCmdResponse> Peer::take_reply(std::uint64_t client_id,
 std::optional<cmdpb::RaftCmdResponse> Peer::take_read_reply(std::uint64_t client_id,
                                                             std::uint64_t seq) {
     return take_reply(client_id, seq);   // log 模式读与写共用回执表，语义一致
+}
+
+// ---- M4 第⑤层：快照分块流 ----
+
+void Peer::begin_snapshot_send(PeerId target) {
+    // 已有发送任务就沿用：snapshot_targets 可能每轮都出现（follower 未追平前），
+    // 若每次重建会把窗口游标重置回 0，后面的块永远发不出去（分块流卡死）。
+    if (snapshot_sends_.find(target.value) != snapshot_sends_.end()) {
+        return;
+    }
+    auto data = dump_snapshot();
+    if (!data.has_value()) {
+        return;
+    }
+    auto blob = std::make_shared<std::string>();
+    if (!data->SerializeToString(blob.get())) {
+        return;
+    }
+    const std::size_t chunk = snapshot_chunk_bytes_ == 0 ? 1 : snapshot_chunk_bytes_;
+    const auto total = static_cast<std::uint32_t>((blob->size() + chunk - 1) / chunk);
+    SnapshotSend s;
+    s.index = raft_->last_index().value;
+    s.term = raft_->term().value;
+    s.blob = std::shared_ptr<const std::string>(blob);
+    s.total = total == 0 ? 1 : total;
+    snapshot_sends_[target.value] = std::move(s);
+}
+
+void Peer::pump_snapshot_sends() {
+    for (auto it = snapshot_sends_.begin(); it != snapshot_sends_.end();) {
+        auto& s = it->second;
+        // 流控：在途块数 next-ack 不得超过窗口
+        while (s.next < s.total && (s.next - s.ack) < kSnapshotWindow) {
+            send_snapshot_chunk(PeerId{it->first}, s);
+        }
+        if (s.ack >= s.total) {   // 全部确认：清理
+            it = snapshot_sends_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void Peer::send_snapshot_chunk(PeerId target, SnapshotSend& s) {
+    const std::uint32_t seq = s.next;
+    const std::size_t off = static_cast<std::size_t>(seq) * snapshot_chunk_bytes_;
+    const std::size_t len = std::min(snapshot_chunk_bytes_, s.blob->size() - off);
+    const std::string_view piece(s.blob->data() + off, len);
+
+    raftpb::SnapshotChunk chunk;
+    chunk.set_snapshot_index(s.index);
+    chunk.set_snapshot_term(s.term);
+    chunk.set_chunk_seq(seq);
+    chunk.set_total_chunks(s.total);
+    chunk.set_data(std::string(piece));
+    chunk.set_crc32(crc32c(std::as_bytes(std::span{piece.data(), piece.size()})));
+
+    std::string payload;
+    if (!chunk.SerializeToString(&payload)) {
+        return;
+    }
+    raftpb::Message msg;
+    msg.set_id(raftpb::MSG_SNAPSHOT_CHUNK);
+    msg.set_term(raft_->term().value);
+    msg.set_from(self_.value);
+    msg.set_to(target.value);
+    msg.set_snapshot_data(payload);
+    outbox_.push_back(std::move(msg));
+    ++s.next;
+}
+
+result<void> Peer::handle_snapshot_chunk(const raftpb::Message& msg) {
+    raftpb::SnapshotChunk chunk;
+    if (!chunk.ParseFromString(msg.snapshot_data())) {
+        return std::unexpected(
+            Corrupted{.where = "peer:snapshot-chunk", .reason = "分块载荷解析失败"});
+    }
+    // 红线：逐块 CRC 校验——坏块直接拒绝，绝不把半截/脏数据安装进存储
+    const std::string& d = chunk.data();
+    const auto got = crc32c(std::as_bytes(std::span{d.data(), d.size()}));
+    if (got != chunk.crc32()) {
+        return std::unexpected(Corrupted{.where = "peer:snapshot-chunk", .reason = "块 CRC 不匹配"});
+    }
+    const PeerId from{msg.from()};
+    auto& recv = snapshot_recvs_[from.value];
+    if (recv.index != chunk.snapshot_index() || recv.total != chunk.total_chunks()) {
+        recv.index = chunk.snapshot_index();   // 新快照：重置缓存
+        recv.term = chunk.snapshot_term();
+        recv.total = chunk.total_chunks();
+        recv.received = 0;
+        recv.chunks.assign(recv.total, std::string{});
+        recv.have.assign(recv.total, false);
+    }
+    const std::uint32_t seq = chunk.chunk_seq();
+    if (seq >= recv.total) {
+        return std::unexpected(
+            InvalidArgument{"快照块序号越界（seq >= total_chunks）"});
+    }
+    if (!recv.have[seq]) {
+        recv.chunks[seq] = chunk.data();
+        recv.have[seq] = true;
+        ++recv.received;
+    }
+    // 回 ACK 推进 leader 流控窗口（index = 本块 seq）
+    raftpb::Message ack;
+    ack.set_id(raftpb::MSG_SNAPSHOT_ACK);
+    ack.set_term(raft_->term().value);
+    ack.set_from(self_.value);
+    ack.set_to(from.value);
+    ack.set_index(seq);
+    ack.mutable_snapshot()->set_index(recv.index);
+    ack.mutable_snapshot()->set_term(recv.term);
+    outbox_.push_back(std::move(ack));
+
+    if (recv.received >= recv.total) {
+        auto r = finish_snapshot_recv(from, recv);
+        snapshot_recvs_.erase(from.value);
+        return r;
+    }
+    return {};
+}
+
+void Peer::handle_snapshot_ack(const raftpb::Message& msg) {
+    const auto it = snapshot_sends_.find(msg.from());
+    if (it == snapshot_sends_.end() || it->second.index != msg.snapshot().index()) {
+        return;   // 无发送状态或快照代号不符（旧 ACK）
+    }
+    const auto ack = static_cast<std::uint32_t>(msg.index()) + 1;
+    if (ack > it->second.ack) {
+        it->second.ack = ack;
+    }
+}
+
+result<void> Peer::finish_snapshot_recv(PeerId from, SnapshotRecv& recv) {
+    std::string blob;
+    blob.reserve(recv.total * snapshot_chunk_bytes_);
+    for (const auto& c : recv.chunks) {
+        blob += c;
+    }
+    raftpb::SnapshotData data;
+    if (!data.ParseFromString(blob)) {
+        return std::unexpected(
+            Corrupted{.where = "peer:snapshot-chunk", .reason = "重组快照解析失败"});
+    }
+    if (auto r = install_snapshot(data); !r) {
+        return r;
+    }
+    raft_->restore_snapshot(LogIndex{recv.index}, Term{recv.term});
+    // 回执：告诉 leader 已到快照位点，可接着发增量日志
+    raftpb::Message reply;
+    reply.set_id(raftpb::MSG_APPEND_RESPONSE);
+    reply.set_term(raft_->term().value);
+    reply.set_from(self_.value);
+    reply.set_to(from.value);
+    reply.set_index(recv.index);
+    reply.set_commit(recv.index);
+    outbox_.push_back(std::move(reply));
+    return {};
 }
 
 }  // namespace tinykv::raftstore

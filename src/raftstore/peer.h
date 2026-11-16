@@ -97,6 +97,9 @@ public:
     void set_region(const Region& region) { my_region_ = region; }
     void set_store_meta(StoreMeta* meta) { store_meta_ = meta; }
 
+    // ---- M4 第⑤层：快照分块大小（默认 4MB，SPEC-3 D3-3；测试调小以覆盖多块路径） ----
+    void set_snapshot_chunk_bytes(std::size_t n) { snapshot_chunk_bytes_ = n == 0 ? 1 : n; }
+
 private:
     Peer(std::unique_ptr<raft::RaftLog> log, Storage& storage, const raft::Config& cfg);
 
@@ -111,7 +114,7 @@ private:
     void fill_get_reply(const cmdpb::GetRequest& get, cmdpb::GetResponse* out);
     void fill_scan_reply(const cmdpb::ScanRequest& scan, cmdpb::ScanResponse* out);
 
-    // ---- 快照（M2 单块全量；M4 按 region 范围生成） ----
+    // ---- 快照（M2 单块全量；M4 第⑤层分块流） ----
     // 生成：遍历三个列族取全量存活键（墓碑已被 Scan 过滤，故快照天然是"当前状态"）
     [[nodiscard]] result<raftpb::SnapshotData> dump_snapshot() const;
     // 安装：先为"本地有、快照无"的键写墓碑，再写入快照内容——
@@ -120,6 +123,41 @@ private:
     // 三个列族全量遍历（快照生成与安装共用同一扫描口径，避免两处口径漂移）
     [[nodiscard]] result<void> for_each_entry(
         const std::function<void(Cf, const std::string&, const std::string&)>& fn) const;
+
+    // ---- M4 第⑤层：快照分块流（4MB + 流内序号 + 逐块 CRC + 窗口流控） ----
+    // 发送状态：每 target 一份游标；blob 共享（dump 一次，多 target 不重复序列化）
+    struct SnapshotSend {
+        std::uint64_t index{0};
+        std::uint64_t term{0};
+        std::shared_ptr<const std::string> blob;
+        std::uint32_t total{0};
+        std::uint32_t next{0};   // 下一个待发 chunk_seq
+        std::uint32_t ack{0};    // 已确认的最大 chunk_seq（含）
+    };
+    // 接收状态：按 (from) 缓存块，逐块 CRC；收齐后重组安装
+    struct SnapshotRecv {
+        std::uint64_t index{0};
+        std::uint64_t term{0};
+        std::uint32_t total{0};
+        std::uint32_t received{0};
+        std::vector<std::string> chunks;
+        std::vector<bool> have;
+    };
+    // 为该 target 建立/刷新发送状态（dump_snapshot + 序列化 + 切块参数）
+    void begin_snapshot_send(PeerId target);
+    // 按窗口把在途额度内的块发出去（流控：next - ack < kSnapshotWindow）
+    void pump_snapshot_sends();
+    void send_snapshot_chunk(PeerId target, SnapshotSend& s);
+    // 收一块：CRC 校验 → 入缓存 → 回 ACK → 收齐则重组安装
+    [[nodiscard]] result<void> handle_snapshot_chunk(const raftpb::Message& msg);
+    // 流控确认：推进 ack，下次 pump 继续发
+    void handle_snapshot_ack(const raftpb::Message& msg);
+    // 收齐后：按 seq 重组 blob → 解析 SnapshotData → 整表安装 → 重置日志指针
+    [[nodiscard]] result<void> finish_snapshot_recv(PeerId from, SnapshotRecv& recv);
+
+    std::map<std::uint64_t, SnapshotSend> snapshot_sends_;   // peer_id → 发送游标
+    std::map<std::uint64_t, SnapshotRecv> snapshot_recvs_;   // from peer_id → 接收缓存
+    std::size_t snapshot_chunk_bytes_{4U * 1024U * 1024U};   // 默认 4MB（SPEC-3 D3-3）
 
     std::unique_ptr<raft::RaftLog> log_;
     std::unique_ptr<raft::Raft> raft_;

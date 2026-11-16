@@ -31,7 +31,20 @@ enum MessageId {
     MSG_REQUEST_VOTE_RESPONSE = 6;   // all→candidate：投票回执（拒绝不重置对方计时器）
     MSG_HEARTBEAT = 7;               // leader→follower：只带元数据（PERF-08 红线：禁止全量日志）
     MSG_HEARTBEAT_RESPONSE = 8;      // follower→leader：ReadIndex quorum 确认载体（M3）
-    MSG_SNAPSHOT = 9;                // leader→follower：快照模式入口（InstallSnapshot 走 M3 独立流通道）
+    MSG_SNAPSHOT = 9;                // leader→follower：快照单块入口（M2 兼容路径保留）
+    MSG_SNAPSHOT_CHUNK = 10;         // leader→follower：快照分块（M4 第⑤层，4MB+逐块CRC）
+    MSG_SNAPSHOT_ACK = 11;           // follower→leader：分块流控确认（已连续收到的最大 seq）
+}
+
+// 快照分块（M4 第⑤层，SPEC-3 D3-3：4MB/块 + 流内序号 + 逐块 CRC）。
+// 载荷放 Message.snapshot_data，不新增 Message 字段，保持七字段复用约定。
+message SnapshotChunk {
+    uint64 snapshot_index = 1;  // 本快照覆盖位点（同一快照所有块一致）
+    uint64 snapshot_term = 2;   // 该位点任期
+    uint32 chunk_seq = 3;       // 流内序号，从 0 起连续
+    uint32 total_chunks = 4;    // 总块数，接收端据此判断收齐
+    uint32 crc32 = 5;           // data 的 CRC32C（逐块校验，不必等整表）
+    bytes data = 6;             // 该块载荷，≤ chunk_size（默认 4MB）
 }
 
 // region 内副本身份（跨消息复用）
@@ -89,6 +102,6 @@ message Message {
     SnapshotMeta snapshot = 10;    // 仅 MSG_SNAPSHOT：快照元数据；其余类型不设置
     uint64 read_ctx = 11;          // 仅 HEARTBEAT/HEARTBEAT_RESPONSE：ReadIndex 轮次标识
                                    // （0 = 普通心跳；非 0 时回执必须原样带回，用于 quorum 确认）
-    bytes snapshot_data = 12;      // 仅 MSG_SNAPSHOT：序列化的 SnapshotData（M2 单块传输，
-                                   // 分块与流控留给 M4：那时快照会按 region 范围生成）
+    bytes snapshot_data = 12;      // 仅快照类消息：MSG_SNAPSHOT=序列化 SnapshotData（单块）；
+                                   // MSG_SNAPSHOT_CHUNK=序列化 SnapshotChunk（M4 第⑤层分块）
 }

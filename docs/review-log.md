@@ -52,6 +52,9 @@
 | M4 | 13 | ④b可判定性：CI13项 + sim_confchange 3例 + 全量36 + confchange追平升级 | PASS | run_ci PASS×13；ctest 36/36；sim_confchange 3/3（未追平拒绝/两节点移除leader拒绝/三节点移除允许）；confchange AddVoterPromotes 升级为真实追平后提升 |
 | M4 | 14 | ④b契约与复用：proto未改 + 对齐三项 + 登记对账 + 门槛语义核对 | PASS | align 3/3（contract/doc_cmd/banned）；registry 36/36；proto未改；InvalidArgument复用现成变体未扩契约；D3-5=差<100持续5s按tick可复现 |
 | M4 | 15 | ④b文档与红线：预算/查重/链接 + scope/guard + 红线5与learner不计majority | PASS | docs PASS×4；guard PASS；scope 278行/6文件在预算；红线5两节点移除leader守卫经用例证明；learner回执不调advance_commit不污染多数派 |
+| M4 | 16 | ⑤可判定性：CI13 + snapshot_chunk 2例 + 全量绿 | PASS | run_ci PASS×13；ctest 全绿；snapshot_chunk 2/2（多块追平且数据落盘/坏块CRC拒绝）；M2 snapshot_test 兼容绿 |
+| M4 | 17 | ⑤契约与复用：SnapshotChunk proto落版 + 复用 install_snapshot/crc32c | PASS | align 3/3；proto 按 SPEC D3-3 默认(4MB+seq+CRC)；复用 crc32c/install_snapshot/restore_snapshot；MSG_SNAPSHOT单块保留兼容 |
+| M4 | 18 | ⑤文档与红线：分块CRC不装脏数据 + scope/guard | PASS | docs PASS；guard PASS；坏块Corrupted拒绝不安装(红线)；窗口流控防内存打爆；begin不重置防卡死 |
 <!-- review:end -->
 
 ## 约定
