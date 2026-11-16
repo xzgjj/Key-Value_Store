@@ -140,6 +140,17 @@ public:
         return regions_.size();
     }
 
+    // M4 ⑦b：全量 region 快照（观测端点 GET /regions 的数据源；值拷贝，与路由读并发安全）
+    [[nodiscard]] std::vector<Region> all_regions() const {
+        std::shared_lock lock(mu_);
+        std::vector<Region> out;
+        out.reserve(regions_.size());
+        for (const auto& [id, r] : regions_) {
+            out.push_back(r);
+        }
+        return out;
+    }
+
 private:
     // 调用方持唯一锁：检查新 region 是否与既有区间重叠。
     // 半开区间 [s1,e1) 与 [s2,e2) 重叠 ⟺ s1<e2 && s2<e1（空 end = +∞，视为最大）。

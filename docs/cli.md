@@ -144,8 +144,8 @@ done < seed.tsv
 
 ## 10. Region 观测命令（M4，契约已定版，实现随 M4 对应层交付）
 
-> 用户 2026-11-16 核对通过（证据 `docs/M4-CONTRACT-DRAFT.md`）。这些命令**尚未实现**，
-> 随 M4 第②~⑦层逐步交付；未实现前调用返回退出码 1（用法错误）。
+> 用户 2026-11-16 核对通过（证据 `docs/M4-CONTRACT-DRAFT.md`）。已随 M4 ②~⑦层全部交付；
+> trace 需 `--endpoint`（开关状态在 store 侧，偏差已记 `docs/M4-CLI-TRACE-DRAFT.md` 待追认）。
 
 ### 10.1 命令列表
 
@@ -199,8 +199,8 @@ tinykv-cli --endpoint 127.0.0.1:3380 scheduler status
 开启 region trace 后复现问题：
 
 ```bash
-tinykv-cli trace region 7 on
+tinykv-cli --endpoint 127.0.0.1:3380 trace region 7 on
 # ... 复现操作 ...
-tinykv-cli trace region 7 off
+tinykv-cli --endpoint 127.0.0.1:3380 trace region 7 off
 # 日志在 log/trace-region-7.log
 ```

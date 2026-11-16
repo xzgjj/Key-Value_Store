@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -20,6 +21,13 @@
 #include "common/error.h"
 
 namespace tinykv::server {
+
+// 请求行（METHOD /path?query HTTP/x）：⑦b 起按 method+path 分派
+struct RequestLine {
+    std::string method;
+    std::string path;
+    std::string query;
+};
 
 class StatusServer {
 public:
@@ -30,9 +38,18 @@ public:
     // 写处理器：请求体为制表符分隔的简单文本（put\tkey\tvalue / del\tkey）。
     // 刻意不引 JSON 库：CLI 只需表达两三种写操作，文本协议足够且两端都能一眼看懂。
     using KvWriteHandler = std::function<std::string(const std::string& body)>;
+    // M4 ⑦b：观测/管理端点（docs/cli.md §10）。
+    //   GET  /regions / /region / /region/peers / /scheduler/status（query 携带 id）
+    //   POST /region/split、/trace（body 为制表符文本，与 /kv 同风格）
+    // 返回空串 = 404（region 不存在 / 端点未装配）。
+    using AdminHandler = std::function<std::string(const std::string& method,
+                                                   const std::string& path,
+                                                   const std::string& query,
+                                                   const std::string& body)>;
     [[nodiscard]] static result<std::unique_ptr<StatusServer>> start(
         const std::string& host, std::uint16_t port, std::function<std::string()> provider,
-        KvHandler kv_handler = {}, KvWriteHandler kv_write = {});
+        KvHandler kv_handler = {}, KvWriteHandler kv_write = {},
+        AdminHandler admin_handler = {});
 
     [[nodiscard]] std::uint16_t port() const { return bound_port_; }
 
@@ -47,6 +64,13 @@ private:
     void accept_loop();
     void serve(std::shared_ptr<asio::ip::tcp::socket> sock);
     void serve_write(std::shared_ptr<asio::ip::tcp::socket> sock, const std::string& req);
+    // ⑦b：POST 管理端点（split/trace）——复用 serve_write 的"一次读完整帧"假设
+    void serve_admin_write(std::shared_ptr<asio::ip::tcp::socket> sock, const std::string& req,
+                           const std::string& path);
+    // ⑦b：GET 分派（status/kv/admin 三路）；nullopt = 404
+    [[nodiscard]] std::optional<std::string> handle_get(const RequestLine& line) const;
+    // 回一段固定文本并断开（三个 serve 路径共用的收尾）
+    static void respond(std::shared_ptr<asio::ip::tcp::socket> sock, const std::string& text);
 
     asio::io_context ctx_{1};
     std::unique_ptr<asio::ip::tcp::acceptor> acceptor_;
@@ -56,6 +80,7 @@ private:
     std::function<std::string()> provider_;
     KvHandler kv_handler_;
     KvWriteHandler kv_write_;
+    AdminHandler admin_handler_;
 };
 
 }  // namespace tinykv::server

@@ -48,6 +48,14 @@ std::string_view usage() {
         "  scan [start]             按升序扫描，默认 limit 10\n"
         "  status                   打印配置与引擎统计\n"
         "\n"
+        "集群观测命令（需 --endpoint，docs/cli.md §10）：\n"
+        "  regions                        列出该 store 全部 region\n"
+        "  region <id>                    单个 region 详情\n"
+        "  region peers <id>              副本分布\n"
+        "  region split <id> <key>        手动触发 split（调试）\n"
+        "  scheduler status               调度器状态\n"
+        "  trace region <id> on|off       region 级 trace 开关\n"
+        "\n"
         "选项:\n"
         "  --config <path>          配置文件路径（默认 demo.yaml）\n"
         "  --endpoint <host:port>   集群模式：status/get/put/del（scan 暂未开放）\n"
@@ -227,23 +235,152 @@ int cmd_cluster_write(const std::string& cmd, const std::vector<std::string>& po
     return kExitOk;
 }
 
-int cmd_cluster(const Globals& g, const std::string& cmd, const std::vector<std::string>& pos,
-                std::ostream& out, std::ostream& err) {
-    if (cmd != "status" && cmd != "get" && cmd != "put" && cmd != "del") {
-        err << "集群模式支持 status / get / put / del；scan 见 docs/cli.md\n";
-        return kExitUsage;
+// ---- M4 ⑦b：region/scheduler/trace 观测命令（docs/cli.md §10，契约 2026-11-16 核对） ----
+
+// <id>：十进制正整数；非法格式按用法错误退出（§10.2）
+bool parse_region_id(const std::string& s, std::uint64_t& id) {
+    if (s.empty() || s.size() > 18) {
+        return false;
     }
+    for (const char ch : s) {
+        if (ch < '0' || ch > '9') {
+            return false;
+        }
+    }
+    id = std::stoull(s);
+    return id > 0;
+}
+
+// 解析 --endpoint host:port；失败输出用法错误返回 false
+bool parse_endpoint(const Globals& g, std::string& host, std::uint16_t& port, std::ostream& err) {
     const auto colon = g.endpoint.rfind(':');
     if (colon == std::string::npos) {
         err << "--endpoint 需为 host:port\n";
+        return false;
+    }
+    host = g.endpoint.substr(0, colon);
+    port = static_cast<std::uint16_t>(std::stoul(g.endpoint.substr(colon + 1)));
+    return true;
+}
+
+// GET 一条观测路径：空正文 = 404（region 不存在/端点未装配）→ 退出码 3
+int cmd_cluster_observe(const Globals& g, const std::string& path, std::ostream& out,
+                        std::ostream& err) {
+    std::string host;
+    std::uint16_t port = 0;
+    if (!parse_endpoint(g, host, port, err)) {
         return kExitUsage;
     }
-    const std::string host = g.endpoint.substr(0, colon);
-    const auto port = static_cast<std::uint16_t>(std::stoul(g.endpoint.substr(colon + 1)));
-    if (cmd == "put" || cmd == "del") {
-        return cmd_cluster_write(cmd, pos, host, port, out, err);
+    auto body = http_get(host, port, path);
+    if (!body) {
+        err << "请求 " << path << " 失败：" << describe(body.error()) << "\n";
+        return kExitRuntime;
     }
+    if (body->empty()) {
+        err << "NOT_FOUND\n";
+        return kExitNotFound;
+    }
+    out << *body;
+    if (body->back() != '\n') {
+        out << "\n";
+    }
+    return kExitOk;
+}
 
+// POST 一条管理路径：ERR 前缀 → 运行错误（服务端拒绝原因原样透出）
+int cmd_cluster_admin(const Globals& g, const std::string& path, const std::string& body,
+                      std::ostream& out, std::ostream& err) {
+    std::string host;
+    std::uint16_t port = 0;
+    if (!parse_endpoint(g, host, port, err)) {
+        return kExitUsage;
+    }
+    auto resp = http_post(host, port, path, body);
+    if (!resp) {
+        err << "请求 " << path << " 失败：" << describe(resp.error()) << "\n";
+        return kExitRuntime;
+    }
+    if (resp->rfind("ERR", 0) == 0) {
+        err << *resp << "\n";
+        return kExitRuntime;
+    }
+    out << *resp;
+    if (resp->back() != '\n') {
+        out << "\n";
+    }
+    return kExitOk;
+}
+
+int cmd_regions(const Globals& g, const std::vector<std::string>& pos, std::ostream& out,
+                std::ostream& err) {
+    if (pos.size() != 1) {
+        err << "用法: regions\n";
+        return kExitUsage;
+    }
+    return cmd_cluster_observe(g, "/regions", out, err);
+}
+
+int cmd_region(const Globals& g, const std::vector<std::string>& pos, std::ostream& out,
+               std::ostream& err) {
+    // region <id> / region peers <id> / region split <id> <key>
+    if (pos.size() >= 2 && pos[1] == "peers") {
+        std::uint64_t id = 0;
+        if (pos.size() != 3 || !parse_region_id(pos[2], id)) {
+            err << "用法: region peers <id>\n";
+            return kExitUsage;
+        }
+        return cmd_cluster_observe(g, "/region/peers?id=" + std::to_string(id), out, err);
+    }
+    if (pos.size() >= 2 && pos[1] == "split") {
+        std::uint64_t id = 0;
+        if (pos.size() != 4 || !parse_region_id(pos[2], id) || pos[3].empty()) {
+            err << "用法: region split <id> <key>\n";
+            return kExitUsage;
+        }
+        return cmd_cluster_admin(g, "/region/split",
+                                 "split\t" + std::to_string(id) + "\t" + pos[3], out, err);
+    }
+    std::uint64_t id = 0;
+    if (pos.size() != 2 || !parse_region_id(pos[1], id)) {
+        err << "用法: region <id> | region peers <id> | region split <id> <key>\n";
+        return kExitUsage;
+    }
+    return cmd_cluster_observe(g, "/region?id=" + std::to_string(id), out, err);
+}
+
+int cmd_scheduler_status(const Globals& g, const std::vector<std::string>& pos, std::ostream& out,
+                         std::ostream& err) {
+    if (pos.size() != 2 || pos[1] != "status") {
+        err << "用法: scheduler status\n";
+        return kExitUsage;
+    }
+    return cmd_cluster_observe(g, "/scheduler/status", out, err);
+}
+
+int cmd_trace_region(const Globals& g, const std::vector<std::string>& pos, std::ostream& out,
+                     std::ostream& err) {
+    // trace region <id> on|off（开关状态在 store 侧，故同样需要 --endpoint）
+    if (pos.size() != 4 || pos[1] != "region" || (pos[3] != "on" && pos[3] != "off")) {
+        err << "用法: trace region <id> on|off\n";
+        return kExitUsage;
+    }
+    std::uint64_t id = 0;
+    if (!parse_region_id(pos[2], id)) {
+        err << "用法: trace region <id> on|off（<id> 须为十进制正整数）\n";
+        return kExitUsage;
+    }
+    return cmd_cluster_admin(g, "/trace", "trace\t" + std::to_string(id) + "\t" + pos[3],
+                             out, err);
+}
+
+// status/get 的读路径（get 走 /kv 查询串，status 走 /status）
+int cmd_cluster_read(const Globals& g, const std::string& cmd, const std::vector<std::string>& pos,
+                     std::ostream& out, std::ostream& err) {
+    std::string host;
+    std::uint16_t port = 0;
+    if (!parse_endpoint(g, host, port, err)) {
+        return kExitUsage;
+    }
     std::string path = "/status";
     if (cmd == "get") {
         if (pos.size() != 2) {
@@ -270,6 +407,35 @@ int cmd_cluster(const Globals& g, const std::string& cmd, const std::vector<std:
         out << "\n";
     }
     return kExitOk;
+}
+
+int cmd_cluster(const Globals& g, const std::string& cmd, const std::vector<std::string>& pos,
+                std::ostream& out, std::ostream& err) {
+    if (cmd == "regions") {
+        return cmd_regions(g, pos, out, err);
+    }
+    if (cmd == "region") {
+        return cmd_region(g, pos, out, err);
+    }
+    if (cmd == "scheduler") {
+        return cmd_scheduler_status(g, pos, out, err);
+    }
+    if (cmd == "trace") {
+        return cmd_trace_region(g, pos, out, err);
+    }
+    if (cmd != "status" && cmd != "get" && cmd != "put" && cmd != "del") {
+        err << "集群模式支持 status/get/put/del 与 region 观测命令（见 docs/cli.md §10）\n";
+        return kExitUsage;
+    }
+    if (cmd == "put" || cmd == "del") {
+        std::string host;
+        std::uint16_t port = 0;
+        if (!parse_endpoint(g, host, port, err)) {
+            return kExitUsage;
+        }
+        return cmd_cluster_write(cmd, pos, host, port, out, err);
+    }
+    return cmd_cluster_read(g, cmd, pos, out, err);
 }
 
 int run_cli(std::span<const std::string> args, std::ostream& out, std::ostream& err) {

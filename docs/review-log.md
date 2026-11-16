@@ -61,6 +61,9 @@
 | M4 | 22 | ⑦a可判定性：CI13 + transfer_leader 4例 + sim_transfer 3例 + 全量40 | PASS | run_ci PASS×13；ctest 40/40；transfer_leader 4/4（转移成功/转移期拒提案/超时放弃/非法目标）；sim_transfer 3/3（不丢提案/拒绝可重试/放弃后继续服务）；变异检查2次：去campaign→2例红、放宽deadline→1例红，用例咬得住实现 |
 | M4 | 23 | ⑦a契约与复用：MSG_TIMEOUT_NOW 追加式枚举 + TransferLeaderRequest 零改动 + 对齐三项 | PASS | align 3/3；raft.proto 仅追加 MSG_TIMEOUT_NOW=12（七字段复用，不新增 Message 字段）；TransferLeaderRequest 用既有契约零改动；M4-TRANSFERLEADER-DRAFT 留痕待追认；不落日志（易失意图，与etcd leadTransferee 同构）；复用 campaign/handle_vote_request 现成路径 |
 | M4 | 24 | ⑦a文档与红线：红线6三条逐条证明 + scope/guard/docs | PASS | docs PASS；guard PASS；scope 已补声明(CMakeLists/测试/草稿)；红线6：转移期拒提案(例2)、一个election timeout放弃(例3)、目标追平才发TimeoutNow(maybe_send_timeout_now)；once-notified防重复抬term；测试修正2处场景假设(TimeoutNow会被flush送达/红线4需当前term条目)均非实现缺陷；登记 40⇄40 |
+| M4 | 25 | ⑦b可判定性：CI13 + cli_region 6例 + 全量41 | PASS | run_ci PASS×13；ctest 41/41；cli_region 6/6（regions列表+split后两region/详情+peers/开区间外拒/scheduler视图/trace开关落盘/退出码1-3-2契约）；重构后 cmd_cluster 拆四个子函数、serve 拆 parse_request_line+handle_get+respond，复杂度全部回到限内 |
+| M4 | 26 | ⑦b契约与复用：§10 六命令落版 + AdminHandler 端点表留痕 + trace偏差待追认 | PASS | align 3/3；docs/M4-CLI-TRACE-DRAFT.md 留痕（trace 补 --endpoint 的偏差与 2 项待追认）；region split 服务端链路 AskSplit→admin提案→共识→apply→路由更新全部复用③⑥现成机制；RegionTrace 复用 spdlog rotating 与全局日志同规格（10MB×5） |
+| M4 | 27 | ⑦b文档与红线：红线1经CLI路径再证明 + docs/guard/scope | PASS | docs PASS；guard PASS；scope 补声明 region_trace.h 与 CLI-TRACE 草稿；region split 'zz' 开区间外被 apply 拒（红线1 的 CLI 端到端证据）；cli.md §10 状态行更新为已交付；已知限制(trace埋点未接Peer内部)记草稿§4移交notes-m4 |
 <!-- review:end -->
 
 ## 约定
