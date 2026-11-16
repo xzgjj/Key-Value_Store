@@ -143,6 +143,7 @@ CI 用 `ctest -L unit|simulation|integration|bench` 选择，无需解析本页�
 | tests/bench/write_bench_test.cpp | bench | `write_bench` | - | nightly |
 | tests/unit/raft/raft_log_test.cpp | unit | `raft_log_test` | - | fast |
 | tests/unit/raft/raft_step_test.cpp | unit | `raft_step_test` | - | fast |
+| tests/unit/raft/raft_kv_test.cpp | unit | `raft_kv_test` | - | fast |
 <!-- registry:end -->
 
 > **M0 起步批次**（2026-11-16 落地登记，见上表）：encode / kv_error / strong_id / common_log 四个

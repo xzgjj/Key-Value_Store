@@ -70,6 +70,10 @@ void Raft::campaign() {
         msg.set_log_term(last_term ? last_term->value : 0);
         outbox_.push_back(std::move(msg));
     }
+    // 单副本集群：自己一票即过多数派，不必等外部回执（否则永远选不出 leader）
+    if (votes_.size() >= majority()) {
+        become_leader();
+    }
 }
 
 void Raft::become_leader() {
@@ -145,6 +149,9 @@ void Raft::append_entry_and_replicate(const std::string& data) {
     entry.set_data(data);
     (void)log_.append(std::span<const Entry>(&entry, 1));
     broadcast_append();
+    // 单副本集群没有 follower 回执，commit 只能靠自己推进；多副本时此调用不影响
+    // （match 值仍为 0，多数派位置不会前移）。
+    advance_commit();
 }
 
 void Raft::send_append(PeerId to) {
