@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -83,6 +84,30 @@ public:
             return false;
         }
         for (const auto& m : pending) {
+            const int to = static_cast<int>(m.to()) - 1;
+            if (to >= 0 && to < size()) {
+                (void)nodes_[static_cast<std::size_t>(to)]->step(m);
+            }
+        }
+        return true;
+    }
+
+    // 按概率丢弃消息的一轮投递：模拟丢包/分区，用于随机注入
+    bool deliver_round_dropping(unsigned percent, std::mt19937& rng) {
+        std::vector<tinykv::raftpb::Message> pending;
+        for (auto& n : nodes_) {
+            for (auto& m : n->take_ready().messages) {
+                pending.push_back(std::move(m));
+            }
+        }
+        if (pending.empty()) {
+            return false;
+        }
+        std::uniform_int_distribution<unsigned> dist(0, 99);
+        for (const auto& m : pending) {
+            if (dist(rng) < percent) {
+                continue;   // 丢弃
+            }
             const int to = static_cast<int>(m.to()) - 1;
             if (to >= 0 && to < size()) {
                 (void)nodes_[static_cast<std::size_t>(to)]->step(m);

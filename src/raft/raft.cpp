@@ -191,6 +191,13 @@ void Raft::broadcast_heartbeat() {
         if (same(p, cfg_.id)) {
             continue;
         }
+        // 落后于 last_index 的 follower 用 AppendEntries 补发增量；追平后才退化为纯元数据心跳。
+        // 否则"分区恢复后 leader 只发心跳、落后节点永远追不上"——丢包恢复就卡在这里。
+        const auto it = next_index_.find(p.value);
+        if (it != next_index_.end() && it->second <= log_.last_index().value) {
+            send_append(p);
+            continue;
+        }
         auto msg = make(raftpb::MSG_HEARTBEAT, p);
         msg.set_index(log_.last_index().value);
         msg.set_commit(log_.committed().value);
