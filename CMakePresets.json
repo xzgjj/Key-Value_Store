@@ -121,6 +121,20 @@
             "output": {
                 "outputOnFailure": true
             }
+        },
+        {
+            "name": "win-vcpkg",
+            "configurePreset": "win-vcpkg",
+            "output": {
+                "outputOnFailure": true
+            }
+        },
+        {
+            "name": "linux-vcpkg",
+            "configurePreset": "linux-vcpkg",
+            "output": {
+                "outputOnFailure": true
+            }
         }
     ]
 }

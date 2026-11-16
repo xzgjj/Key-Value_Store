@@ -118,15 +118,18 @@ def check_contract(root: Path, rules: dict) -> L.CheckResult:
 
 
 # ---- doc_cmd：文档命令引用的对象必须真实存在 ---------------------------------
-def _preset_names(root: Path) -> tuple[set[str], set[str]]:
+def _preset_names(root: Path) -> tuple[set[str], set[str], set[str]]:
     path = root / "CMakePresets.json"
     if not path.is_file():
-        return set(), set()
+        return set(), set(), set()
     data = json.loads(L.read_text(path))
     configure = {p["name"] for p in data.get("configurePresets", [])
                  if p.get("name") and not p.get("hidden")}
     build = {p["name"] for p in data.get("buildPresets", []) if p.get("name")}
-    return configure, build
+    # testPresets 单独一套：configure/build/test 三种 preset 名互不通用，
+    # 文档里 ctest --preset 写错不会因 configure 侧存在而同名通过（2026-11-16 补）
+    test = {p["name"] for p in data.get("testPresets", []) if p.get("name")}
+    return configure, build, test
 
 
 def _iter_commands(text: str):
@@ -150,7 +153,7 @@ def check_doc_cmd(root: Path, rules: dict) -> L.CheckResult:
     res = L.CheckResult("doc_cmd", L.PASS)
     cfg = rules.get("align", {})
     labels = set(map(str, cfg.get("ctest_labels", [])))
-    configure, build = _preset_names(root)
+    configure, build, test_presets = _preset_names(root)
     if not configure:
         res.status = L.SKIP
         res.summary = "SKIP(NO_PRESETS)：未找到 CMakePresets.json，无法校验 preset 引用"
@@ -171,6 +174,16 @@ def check_doc_cmd(root: Path, rules: dict) -> L.CheckResult:
                 if tok not in known:
                     res.status = L.FAIL
                     res.add("ALIGN-PRESET", f"{where} → preset '{tok}' 不存在于 CMakePresets.json")
+            for m in re.finditer(r"ctest\s+--preset\s+(\S+)", line):
+                tok = _clean_token(m.group(1))
+                if _is_placeholder(tok):
+                    continue
+                checked += 1
+                if tok not in test_presets:
+                    res.status = L.FAIL
+                    res.add("ALIGN-TESTPRESET",
+                            f"{where} → test preset '{tok}' 不存在于 CMakePresets.json "
+                            f"的 testPresets（configure/build/test 三套互不通用）")
             for m in re.finditer(r"--test-dir\s+(\S+)", line):
                 tok = _clean_token(m.group(1))
                 if _is_placeholder(tok):

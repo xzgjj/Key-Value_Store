@@ -35,6 +35,9 @@ TESTLIB_DIR = "testlib"  # 共享测试基建，不要求单独登记
 REGISTRY_BEGIN = "<!-- registry:begin"
 REGISTRY_END = "<!-- registry:end"
 ADD_TEST_RE = re.compile(r"add_test\s*\(\s*NAME\s+([^\s),]+)", re.IGNORECASE)
+# 项目封装入口：add_tinykv_test(<name> SRCS ...)。仓库里所有用例都走它，
+# 不认它 E1（仓库→表）就是空集——2026-11-16 修，见 scan_add_tests 说明。
+ADD_TINYKV_TEST_RE = re.compile(r"\badd_tinykv_test\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)")
 BACKTICK_RE = re.compile(r"`([^`]+)`")
 SCRIPT_PATH_RE = re.compile(r"[A-Za-z0-9_./\\-]+\.(?:sh|py)")
 SEPARATOR_ROW_RE = re.compile(r"^[\s|:\-]+$")
@@ -104,7 +107,14 @@ def parse_registry(md_path: Path):
 
 
 def scan_add_tests(root: Path):
-    """扫描全部 CMakeLists.txt 中的 add_test(NAME ...)。"""
+    """扫描 CMakeLists.txt 中的测试注册：add_test(NAME x) 与 add_tinykv_test(x ...)。
+
+    为什么两种都要认（2026-11-16 修）：本仓库禁止散装 add_test，一切用例经
+    cmake/AddTest.cmake 的 add_tinykv_test() 注册。原实现只匹配 add_test(NAME ...)，
+    而该调用只出现在封装函数内部（文件是 AddTest.cmake，不是 CMakeLists.txt），
+    于是 E1「仓库→表」方向恒为空集，实测输出 "add_test 注册: 0"——真正在守的
+    只剩 E2（测试文件须被某行 Scope 覆盖）。补上封装入口后，两条防线才都在。
+    """
     found, warns = [], []
     for cmake in sorted(root.rglob("CMakeLists.txt")):
         rel = cmake.relative_to(root).as_posix()
@@ -112,14 +122,14 @@ def scan_add_tests(root: Path):
             continue
         for lineno, line in enumerate(cmake.read_text(encoding="utf-8",
                                                       errors="replace").splitlines(), 1):
-            m = ADD_TEST_RE.search(line)
+            m = ADD_TINYKV_TEST_RE.search(line) or ADD_TEST_RE.search(line)
             if not m:
                 continue
             name = m.group(1)
             if "${" in name:  # foreach 等动态注册，静态无法确定展开名
-                warns.append(Finding("W1", f"动态 add_test 注册无法静态校验：{rel}:{lineno}"
+                warns.append(Finding("W1", f"动态注册无法静态校验：{rel}:{lineno}"
                                            f"（NAME={name}）；请确认展开后的每个测试都已登记",
-                                    warn=True))
+                                     warn=True))
             else:
                 found.append((name, f"{rel}:{lineno}"))
     return found, warns

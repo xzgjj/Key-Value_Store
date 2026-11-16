@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lib_ci as L  # noqa: E402
 
 
-def check_scope(root: Path, rules: dict) -> L.CheckResult:
+def check_scope(root: Path, rules: dict, base: str | None = None) -> L.CheckResult:
     res = L.CheckResult("scope", L.PASS)
     if not L.has_head(root):
         res.status = L.SKIP
@@ -36,12 +36,13 @@ def check_scope(root: Path, rules: dict) -> L.CheckResult:
         return res
 
     scfg = rules["scope"]
-    changed = L.filter_ignored(L.changed_files(root), rules)
+    changed = L.filter_ignored(L.changed_files(root, base), rules)
     changed = [(c, p) for c, p in changed
                if not L.glob_match(p, scfg.get("always_allowed", []))]
 
     if not changed:
-        res.summary = "工作区干净（或仅 always_allowed 内容）"
+        res.summary = ("工作区干净（或仅 always_allowed 内容）" if not base
+                       else f"与基线 {base} 相比无改动")
         return res
 
     # 1) 任务声明
@@ -80,8 +81,9 @@ def check_scope(root: Path, rules: dict) -> L.CheckResult:
         res.add("SCOPE-FIX", "处理：更新 task_scope.json 声明，或撤销改动；范围外新增须人工批准")
 
     # 3) diff 预算
-    added, deleted, _ = L.diff_numstat(root)
-    untracked_lines = L.untracked_added_lines(root, changed)
+    added, deleted, _ = L.diff_numstat(root, base)
+    # base 模式（CI）下 git diff 已覆盖全部改动；未跟踪文件只存在于工作树模式
+    untracked_lines = 0 if base else L.untracked_added_lines(root, changed)
     total_lines = added + deleted + untracked_lines
     total_files = len({p for _, p in changed})
     over = (total_lines > scfg["max_diff_lines"]

@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -201,27 +202,65 @@ def has_head(root: Path) -> bool:
     return rc == 0
 
 
-def changed_files(root: Path) -> list[tuple[str, str]]:
-    """git status --porcelain（含未跟踪），返回 (状态码, posix路径)。"""
-    rc, outp = git(root, "status", "--porcelain", "--untracked-files=all")
-    entries: list[tuple[str, str]] = []
+def resolve_base(explicit: str | None = None) -> str | None:
+    """解析 diff 基线：显式 --base > CI 环境变量 > None（= 工作树模式）。
+
+    为什么需要它（2026-11-16）：check_scope / check_guard 原本比对"工作树 vs HEAD"，
+    而 CI 上的 checkout 永远是干净的——两个阶段在服务端恒为空集，守卫只剩本地自觉。
+    在 CI 里必须给出 base 引用（PR 用 base.sha、push 用 HEAD^）才真的在守。
+    """
+    if explicit:
+        return explicit
+    for env in ("TINYKV_DIFF_BASE", "GITHUB_BASE_SHA", "CI_MERGE_REQUEST_DIFF_BASE_SHA"):
+        value = os.environ.get(env, "").strip()
+        if value:
+            return value
+    return None
+
+
+def changed_files(root: Path, base: str | None = None) -> list[tuple[str, str]]:
+    """改动清单。base=None 时取工作树（git status）；否则取 `base...HEAD` 的差异。
+
+    返回 (状态码, posix路径)；base 模式的状态码为 A/M/D/R 单字母，语义与
+    工作树模式的 "??"/"M "/"D" 判断点兼容（调用方只查 "??" 与 "D"）。
+    """
+    if not base:
+        rc, outp = git(root, "status", "--porcelain", "--untracked-files=all")
+        entries: list[tuple[str, str]] = []
+        if rc != 0:
+            return entries
+        for line in outp.splitlines():
+            if len(line) < 4:
+                continue
+            code, path = line[:2].strip() or "??", line[3:]
+            if path.startswith('"') and path.endswith('"'):
+                path = path[1:-1].encode("latin-1", "ignore").decode("unicode_escape")
+            entries.append((code, posix(path)))
+        return entries
+
+    rc, outp = git(root, "diff", "--name-status", f"{base}...HEAD")
+    if rc != 0:  # 三方点失败（如 base 无共同祖先）时退回两点比较
+        rc, outp = git(root, "diff", "--name-status", base, "HEAD")
+    entries = []
     if rc != 0:
         return entries
     for line in outp.splitlines():
-        if len(line) < 4:
-            continue
-        code, path = line[:2].strip() or "??", line[3:]
-        if path.startswith('"') and path.endswith('"'):
-            path = path[1:-1].encode("latin-1", "ignore").decode("unicode_escape")
-        entries.append((code, posix(path)))
+        parts = line.split("\t")
+        if len(parts) >= 2:
+            entries.append((parts[0].strip()[:1], posix(parts[-1])))
     return entries
 
 
-def diff_numstat(root: Path) -> tuple[int, int, list[str]]:
-    """HEAD ↔ 工作区（已跟踪文件）的 (新增行, 删除行, 文件清单)。"""
-    rc, outp = git(root, "diff", "--numstat", "HEAD")
+def diff_numstat(root: Path, base: str | None = None) -> tuple[int, int, list[str]]:
+    """(新增行, 删除行, 文件清单)。base=None 时比对 HEAD↔工作树，否则 base...HEAD。"""
+    spec = f"{base}...HEAD" if base else "HEAD"
+    rc, outp = git(root, "diff", "--numstat", spec)
+    if base and rc != 0:
+        rc, outp = git(root, "diff", "--numstat", base, "HEAD")
     added = deleted = 0
     files: list[str] = []
+    if rc != 0:
+        return added, deleted, files
     for line in outp.splitlines():
         parts = line.split("\t")
         if len(parts) >= 3:

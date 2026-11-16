@@ -89,7 +89,7 @@ enum class Cf : uint8_t { Default = 0, Write = 1, Lock = 2 };   // P4 直接复�
 // 字节布局的唯一权威描述在 src/common/encode.h 文件头，本页只列签名、不复述布局——
 // 复述必然与实现漂移（本页曾误写"ts 前缀"，实际是后缀，见 diff.md 条目 012）。
 result<std::string> encode_key(Cf cf, std::span<const std::byte> user_key);
-result<std::string> encode_ts_key(std::span<const std::byte> user_key, Ts ts);  // 大端 ts 后缀
+result<std::string> encode_ts_key(Cf cf, std::span<const std::byte> user_key, Ts ts);  // 大端 ts 后缀
 }
 ```
 

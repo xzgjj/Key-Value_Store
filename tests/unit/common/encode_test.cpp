@@ -58,25 +58,42 @@ TEST(EncodeKey, PrefixScanRangeWithinCf) {
 }
 
 TEST(EncodeTsKey, VersionsOfSameKeyOrderByTs) {
-    // SPEC-4 §21：user_key + 大端 ts 后缀 → 同 key 多版本字节序有序（Scan 免排序）
-    auto t1 = tinykv::encode_ts_key(bytes("row"), Ts{1});
-    auto t2 = tinykv::encode_ts_key(bytes("row"), Ts{2});
-    auto t3 = tinykv::encode_ts_key(bytes("row"), Ts{0x7FFFFFFF'00000001ULL});
+    // SPEC-4 §21：cf 前缀 + user_key + 大端 ts 后缀 → 同 key 多版本字节序有序（Scan 免排序）
+    auto t1 = tinykv::encode_ts_key(Cf::Write, bytes("row"), Ts{1});
+    auto t2 = tinykv::encode_ts_key(Cf::Write, bytes("row"), Ts{2});
+    auto t3 = tinykv::encode_ts_key(Cf::Write, bytes("row"), Ts{0x7FFFFFFF'00000001ULL});
     ASSERT_TRUE(t1 && t2 && t3);
     EXPECT_LT(*t1, *t2);
     EXPECT_LT(*t2, *t3);
 }
 
-TEST(EncodeTsKey, TsSuffixKeepsUserKeyOrder) {
-    // 同 ts 不同 user_key：保持 user_key 字节序（前缀扫描仍按 user_key 分组）
-    auto a = tinykv::encode_ts_key(bytes("a"), Ts{100});
-    auto b = tinykv::encode_ts_key(bytes("b"), Ts{100});
-    ASSERT_TRUE(a && b);
-    EXPECT_LT(*a, *b);
-    // 同 user_key 的裸 key 是其全部版本的公共前缀 → seek(user_key) 命中首个版本
+TEST(EncodeTsKey, BareKeyIsPrefixOfAllVersions) {
+    // 回归点（2026-11-16）：这条断言此前形同虚设——encode_key 带 cf 前缀而 encode_ts_key
+    // 不带，两者根本不在同一 key 空间，测试却只断言了 ts 编码自身的 starts_with("a")。
+    // 现在统一带前缀后，真正要锁的是"裸 key 是全部版本的公共前缀"：seek(bare) 即可命中
+    // 首个版本，这是 MVCC 按 key 前缀扫描的地基。
     auto bare = tinykv::encode_key(Cf::Write, bytes("a"));
-    ASSERT_TRUE(bare);
-    EXPECT_TRUE(a->starts_with("a"));
+    auto v1 = tinykv::encode_ts_key(Cf::Write, bytes("a"), Ts{100});
+    auto v2 = tinykv::encode_ts_key(Cf::Write, bytes("a"), Ts{200});
+    ASSERT_TRUE(bare && v1 && v2);
+    EXPECT_TRUE(v1->starts_with(*bare));
+    EXPECT_TRUE(v2->starts_with(*bare));
+    EXPECT_LT(*bare, *v1);
+}
+
+TEST(EncodeTsKey, CfIsolationForVersionedKeys) {
+    // 同一 user_key + 同一 ts，落在 Write 与 Lock 两个 CF 时必须互不冲突、且定序可依赖
+    auto w = tinykv::encode_ts_key(Cf::Write, bytes("k"), Ts{7});
+    auto l = tinykv::encode_ts_key(Cf::Lock, bytes("k"), Ts{7});
+    ASSERT_TRUE(w && l);
+    EXPECT_NE(*w, *l);
+    EXPECT_LT(*w, *l);  // cf_id 前缀：Default < Write < Lock
+}
+
+TEST(EncodeTsKey, EmptyKeyRejected) {
+    auto e = tinykv::encode_ts_key(Cf::Write, bytes(""), Ts{1});
+    ASSERT_FALSE(e.has_value());
+    EXPECT_TRUE(std::holds_alternative<tinykv::InvalidArgument>(e.error()));
 }
 
 }  // namespace

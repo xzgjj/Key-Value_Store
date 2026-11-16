@@ -4,6 +4,16 @@
 #include "common/encode.h"
 
 namespace tinykv {
+namespace {
+
+// 大端 8 字节追加：字节序 = 数值序，故 ts 的字典序即时间序（SPEC-4 §21 依赖此性质）
+void append_be64(std::string& out, uint64_t v) {
+    for (int shift = 56; shift >= 0; shift -= 8) {
+        out.push_back(static_cast<char>((v >> shift) & 0xFFU));
+    }
+}
+
+}  // namespace
 
 // CF 前缀编码：[cf_id:1B][user_key]；空 key 拒绝（InvalidArgument，SPEC-0 §0.3.1 矩阵）
 result<std::string> encode_key(Cf cf, std::span<const std::byte> user_key) {
@@ -17,19 +27,16 @@ result<std::string> encode_key(Cf cf, std::span<const std::byte> user_key) {
     return out;
 }
 
-// 事务时间戳编码：[user_key][ts:8B 大端]；大端保证 ts 的字节序 = 数值序
-result<std::string> encode_ts_key(std::span<const std::byte> user_key, Ts ts) {
-    if (user_key.empty()) {
-        return std::unexpected(InvalidArgument{"user_key 为空"});
+// 事务时间戳编码：[cf_id:1B][user_key][ts:8B]；复用 encode_key 完成前缀与空 key 校验，
+// 避免"两处各写一遍前缀"——前缀格式一旦分叉，MVCC 扫描会静默读错列族。
+result<std::string> encode_ts_key(Cf cf, std::span<const std::byte> user_key, Ts ts) {
+    auto base = encode_key(cf, user_key);
+    if (!base) {
+        return std::unexpected(base.error());
     }
-    std::string out;
-    out.reserve(user_key.size() + 8);
-    out.append(reinterpret_cast<const char*>(user_key.data()), user_key.size());
-    for (int shift = 56; shift >= 0; shift -= 8) {
-        // 高字节在前：逐字节大端落盘（reinterpret_cast<byte→char> 为合法别名转换）
-        out.push_back(static_cast<char>((ts.value >> shift) & 0xFFU));
-    }
-    return out;
+    base->reserve(base->size() + 8);
+    append_be64(*base, ts.value);
+    return base;
 }
 
 }  // namespace tinykv

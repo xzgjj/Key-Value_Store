@@ -18,7 +18,8 @@ TxnClient(Begin→Get/Set…→Commit)
   ├─ 2PC: prewrite(并行分发到各 region) → 全部成功 → commit(primary 先, secondary 可异步)
   └─ 冲突/超时 → CheckTxnStatus 决议 → BatchRollback / ResolveLock
 Server(per region): Latch(key 粒度) ─► MvccTxn(读写 Lock/Write/Default 三 CF) ─► raft 提案 ─► SPEC-3 管线
-key 布局: encode_ts_key(user_key, ts) 大端 → 同 key 多版本字节序有序（Scan 免排序）
+key 布局: encode_ts_key(cf, user_key, ts) 大端 → 同 key 多版本字节序有序（Scan 免排序）；
+        带 cf_id 前缀是为了让 Write/Lock 两个列族的同 key 版本互不串味
 ```
 
 ### 4.2.1 锁状态转换图（单 key 视角，事务生死由 primary 决定）
