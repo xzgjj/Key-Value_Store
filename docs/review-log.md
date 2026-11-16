@@ -64,6 +64,9 @@
 | M4 | 25 | ⑦b可判定性：CI13 + cli_region 6例 + 全量41 | PASS | run_ci PASS×13；ctest 41/41；cli_region 6/6（regions列表+split后两region/详情+peers/开区间外拒/scheduler视图/trace开关落盘/退出码1-3-2契约）；重构后 cmd_cluster 拆四个子函数、serve 拆 parse_request_line+handle_get+respond，复杂度全部回到限内 |
 | M4 | 26 | ⑦b契约与复用：§10 六命令落版 + AdminHandler 端点表留痕 + trace偏差待追认 | PASS | align 3/3；docs/M4-CLI-TRACE-DRAFT.md 留痕（trace 补 --endpoint 的偏差与 2 项待追认）；region split 服务端链路 AskSplit→admin提案→共识→apply→路由更新全部复用③⑥现成机制；RegionTrace 复用 spdlog rotating 与全局日志同规格（10MB×5） |
 | M4 | 27 | ⑦b文档与红线：红线1经CLI路径再证明 + docs/guard/scope | PASS | docs PASS；guard PASS；scope 补声明 region_trace.h 与 CLI-TRACE 草稿；region split 'zz' 开区间外被 apply 拒（红线1 的 CLI 端到端证据）；cli.md §10 状态行更新为已交付；已知限制(trace埋点未接Peer内部)记草稿§4移交notes-m4 |
+| M4 | 28 | ⑦c可判定性：CI13 + mr_chaos_n150 150轮 + 全量42 | PASS | run_ci PASS×13；ctest 42/42；mr_chaos_n150 150/150 种子（~10.5s）；变异检查：去 split 注入→150轮全红（region_count!=2），还原后绿 |
+| M4 | 29 | ⑦c契约与复用：复用 PeerCluster/enable_split 每peer独立StoreMeta + 对齐三项 | PASS | align 3/3；peer_cluster.h 加 enable_split（每 peer 一份 StoreMeta：真实拓扑各 store 各持视图，共享单视图会让后apply的peer撞region不存在且apply不重试）；confchange 复用 raft().propose_conf_change + raft级apply；split 复用③层 admin 提案路径 |
+| M4 | 30 | ⑦c文档与红线：REL-05 经150轮混沌证明 + CI复杂度/重复回修 | PASS | docs PASS；guard PASS；REL-05 断言形式化：区间排序后首尾相接无重叠（contiguous函数）且三副本指纹一致；分区随机注入20%/拍；run_round 拆 inject/converged/mr_invariants 三助手（复杂度26→≤15）；include 序言撞车以 <utility> 打断 |
 <!-- review:end -->
 
 ## 约定

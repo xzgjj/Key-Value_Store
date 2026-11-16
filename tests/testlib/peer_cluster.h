@@ -45,6 +45,22 @@ public:
     [[nodiscard]] int size() const { return static_cast<int>(peers_.size()); }
     [[nodiscard]] Peer& peer(int i) { return *peers_[static_cast<std::size_t>(i)]; }
 
+    // M4 ⑦c：装配 Split 元数据——每个 peer 一份独立 StoreMeta（真实拓扑里每个 store 各持
+    // 各自的 region 视图，各自 apply 各自更新；共享单视图会让后 apply 的 peer 撞"region 不存在"）。
+    void enable_split(const tinykv::raftstore::Region& region) {
+        for (auto& p : peers_) {
+            auto meta = std::make_unique<tinykv::raftstore::StoreMeta>();
+            (void)meta->add_region(region);
+            p->set_region(region);
+            p->set_store_meta(meta.get());
+            metas_.push_back(std::move(meta));
+        }
+    }
+
+    [[nodiscard]] tinykv::raftstore::StoreMeta& meta(int i) {
+        return *metas_[static_cast<std::size_t>(i)];
+    }
+
     // 一轮：逐节点"发完即投递、随后 apply"。单趟而非两趟——真实 Worker 也是按 region
     // 各自 drain，同轮消息不保证互相可见（两趟会让同轮消息立刻可见，比真机更"顺"）。
     // 分区：集合内节点与外界的一切消息都被丢弃（模拟网络隔离）
@@ -191,6 +207,7 @@ private:
     std::vector<std::unique_ptr<TempDir>> dirs_;
     std::vector<std::unique_ptr<tinykv::Engine>> engines_;
     std::vector<std::unique_ptr<Peer>> peers_;
+    std::vector<std::unique_ptr<tinykv::raftstore::StoreMeta>> metas_;
     std::set<int> partition_;
 };
 

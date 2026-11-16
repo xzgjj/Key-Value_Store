@@ -157,6 +157,7 @@ CI 用 `ctest -L unit|simulation|integration|bench` 选择，无需解析本页�
 | tests/simulation/sim_transfer_test.cpp | simulation | `sim_transfer_test` | - | fast |
 | tests/integration/tcp_cluster_test.cpp | integration | `tcp_cluster_test` | - | nightly |
 | tests/integration/raft_chaos_n150_test.cpp | integration | `raft_chaos_n150` | - | nightly;serial |
+| tests/integration/mr_chaos_test.cpp | integration | `mr_chaos_n150` | - | nightly;serial |
 | tests/unit/cli/cli_status_test.cpp | unit | `cli_status_test` | - | fast |
 | tests/unit/raft/readindex_test.cpp | unit | `readindex_test` | - | fast |
 | tests/bench/read_bench_test.cpp | bench | `read_bench` | - | nightly |
