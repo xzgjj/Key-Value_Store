@@ -53,6 +53,12 @@ reference_freeze = [
 # 兼容补充：既有测试登记表一致性检查（docs/testing.md §7），并入 CI 作为 docs 阶段一项。
 script = "tools/check_test_registry.py"
 
+[bugfix]
+# 修 bug 必须留下触发场景 + 回归测试（docs/bugs.md；检查器 tools/ci/check_bugfix.py）。
+registry_file = "docs/bugs.md"          # 缺陷登记表（标记区表格，只增不删）
+test_registry_file = "docs/testing.md"  # 回归测试名的唯一事实来源（§4 登记表）
+min_scene_chars = 12                    # 触发场景字数下限（挡"修了个 bug"式空描述）
+
 [scope]
 # 任务改动声明文件：每个任务开始时由执行者写入（格式见 SPEC.md / CI.md）。
 task_scope_file = "ci/task_scope.json"
@@ -96,3 +102,29 @@ func_max_lines_test = 160    # tests/ 下放宽一档（fixture 较长）
 func_max_complexity = 15     # 圈复杂度近似值上限：1 + if/for/while/case/catch + &&/||/? 
 dup_code_window = 8          # 规范化后 ≥8 行的连续代码块
 dup_code_max_copies = 1      # 出现 > 1 处即报（复制粘贴检测）
+
+[align]
+# align 阶段（对齐检查）：三类"文档/契约 ⇄ 代码"的可判定偏差。
+# 原则：只做可判定比对——存在性、集合一致、模式命中；语义等价留给人（SPEC.md §4）。
+
+# 契约集合一致性：src/common/error.h 的 KvError 变体 ⇄ proto 中的线上错误消息。
+# 已声明的刻意不对称（不静默，报告中可见列出）：新增豁免需人工批准；
+# 删除豁免 = 收紧（说明该变体已上线），直接放行。
+contract_exempt = [
+    "IoFailed",
+    "Corrupted",
+    "InvalidArgument",
+]
+
+# 文档命令可执行性：Markdown 围栏块里的 preset / test-dir / ctest 标签必须真实存在。
+# 标签词表对齐 docs/testing.md §3/§6（受控词表，禁止自造）。
+ctest_labels = ["unit", "simulation", "integration", "bench", "fast", "slow", "nightly"]
+
+# 违禁模式（ENG-04）：src/ 与 tests/ 命中即红；注释内出现不计（禁用规则本身要被说明）。
+# 豁免需在此文件的 banned_exempt 中逐条声明并与批准一并留痕。
+banned_patterns = [
+    "\\.detach\\s*\\(",                      # detached 线程
+    "\\bnew\\s+[A-Za-z_][A-Za-z0-9_:<>]*\\s*\\[",  # 裸数组 new
+    "\\bsleep_for\\b",                       # sleep 对齐启动
+]
+banned_exempt = []

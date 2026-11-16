@@ -6,6 +6,8 @@
 本脚本覆盖：
 
     docs     预算超限/合规、重复段落（含冻结豁免）、断链、脚本引用缺失
+    bugfix   登记表缺失 SKIP、合规 PASS、场景过短/无复现命令/未登记/缺编号标记/漏日期 FAIL、
+             删历史行 FAIL、声明 bugfix 却无新增行 FAIL
     scope    无基线 SKIP、未声明 FAIL、声明 PASS、超预算 FAIL/获批 OK、
              删测试 FAIL/获批 OK、删登记行告警
     guard    无改动 PASS、放松标注、收紧标注、新增规则文件只提示
@@ -26,6 +28,7 @@ from pathlib import Path
 SELF_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SELF_DIR))
 import lib_ci as L  # noqa: E402
+import check_bugfix  # noqa: E402
 import check_code  # noqa: E402
 import check_docs  # noqa: E402
 import check_guard  # noqa: E402
@@ -126,6 +129,115 @@ def test_links(tmp: Path) -> None:
     write(root, "tools/foo.py", "print('x')\n")
     ok = find_res(check_docs.run(root, L.load_rules(root)), "consistency")
     expect("修复后 PASS", ok.status == L.PASS, f"codes={codes(ok)}")
+
+
+# ---- bugfix ------------------------------------------------------------------
+TEST_REG_MD = (
+    "# 测试\n\n<!-- registry:begin v1 -->\n"
+    "| Scope | Level | Runner | Args | Metadata |\n|---|---|---|---|---|\n"
+    "| tests/unit/demo_test.cpp | unit | `demo_test` | - | fast |\n"
+    "<!-- registry:end -->\n"
+)
+TEST_SRC_MARKED = "// BUG-0001: kill leader 后写入返回 Unavailable\nTEST(Demo, Crash) { EXPECT_EQ(1, 1); }\n"
+BUGS_HEAD = "| Bug | 触发场景 | 复现 | 回归测试 | 修复 |\n|---|---|---|---|---|\n"
+ROW_OK = ("| BUG-0001 | 3 节点 kill leader 后写入返回 Unavailable，重启节点丢失最后两条日志 "
+          "| `--seed=42 --kill=leader` | `demo_test` | 2026-11-16（1a2b3c4） |")
+
+
+def bugs_md(*rows: str) -> str:
+    return "<!-- bugs:begin v1 -->\n" + BUGS_HEAD + "".join(r + "\n" for r in rows) + "<!-- bugs:end -->\n"
+
+
+def bugfix_repo(tmp: Path, name: str) -> Path:
+    root = make_repo(tmp, name)
+    write(root, "docs/testing.md", TEST_REG_MD)
+    write(root, "tests/unit/demo_test.cpp", TEST_SRC_MARKED)
+    write(root, "docs/bugs.md", bugs_md(ROW_OK))
+    commit_all(root, "baseline with one bug")
+    return root
+
+
+def bugfix_result(root: Path) -> L.CheckResult:
+    return check_bugfix.check_bugfix(root, L.load_rules(root))
+
+
+def test_bugfix(tmp: Path) -> None:
+    L.out("[bugfix] 场景 / 复现 / 登记 / 编号标记 / 只增")
+    # 登记表未建立且无基线 → SKIP（首次引入前不误伤）
+    fresh = make_repo(tmp, "bug_nobase", commit_baseline=False)
+    r = bugfix_result(fresh)
+    expect("无登记表 SKIP", r.status == L.SKIP and "NOT_ARMED" in r.summary, r.summary)
+
+    ok_root = bugfix_repo(tmp, "bug_ok")
+    r = bugfix_result(ok_root)
+    expect("合规 PASS", r.status == L.PASS, f"status={r.status} codes={codes(r)}")
+
+    # 场景过短：换成"修了个 bug"式描述
+    short = make_repo(tmp, "bug_scene")
+    write(short, "docs/testing.md", TEST_REG_MD)
+    write(short, "tests/unit/demo_test.cpp", TEST_SRC_MARKED)
+    write(short, "docs/bugs.md",
+          bugs_md("| BUG-0001 | 修了个 bug | `--seed=42` | `demo_test` | 2026-11-16 |"))
+    r = bugfix_result(short)
+    expect("场景过短 FAIL", r.status == L.FAIL and "BUG-SCENE" in codes(r), f"codes={codes(r)}")
+
+    # 复现列没有可执行命令
+    norepro = make_repo(tmp, "bug_repro")
+    write(norepro, "docs/testing.md", TEST_REG_MD)
+    write(norepro, "tests/unit/demo_test.cpp", TEST_SRC_MARKED)
+    write(norepro, "docs/bugs.md",
+          bugs_md("| BUG-0001 | 集群重启后客户端连不上，三节点全部不可达且状态异常 "
+                  "| 复现步骤见对话 | `demo_test` | 2026-11-16 |"))
+    r = bugfix_result(norepro)
+    expect("无复现命令 FAIL", r.status == L.FAIL and "BUG-REPRO" in codes(r), f"codes={codes(r)}")
+
+    # 回归测试没登记进 testing.md §4
+    unreg = make_repo(tmp, "bug_unreg")
+    write(unreg, "docs/testing.md", TEST_REG_MD)
+    write(unreg, "tests/unit/demo_test.cpp", TEST_SRC_MARKED)
+    write(unreg, "docs/bugs.md",
+          bugs_md("| BUG-0001 | 集群重启后客户端连不上，三节点全部不可达且状态异常 "
+                  "| `--seed=42` | `ghost_test` | 2026-11-16 |"))
+    r = bugfix_result(unreg)
+    expect("回归测试未登记 FAIL", r.status == L.FAIL and "BUG-NOREG" in codes(r),
+           f"codes={codes(r)}")
+
+    # 登记了但源码里没有编号标记（防止"登记了但没真跑"）
+    unlinked = make_repo(tmp, "bug_unlinked")
+    write(unlinked, "docs/testing.md", TEST_REG_MD)
+    write(unlinked, "tests/unit/demo_test.cpp", "TEST(Demo, Basic) { EXPECT_EQ(1, 1); }\n")
+    write(unlinked, "docs/bugs.md", bugs_md(ROW_OK))
+    r = bugfix_result(unlinked)
+    expect("缺编号标记 FAIL", r.status == L.FAIL and "BUG-UNLINKED" in codes(r),
+           f"codes={codes(r)}")
+
+    # 缺日期
+    nodate = make_repo(tmp, "bug_date")
+    write(nodate, "docs/testing.md", TEST_REG_MD)
+    write(nodate, "tests/unit/demo_test.cpp", TEST_SRC_MARKED)
+    write(nodate, "docs/bugs.md",
+          bugs_md("| BUG-0001 | 3 节点 kill leader 后写入返回 Unavailable，重启丢最后两条日志 "
+                  "| `--seed=42` | `demo_test` | 已修复 |"))
+    r = bugfix_result(nodate)
+    expect("缺日期 FAIL", r.status == L.FAIL and "BUG-DATE" in codes(r), f"codes={codes(r)}")
+
+    # 删除历史行 → FAIL（只增不删）
+    rowdel = bugfix_repo(tmp, "bug_rowdel")
+    write(rowdel, "docs/bugs.md", bugs_md())
+    r = bugfix_result(rowdel)
+    expect("删历史行 FAIL", r.status == L.FAIL and "BUG-ROWDEL" in codes(r), f"codes={codes(r)}")
+
+    # 声明 bugfix 却无新增登记行
+    declared = make_repo(tmp, "bug_norow")
+    write(declared, "docs/testing.md", TEST_REG_MD)
+    write(declared, "tests/unit/demo_test.cpp", TEST_SRC_MARKED)
+    write(declared, "docs/bugs.md", bugs_md())
+    commit_all(declared, "baseline empty")
+    write(declared, "ci/task_scope.json",
+          '{"task":"修 bug","paths":["src/"],"reason":"r","bugfix":true}')
+    r = bugfix_result(declared)
+    expect("声明 bugfix 无新增行 FAIL", r.status == L.FAIL and "BUG-NOROW" in codes(r),
+           f"codes={codes(r)}")
 
 
 # ---- scope -------------------------------------------------------------------
@@ -326,6 +438,7 @@ def main() -> int:
         test_budget(tmp)
         test_dup_para(tmp)
         test_links(tmp)
+        test_bugfix(tmp)
         test_scope(tmp)
         test_guard(tmp)
         test_code(tmp)

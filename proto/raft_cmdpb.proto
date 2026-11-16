@@ -15,7 +15,9 @@ message RegionEpoch {
     uint64 conf_ver = 2;  // 配置世代
 }
 
-// region 级错误：与 src/common/error.h 的 KvError 变体一一对应（UX-03 三要素进 hint 字段）。
+// region 级错误：KvError 变体的**子集**，不是全集——IoFailed / Corrupted / InvalidArgument
+// 当前不上线（服务端本地失败，尚未定义线上语义），刻意不对称在 ci/rules.toml [align].contract_exempt
+// 中声明并由 align 阶段检查可见列出；新增豁免需人工批准。UX-03 三要素进 hint 字段。
 // 定义在本文件以避免 kv.proto ↔ raft_cmdpb.proto 循环 import。
 message RegionError {
     message KeyNotInRegion {

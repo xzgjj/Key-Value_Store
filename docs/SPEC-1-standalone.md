@@ -28,10 +28,21 @@ tinykv-cli ──► RawServer(进程内直调) ──► Storage 接口 ──�
 
 ### 1.3.1 对上（Storage 抽象，设计文档 §4.5 定型稿）
 
+> **状态：草案**。本块在 M1 开工前须与用户核对后才算接口契约（CLAUDE.md §15）；
+> 核对通过后删掉本注，并把定版内容同步到 `docs/cli.md` 的调用示例。
+
 ```cpp
 namespace tinykv {
 enum class Cf : uint8_t { Default, Write, Lock };
 struct GetResult { std::optional<std::string> value; };
+
+// 写操作：Put/Delete 是具体类型（不返回 pair/tuple，清单 #9）
+struct Put    { Cf cf; std::string key; std::string value; };
+struct Delete { Cf cf; std::string key; };
+struct Modify { std::variant<Put, Delete> op; };
+using ModifyVec = std::vector<Modify>;   // §1.6 示例所用的批量类型
+
+class Iterator;   // 前向声明：RAII 迭代器，seek/valid/next 语义在 M1 定版
 
 class Storage {
 public:
@@ -40,13 +51,12 @@ public:
     virtual result<void> write(std::span<const Modify> batch) = 0;       // 批量原子
     virtual result<std::unique_ptr<Reader>> create_reader() = 0;         // RAII + 一致性快照
 };
-struct Reader {   // RAII：析构即释放快照；iterator 封装成 input_iterator
+struct Reader {   // RAII：析构即释放快照
     virtual result<GetResult> get(Cf cf, std::span<const std::byte> key) = 0;
     virtual result<std::unique_ptr<Iterator>> scan(Cf cf,
-                std::span<const std::byte> start, size_t limit) = 0;
+                std::span<const std::byte> start, std::size_t limit) = 0;
     virtual ~Reader() = default;
 };
-struct Modify { std::variant<Put{Cf,key,value}, Delete{Cf,key}> op; };
 }
 ```
 

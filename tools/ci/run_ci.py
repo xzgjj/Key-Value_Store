@@ -15,9 +15,11 @@
 
 各阶段：
     docs   文档预算 / 重复段落 / 一致性 / 测试登记表（兼容补充）
+    bugfix 缺陷回归：触发场景 + 可执行复现 + 已登记回归测试 + 编号标记（docs/bugs.md）
     guard  规则资产守卫 + 防放松分析
     scope  任务声明 / 范围白名单 / diff 预算 / 测试删除告警
     code   构建 + ctest fast + 复杂度 + 复制粘贴（无 C++ 时 SKIP(NOT_ARMED)）
+    align  跨语言契约集合 / 文档命令可执行性 / 违禁模式（只做可判定比对）
 """
 
 from __future__ import annotations
@@ -29,6 +31,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lib_ci as L  # noqa: E402
+import check_align  # noqa: E402
+import check_bugfix  # noqa: E402
 import check_code  # noqa: E402
 import check_docs  # noqa: E402
 import check_guard  # noqa: E402
@@ -36,9 +40,11 @@ import check_scope  # noqa: E402
 
 STAGE_RUNNERS = {
     "docs": check_docs.run,
+    "bugfix": check_bugfix.run,
     "guard": check_guard.run,
     "scope": check_scope.run,
     "code": check_code.run,
+    "align": check_align.run,
 }
 
 STATUS_ICON = {L.PASS: "✓", L.SKIP: "○", L.FAIL: "✗", L.APPROVAL: "⚠"}

@@ -1,5 +1,5 @@
 {
-  "task": "M0 基建（SPEC-0）：既有文档/工具资产基线入库 + 工程骨架（CMake/presets/vcpkg 清单/build.py/tests 接入）+ src/common 三库 TDD + proto 骨架 + CI workflow",
+  "task": "M0 基建（SPEC-0）+ 缺陷回归门禁：新增 bugfix 阶段（docs/bugs.md 登记表 + tools/ci/check_bugfix.py），把「修 bug 必须留下触发场景成为回归测试」落成 CI 硬约束，并写进代理必读文档",
   "paths": [
     ".gitignore",
     "README.md",
@@ -10,6 +10,11 @@
     "image/",
     "SPEC.md",
     "CI.md",
+    "CLAUDE.md",
+    "AGENT_EXECUTION_PROTOCOL.md",
+    "diff.md",
+    "implementation-notes.md",
+    "notes.txt",
     "TinyKV-CPP-设计思路与需求.md",
     "proto/",
     "src/",
@@ -22,7 +27,9 @@
     ".clang-format",
     ".clang-tidy"
   ],
-  "reason": "基线部分为既有用户资产原样入库（.gitignore 按 D0-1 修正：docs/、tests/ 解除忽略，仓库根即工程根）；骨架与 common 为 SPEC-0 §0.1 交付物；测试新增走 docs/testing.md §5 SOP 登记先行",
+  "reason": "基线部分为既有用户资产原样入库（.gitignore 按 D0-1 修正：docs/、tests/ 解除忽略，仓库根即工程根）；骨架与 common 为 SPEC-0 §0.1 交付物；测试新增走 docs/testing.md §5 SOP 登记先行。本次追加（2026-11-16 用户指令）：bugfix 阶段 + 缺陷登记表 + 协议/CLAUDE/CI/SPEC 四处对齐，属规则资产改动，已按 guard 要求单独列出等人工批准",
+  "bugfix": false,
+  "fixes": [],
   "overflow_approved": true,
   "behavior_change_approved": false,
   "approver": "用户（2026-11-16 会话目标指令：开始实现该项目，其他不构成风险的一律默认批准；基线文档体量超 600 行预算系一次性质押入库，非代码改动）"

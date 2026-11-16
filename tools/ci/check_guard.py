@@ -29,6 +29,7 @@ NUMERIC_RULES: dict[tuple[str, str], str] = {
     ("doc_budget", "planning_max_chars"): "high",
     ("doc_budget", "analysis_max_para_occurrences"): "high",
     ("doc_budget", "analysis_min_para_chars"): "low",
+    ("bugfix", "min_scene_chars"): "low",
     ("scope", "max_diff_lines"): "high",
     ("scope", "max_changed_files"): "high",
     ("code", "func_max_lines"): "high",

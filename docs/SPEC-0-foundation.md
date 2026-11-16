@@ -72,6 +72,7 @@ using StoreId = StrongId<StoreIdTag>;   using ClientId = StrongId<ClientIdTag>;
 using SeqNo = StrongId<SeqNoTag>;       using Ts = StrongId<TsTag>;   // 事务时间戳
 
 // 结构化错误（UX-03 三要素的载体：what/why/hint 全在字段里）
+struct RegionEpoch { uint64_t version{}; uint64_t conf_ver{}; };  // 完整语义见 SPEC-3，此处仅作 StaleEpoch 载体
 struct KeyNotInRegion { std::string key; RegionId region_id; };
 struct StaleEpoch     { RegionId region_id; RegionEpoch have; RegionEpoch want; };
 struct NotLeader      { RegionId region_id; std::optional<PeerId> leader_hint; };
@@ -85,8 +86,10 @@ template <typename T> using result = std::expected<T, KvError>;
 enum class Cf : uint8_t { Default = 0, Write = 1, Lock = 2 };   // P4 直接复用
 
 // 编码：CF 前缀（白皮书 P1 继承）；key 组内保序 → 前缀扫描可用
+// 字节布局的唯一权威描述在 src/common/encode.h 文件头，本页只列签名、不复述布局——
+// 复述必然与实现漂移（本页曾误写"ts 前缀"，实际是后缀，见 diff.md 条目 012）。
 result<std::string> encode_key(Cf cf, std::span<const std::byte> user_key);
-result<std::string> encode_ts_key(std::span<const std::byte> user_key, Ts ts);  // 大端 ts 前缀
+result<std::string> encode_ts_key(std::span<const std::byte> user_key, Ts ts);  // 大端 ts 后缀
 }
 ```
 
@@ -121,29 +124,27 @@ result<std::string> encode_ts_key(std::span<const std::byte> user_key, Ts ts);  
 
 ## 0.4 核心逻辑骨架
 
-```cmake
-# cmake/AddTest.cmake —— 一切测试的唯一注册入口（禁止散装 add_test）
-function(add_tinykv_test NAME)
-  cmake_parse_arguments(T "" "" "SRCS;LIBS;ARGS;ENV" ${ARGN})
-  add_executable(${NAME} ${T_SRCS})
-  target_link_libraries(${NAME} PRIVATE tinykv_common gtest gtest_main ${T_LIBS})
-  add_test(NAME ${NAME} COMMAND ${NAME} ${T_ARGS})
-  set_tests_properties(${NAME} PROPERTIES ENVIRONMENT "${T_ENV}")
-endfunction()
-# Level→LABEL、TIMEOUT、RUN_SERIAL、SKIP_RETURN_CODE 由调用方以 PROPERTIES 补充；
-# 登记表（docs/testing.md §4）为唯一事实来源，本函数只做投影。
-```
+**注册入口**：`cmake/AddTest.cmake` 的 `add_tinykv_test()` 是一切测试的唯一注册入口（禁止散装
+`add_test`）。参数与实现以该文件头注释为准——本页只列参数语义，不复述函数体：
+
+| 参数 | 必填 | 作用 |
+|---|---|---|
+| `SRCS` | 是 | 源文件列表 |
+| `LIBS` | 否 | 额外链接库（如 `tinykv_proto`） |
+| `LEVEL` | 否 | 四层词表之一；同时派生 Level 标签与 fast/nightly 速度标签 |
+| `ARGS` / `ENV` | 否 | 同一二进制换跑法（一登记一跑法） |
+| `TIMEOUT` / `RUN_SERIAL` / `SKIP_RETURN_CODE` | 否 | 透传为 ctest 属性 |
 
 CI 步骤顺序（证据链的生成线，每步绿才算过）：
 
 ```
 1 python tools/check_test_registry.py            # 登记对账（遗漏在编译前失败）
-2 clang-format --dry-run -Werror && clang-tidy -p build   # 静态检查（ENG-04 禁模式的载体之一）
-3 grep -rE "std::(async\(.+detached|thread\(.+detach\(\)\))|new .*\[\]|sleep_for.*启动对齐" src/ && exit 1 || true
-                                                  # ENG-04 违禁模式扫描（detach/裸数组 new/sleep 对齐启动）
+2 clang-format --dry-run -Werror && clang-tidy -p build/<preset>   # 静态检查
+3 python tools/ci/check_align.py --only banned    # ENG-04 违禁模式（detach/裸数组 new/sleep 对齐启动）
 4 cmake --preset <os>-debug && cmake --build --preset <os>-debug
 5 ctest -L fast --output-junit build/evidence/junit.xml
 6 (夜跑) ctest -L nightly                          # 150 轮纪律 + bench 采数
+7 python tools/ci/check_align.py                   # 契约集合 + 文档命令对齐（收尾门禁）
 ```
 
 ## 0.5 红线
