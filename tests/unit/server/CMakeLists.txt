@@ -1,0 +1,5 @@
+# 文件用途：tests/unit/server 用例注册（登记表 docs/testing.md §4 是唯一事实来源）。
+# 归属：TinyKV-CPP（M6 运行时）。
+
+add_tinykv_test(lifecycle_test SRCS lifecycle_test.cpp LIBS tinykv_server LEVEL unit)
+add_tinykv_test(worker_test SRCS worker_test.cpp LIBS tinykv_server LEVEL unit)

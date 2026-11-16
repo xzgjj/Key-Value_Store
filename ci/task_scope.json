@@ -1,5 +1,5 @@
 {
-  "task": "M5 Percolator 事务（SPEC-4）：①错误契约+proto对账 / ②TSO+Latch / ③MvccTxn / ④SI语义+决议 / ⑤Peer/TxnClient 集成 / ⑥CLI txn+lincheck+chaos / ⑦notes-m5。用户 2026-11-16 授权按 SPEC 自主落版最终交付。",
+  "task": "M6 daemon 化与运行时（用户 2026-11-17 指令四条）：①Service 抽象+生命周期 ②组合根 tinykv-server+Worker 泵循环+信号优雅关闭 ③会话作用域（连接级 TxnClient，解锁 CLI 交互式事务）④Interceptor/Metrics + GC（FUNC-17）。region→peer 动态注册表挂账（需 raft 日志 region 隔离）。",
   "paths": [
     "proto/raft_cmdpb.proto",
     "src/common/error.h",
@@ -43,7 +43,19 @@
     "tests/testlib/txn_fixture.h",
     "src/txn/executor.h",
     "tests/testlib/peer_txn.h",
-    "tests/unit/txn/txn_peer_test.cpp"
+    "tests/unit/txn/txn_peer_test.cpp",
+    "src/server/service.h",
+    "src/server/worker.h",
+    "src/server/server_app.h",
+    "src/server/txn_sessions.h",
+    "src/server/main.cpp",
+    "src/server/CMakeLists.txt",
+    "tests/unit/server/CMakeLists.txt",
+    "tests/unit/server/lifecycle_test.cpp",
+    "tests/unit/server/worker_test.cpp",
+    "tests/unit/server/server_app_test.cpp",
+    "tests/unit/txn/gc_test.cpp",
+    "docs/notes-m6.md"
   ],
   "reason": "用户 2026-11-16 指令『三个 bench补充并 推送；之后M5（事务层）新分支 4 开始 各种方案按要求你走最终交付』——授权按 SPEC-4 全部默认值（D4-1~D4-5）自主落地 M5。每层 TDD、CI 绿、三轮 review、本地 commit（分支 4）。",
   "bugfix": false,
