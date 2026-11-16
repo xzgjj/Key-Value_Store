@@ -1,10 +1,15 @@
-# 文件用途：TinyKV-CI 双平台流水线（ENG-02）——登记检查 → 静态检查 → 违禁扫描 → 构建 → fast 测试；夜跑 job 骨架。
+# 文件用途：TinyKV-CI 双平台流水线（ENG-02）——登记检查 → 文档/对齐 → 守卫/范围/缺陷回归
+#          → 静态检查 → 构建 → fast 测试；夜跑 job 骨架。
 # 归属：TinyKV-CPP（M0 基建，SPEC-0 §0.4 CI 六步 + ENG-05 载体）。
 #
 # 设计取舍：
 #   * Windows 走 MSYS2 ucrt64（与本机开发工具链同源，行为一致，不引入第二套编译器差异）；
 #   * Linux 走发行版包（无 vcpkg 拉取，冷启动快）；
 #   * 两条线都只用 CMake preset 构建，命令与本地 CLAUDE.md §8 完全一致，避免"CI 能过、本地不能"；
+#   * clang-format 版本钉死（pip 装指定版本）：格式输出跨大版本会变，本机与 CI 不一致会产生
+#     与代码无关的假红；clang-tidy 走发行版包（检查项由 .clang-tidy 白名单控制，容忍版本差）；
+#   * guard/scope 两阶段必须给 --base：它们比对"改动"，而 CI 的 checkout 永远是干净的，
+#     不给基线就等于在服务端空转（2026-11-16 修）；
 #   * 夜跑 job 只调度 ctest -L nightly（当前为空集，空集通过即骨架达标），150 轮纪律随 M2 接入。
 
 name: TinyKV-CI
@@ -27,14 +32,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0     # guard/scope 阶段需要基线提交
+          fetch-depth: 0     # guard/scope 阶段需要基线提交才能比较
 
       - name: 安装依赖
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            ninja-build clang-format clang-tidy \
+            ninja-build clang-tidy \
             libprotobuf-dev protobuf-compiler libspdlog-dev
+          # 格式检查用 pip 版：版本可钉死（apt 只给发行版绑定版本，跨版本输出会漂）
+          python3 -m pip install --break-system-packages "clang-format==22.1.8"
 
       - name: 登记表对账（编译前失败）
         run: python3 tools/check_test_registry.py
@@ -44,24 +51,37 @@ jobs:
           python3 tools/ci/run_ci.py --stage docs
           python3 tools/ci/run_ci.py --stage align
 
+      - name: 守卫 / 范围 / 缺陷回归（对比基线）
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          BASE="${BASE_SHA}"
+          case "$BASE" in ""|0000*) BASE=HEAD^;; esac          # 新分支 push 的 before 是全零
+          git rev-parse --verify -q "$BASE^{commit}" >/dev/null || BASE=HEAD^
+          python3 tools/ci/run_ci.py --stage guard --base "$BASE"
+          python3 tools/ci/run_ci.py --stage scope --base "$BASE"
+          python3 tools/ci/run_ci.py --stage bugfix
+
       - name: 配置
         run: cmake --preset linux-debug
 
-      - name: 格式检查
+      - name: 格式检查（版本钉死）
         run: |
-          find src tests -name '*.cpp' -o -name '*.h' \
-            | xargs clang-format --dry-run -Werror
+          clang-format --version
+          find src tests -type f \( -name '*.cpp' -o -name '*.cc' -o -name '*.h' -o -name '*.hpp' \) \
+            -print0 | xargs -0 clang-format --dry-run -Werror
 
       - name: 静态检查
-        run: |
-          find src -name '*.cpp' \
-            | xargs clang-tidy -p build/linux-debug --quiet
+        run: find src -name '*.cpp' -print0 | xargs -0 clang-tidy -p build/linux-debug --quiet
 
       - name: 构建
         run: cmake --build --preset linux-debug
 
-      - name: 快速测试（fast）
-        run: ctest --test-dir build/linux-debug -L fast --output-on-failure
+      - name: 快速测试（fast）+ 证据物
+        run: |
+          mkdir -p build/evidence
+          ctest --test-dir build/linux-debug -L fast --output-on-failure \
+            --output-junit build/evidence/junit.xml
 
       - name: 归档测试证据
         if: always()
@@ -83,28 +103,44 @@ jobs:
         uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
-          update: true
+          update: false        # 全量更新慢且易抖；依赖按需装即可
           install: >-
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-ninja
             mingw-w64-ucrt-x86_64-protobuf
             mingw-w64-ucrt-x86_64-spdlog
-            mingw-w64-ucrt-x86_64-clang-tools-extra
             python
 
-      - name: 登记表 + 对齐 + 构建 + 测试
+      - name: 登记表 + 文档/对齐 + 守卫/范围 + 构建 + 测试
         shell: msys2 {0}
         env:
           CMAKE_GENERATOR: Ninja
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
           export CC=gcc CXX=g++
           python tools/check_test_registry.py
           python tools/ci/run_ci.py --stage docs
           python tools/ci/run_ci.py --stage align
+          BASE="${BASE_SHA}"
+          case "$BASE" in ""|0000*) BASE=HEAD^;; esac
+          git rev-parse --verify -q "$BASE^{commit}" >/dev/null || BASE=HEAD^
+          python tools/ci/run_ci.py --stage guard --base "$BASE"
+          python tools/ci/run_ci.py --stage scope --base "$BASE"
+          python tools/ci/run_ci.py --stage bugfix
           cmake --preset win-debug
           cmake --build --preset win-debug
-          ctest --test-dir build/win-debug -L fast --output-on-failure
+          mkdir -p build/evidence
+          ctest --test-dir build/win-debug -L fast --output-on-failure \
+            --output-junit build/evidence/junit.xml
+
+      - name: 归档测试证据
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-windows
+          path: build/evidence/
+          if-no-files-found: ignore
 
   nightly:
     name: 夜跑骨架（nightly）
@@ -130,6 +166,7 @@ jobs:
         run: |
           mkdir -p build/evidence/nightly
           ctest --test-dir build/linux-debug -L nightly --output-on-failure \
+            --output-junit build/evidence/nightly/junit.xml \
             | tee build/evidence/nightly/nightly.txt
 
       - name: 归档夜跑证据

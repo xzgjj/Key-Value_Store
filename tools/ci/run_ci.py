@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -91,9 +92,16 @@ def main() -> int:
     ap.add_argument("--round", type=int, default=1,
                     help="本轮修复重试的轮次（1 起），超过 rules.toml [retry].max_rounds 拒绝执行")
     ap.add_argument("--json", action="store_true", help="额外输出机器可读 JSON 行")
+    ap.add_argument("--base", default=None,
+                    help="diff 基线（CI 用 PR base sha 或 HEAD^）；缺省比对工作树。"
+                         "守卫/范围两阶段在干净检出上恒为空集，CI 必须给基线才有意义")
     ap.add_argument("--root", default=str(Path(__file__).resolve().parent.parent.parent))
     args = ap.parse_args()
     root = Path(args.root).resolve()
+
+    # 基线以环境变量下发给各检查器（lib_ci.resolve_base 读取），避免逐个改调用签名
+    if args.base:
+        os.environ["TINYKV_DIFF_BASE"] = args.base
 
     if not (root / "ci" / "rules.toml").is_file():
         L.out(f"FAIL: 未找到规则文件 {root / 'ci' / 'rules.toml'}")
@@ -107,7 +115,8 @@ def main() -> int:
         return L.EXIT_FAIL
 
     stages = list(STAGE_RUNNERS) if args.stage == "all" else [args.stage]
-    L.out(f"== TinyKV-CI ==（第 {args.round}/{max_rounds} 轮，阶段：{'+'.join(stages)}）")
+    L.out(f"== TinyKV-CI ==（第 {args.round}/{max_rounds} 轮，"
+          f"阶段：{'+'.join(stages)}，基线：{args.base or '工作树'}）")
 
     results: list[L.CheckResult] = []
     for stage in stages:

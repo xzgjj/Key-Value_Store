@@ -35,5 +35,7 @@
   "fixes": [],
   "overflow_approved": true,
   "behavior_change_approved": false,
+  "rule_asset_approved": true,
+  "rule_asset_note": "2026-11-16 治理收尾批次：为守卫增加 --base（CI 生效）+ 审批留痕通道（rule_asset_approved），并接 guard/scope/bugfix 三阶段进流水线；用户指令「都按你的建议落地」即为该批规则资产改动的批准",
   "approver": "用户（2026-11-16 会话目标指令：开始实现该项目，其他不构成风险的一律默认批准；基线文档体量超 600 行预算系一次性质押入库，非代码改动）"
 }

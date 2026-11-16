@@ -18,9 +18,9 @@
 namespace tinykv::log {
 namespace {
 
-constexpr size_t kMaxFileSize = 10ULL * 1024 * 1024;  // 单文件 ≤10MB（CLAUDE.md §4-7）
-constexpr size_t kMaxFiles = 5;                       // 保留 ≤5 个
-constexpr char kLoggerName[] = "tinykv";              // 全局唯一 logger 名
+constexpr size_t kMaxFileSize = 10ULL * 1024 * 1024;           // 单文件 ≤10MB（CLAUDE.md §4-7）
+constexpr size_t kMaxFiles = 5;                                // 保留 ≤5 个
+constexpr char kLoggerName[] = "tinykv";                       // 全局唯一 logger 名
 constexpr char kPattern[] = "[%Y-%m-%d %H:%M:%S.%e] [%l] %v";  // 文件与控制台同一格式
 
 // 只保护装配（init/shutdown）；输出路径不碰这把锁

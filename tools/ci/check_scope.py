@@ -30,6 +30,8 @@ import lib_ci as L  # noqa: E402
 
 def check_scope(root: Path, rules: dict, base: str | None = None) -> L.CheckResult:
     res = L.CheckResult("scope", L.PASS)
+    # 基线解析：显式参数 > 环境变量（run_ci --base 会设 TINYKV_DIFF_BASE）> 工作树模式
+    base = base or L.resolve_base()
     if not L.has_head(root):
         res.status = L.SKIP
         res.summary = "SKIP(NO_BASELINE)：仓库尚无基线提交，范围/预算检查未武装"
@@ -129,18 +131,20 @@ def check_scope(root: Path, rules: dict, base: str | None = None) -> L.CheckResu
     return res
 
 
-def run(root: Path, rules: dict) -> list[L.CheckResult]:
-    return [check_scope(root, rules)]
+def run(root: Path, rules: dict, base: str | None = None) -> list[L.CheckResult]:
+    return [check_scope(root, rules, base)]
 
 
 def main() -> int:
     L.setup_output()
     ap = argparse.ArgumentParser(description="TinyKV-CI scope 阶段检查")
     ap.add_argument("--root", default=str(Path(__file__).resolve().parent.parent.parent))
+    ap.add_argument("--base", default=None,
+                    help="diff 基线（如 origin/main、HEAD^）；缺省比对工作树")
     args = ap.parse_args()
     root = Path(args.root).resolve()
     rules = L.load_rules(root)
-    results = run(root, rules)
+    results = run(root, rules, args.base)
     L.out("== scope 阶段 ==")
     for r in results:
         L.out(f"[{r.status}] {r.check}: {r.summary}")

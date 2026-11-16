@@ -97,15 +97,28 @@ def analyze_loosening(old: dict, new: dict) -> tuple[list[str], list[str]]:
     return weaken, tighten
 
 
-def check_guard(root: Path, rules: dict) -> L.CheckResult:
+def _rule_approval(root: Path, rules: dict) -> tuple[bool, str]:
+    """读取任务声明里的规则资产批准留痕；文件缺失/解析失败一律按"未批准"处理。"""
+    try:
+        ts = L.load_task_scope(root, rules)
+    except (OSError, ValueError):
+        return False, ""
+    approver = str(ts.get("approver", "")).strip()
+    return bool(ts.get("rule_asset_approved")), approver
+
+
+def check_guard(root: Path, rules: dict, base: str | None = None) -> L.CheckResult:
     res = L.CheckResult("guard", L.PASS)
+    base = base or L.resolve_base()
     if not L.has_head(root):
         res.status = L.SKIP
         res.summary = "SKIP(NO_BASELINE)：仓库尚无基线提交，规则守卫未武装"
         return res
 
     patterns = rules["guard"]["rule_files"]
-    changed = L.filter_ignored(L.changed_files(root), rules)
+    changed = L.filter_ignored(L.changed_files(root, base), rules)
+    if base:
+        res.summary = f"比对基线 {base}"
 
     new_files = [p for c, p in changed if "??" in c and L.glob_match(p, patterns)]
     if new_files:
@@ -114,7 +127,8 @@ def check_guard(root: Path, rules: dict) -> L.CheckResult:
     hits = [(c, p) for c, p in changed if "??" not in c and L.glob_match(p, patterns)]
     if not hits:
         if res.status == L.PASS:
-            res.summary = "规则资产无改动"
+            res.summary = ("规则资产无改动" if not base
+                           else f"与基线 {base} 相比规则资产无改动")
         return res
 
     res.status = L.APPROVAL
@@ -122,12 +136,25 @@ def check_guard(root: Path, rules: dict) -> L.CheckResult:
         res.add("GUARD-CHG", f"[{c}] {p}")
     if len(hits) > 20:
         res.add("GUARD-CHG", f"…另有 {len(hits) - 20} 个规则文件改动")
-    res.add("GUARD-APPROVE", "规则资产改动需人工批准后方可继续（退出码 2）")
 
-    # 防放松分析（仅 rules.toml 有旧版本可比时）
+    # 审批留痕放行（SPEC.md §5）：task_scope.json 里 rule_asset_approved=true 且填了
+    # approver，才把"需人工批准"落成"已获批"。没有这条通道，规则资产一旦改动 CI 永远红，
+    # 守卫就退化成"谁都不敢动规则"，而不是"动规则要留痕"。
+    approved, approver = _rule_approval(root, rules)
+    if approved and approver:
+        res.status = L.PASS
+        res.summary = f"规则资产改动 {len(hits)} 个（已获批放行）"
+        res.add("GUARD-APPROVED", f"规则资产改动已获批（批准人：{approver}），放行")
+    else:
+        res.add("GUARD-APPROVE", "规则资产改动需人工批准后方可继续（退出码 2）："
+                                 f"在 {rules['scope']['task_scope_file']} 填 "
+                                 "rule_asset_approved=true + approver")
+
+    # 防放松分析（仅 rules.toml 有旧版本可比时）：base 模式下旧版本取自基线提交
     rules_rel = "ci/rules.toml"
     if L.glob_match(rules_rel, patterns) and any(p == rules_rel for _, p in hits):
-        rc, old_text = L.git(root, "show", f"HEAD:{rules_rel}")
+        old_ref = base or "HEAD"
+        rc, old_text = L.git(root, "show", f"{old_ref}:{rules_rel}")
         if rc == 0:
             try:
                 old = tomllib.loads(old_text)
@@ -142,18 +169,20 @@ def check_guard(root: Path, rules: dict) -> L.CheckResult:
     return res
 
 
-def run(root: Path, rules: dict) -> list[L.CheckResult]:
-    return [check_guard(root, rules)]
+def run(root: Path, rules: dict, base: str | None = None) -> list[L.CheckResult]:
+    return [check_guard(root, rules, base)]
 
 
 def main() -> int:
     L.setup_output()
     ap = argparse.ArgumentParser(description="TinyKV-CI guard 阶段检查")
     ap.add_argument("--root", default=str(Path(__file__).resolve().parent.parent.parent))
+    ap.add_argument("--base", default=None,
+                    help="diff 基线（CI 用 PR base / HEAD^）；缺省比对工作树")
     args = ap.parse_args()
     root = Path(args.root).resolve()
     rules = L.load_rules(root)
-    results = run(root, rules)
+    results = run(root, rules, args.base)
     L.out("== guard 阶段 ==")
     for r in results:
         L.out(f"[{r.status}] {r.check}: {r.summary}")
