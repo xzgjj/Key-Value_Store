@@ -7,6 +7,19 @@ syntax = "proto3";
 
 package tinykv.raftpb;
 
+// 快照载荷：region 全量状态（M2 单 region，故直接是全库）。用 protobuf 而非手写二进制，
+// 是为了不与 SST 的记录格式重复实现——两处编码一旦分叉，恢复时的字段对不上极难查。
+message SnapshotKv {
+    uint32 cf = 1;      // 列族（与 common.proto 的 CfName 数值一致）
+    bytes key = 2;      // 用户 key（不带 CF 前缀，装入时由存储层编码）
+    bytes value = 3;    // 值
+}
+
+message SnapshotData {
+    repeated SnapshotKv kvs = 1;
+}
+
+
 // 消息类型：集合与语义见 SPEC-0 §0.3.2 表（七字段复用，禁止为单类消息私加持久字段）
 enum MessageId {
     MSG_HUP = 0;                     // 内部：选举超时触发竞选（无字段负载）
@@ -58,4 +71,6 @@ message Message {
     SnapshotMeta snapshot = 10;    // 仅 MSG_SNAPSHOT：快照元数据；其余类型不设置
     uint64 read_ctx = 11;          // 仅 HEARTBEAT/HEARTBEAT_RESPONSE：ReadIndex 轮次标识
                                    // （0 = 普通心跳；非 0 时回执必须原样带回，用于 quorum 确认）
+    bytes snapshot_data = 12;      // 仅 MSG_SNAPSHOT：序列化的 SnapshotData（M2 单块传输，
+                                   // 分块与流控留给 M4：那时快照会按 region 范围生成）
 }

@@ -228,6 +228,20 @@ result<void> RaftLog::set_committed(LogIndex idx) {
     return persist_meta();
 }
 
+result<void> RaftLog::reset_snapshot(LogIndex index, Term term) {
+    if (index.value < meta_.first_index - 1) {
+        return std::unexpected(InvalidArgument{"快照位点早于已知起点，拒绝回退"});
+    }
+    if (auto r = remove_range(LogIndex{meta_.first_index}, LogIndex{meta_.last_index + 1}); !r) {
+        return r;
+    }
+    meta_.first_index = index.value + 1;
+    meta_.last_index = index.value;
+    meta_.committed = index.value;
+    meta_.dummy_term = term.value;
+    return persist_meta();
+}
+
 result<void> RaftLog::set_hard_state(Term term, std::optional<PeerId> vote) {
     meta_.term = term.value;
     meta_.vote = vote ? vote->value : 0;

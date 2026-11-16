@@ -64,6 +64,10 @@ public:
 
     [[nodiscard]] result<void> set_hard_state(Term term, std::optional<PeerId> vote);
 
+    // 快照安装：丢弃全部日志条目，dummy 指向快照位点（first = index+1, last = committed = index）。
+    // 语义上等价于"从 index 处重新开始"——后续 AppendEntries 都从 index+1 接续。
+    [[nodiscard]] result<void> reset_snapshot(LogIndex index, Term term);
+
 private:
     struct Meta {
         std::uint64_t first_index{1};

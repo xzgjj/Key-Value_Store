@@ -11,6 +11,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <optional>
 #include <utility>
@@ -65,6 +66,9 @@ public:
 
     [[nodiscard]] bool applied_at_least(std::uint64_t index) const { return applied_ >= index; }
 
+    // 压缩日志（快照/测试用）：超过 committed 会被 RaftLog 拒绝
+    [[nodiscard]] result<void> compact_log(LogIndex upto) { return log_->compact(upto); }
+
     // 直接读状态机（调用方保证 applied ≥ read_index，否则读到的可能不是线性一致点）
     [[nodiscard]] result<GetResult> read_directly(Cf cf, std::string_view key) const;
 
@@ -85,10 +89,22 @@ public:
 private:
     Peer(std::unique_ptr<raft::RaftLog> log, Storage& storage, const raft::Config& cfg);
 
+    PeerId self_{0};
+
     [[nodiscard]] result<void> apply_entry(const raftpb::Entry& entry);
     [[nodiscard]] result<void> execute(const cmdpb::RaftCmdRequest& req);
     void fill_get_reply(const cmdpb::GetRequest& get, cmdpb::GetResponse* out);
     void fill_scan_reply(const cmdpb::ScanRequest& scan, cmdpb::ScanResponse* out);
+
+    // ---- 快照（M2 单块全量；M4 按 region 范围生成） ----
+    // 生成：遍历三个列族取全量存活键（墓碑已被 Scan 过滤，故快照天然是"当前状态"）
+    [[nodiscard]] result<raftpb::SnapshotData> dump_snapshot() const;
+    // 安装：先为"本地有、快照无"的键写墓碑，再写入快照内容——
+    // 只覆盖不删除会让分叉日志留下的脏键永久残留
+    [[nodiscard]] result<void> install_snapshot(const raftpb::SnapshotData& data);
+    // 三个列族全量遍历（快照生成与安装共用同一扫描口径，避免两处口径漂移）
+    [[nodiscard]] result<void> for_each_entry(
+        const std::function<void(Cf, const std::string&, const std::string&)>& fn) const;
 
     std::unique_ptr<raft::RaftLog> log_;
     std::unique_ptr<raft::Raft> raft_;

@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -46,15 +47,24 @@ public:
 
     // 一轮：逐节点"发完即投递、随后 apply"。单趟而非两趟——真实 Worker 也是按 region
     // 各自 drain，同轮消息不保证互相可见（两趟会让同轮消息立刻可见，比真机更"顺"）。
+    // 分区：集合内节点与外界的一切消息都被丢弃（模拟网络隔离）
+    void set_partition(std::set<int> nodes) { partition_ = std::move(nodes); }
+
     void pump() {
-        for (auto& p : peers_) {
-            for (auto& m : p->take_messages()) {
+        for (std::size_t i = 0; i < peers_.size(); ++i) {
+            const bool from_isolated = partition_.count(static_cast<int>(i)) > 0;
+            for (auto& m : peers_[i]->take_messages()) {
                 const int to = static_cast<int>(m.to()) - 1;
+                if (from_isolated || partition_.count(to) > 0) {
+                    continue;   // 隔离节点发不出、也收不到
+                }
                 if (to >= 0 && to < size()) {
                     (void)peers_[static_cast<std::size_t>(to)]->step_message(m);
                 }
             }
-            (void)p->on_ready();
+            if (!from_isolated) {
+                (void)peers_[i]->on_ready();
+            }
         }
     }
 
@@ -181,6 +191,7 @@ private:
     std::vector<std::unique_ptr<TempDir>> dirs_;
     std::vector<std::unique_ptr<tinykv::Engine>> engines_;
     std::vector<std::unique_ptr<Peer>> peers_;
+    std::set<int> partition_;
 };
 
 }  // namespace tinykv::testlib

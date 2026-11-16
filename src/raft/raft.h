@@ -40,6 +40,9 @@ struct Ready {
     // ReadIndex 已获 quorum 确认的位点（升序）。调用方据此放行等待中的读请求：
     // 等 applied >= 该位点后读状态机，才算线性一致。
     std::vector<std::uint64_t> confirmed_reads;
+    // 需要用快照追赶的 follower（其 next_index 已落到 first_index 之前）。
+    // 数据由 Peer 层填充（状态机不碰存储），这里只负责"发现谁需要"。
+    std::vector<PeerId> snapshot_targets;
 };
 
 // 读模式：ReadIndex 必做，LeaseRead 默认关（SPEC-2 D2-4：开启需声明时钟漂移假设）
@@ -66,6 +69,11 @@ public:
     // 租约：默认关。开启后每次 quorum 心跳回执刷新 deadline = now + election_timeout×0.7
     void enable_lease(bool on) { lease_enabled_ = on; }
     [[nodiscard]] bool lease_valid() const { return lease_enabled_ && now_ticks_ < lease_deadline_; }
+
+    [[nodiscard]] LogIndex last_index() const { return log_.last_index(); }
+
+    // 安装快照后调用：日志重置到 (index, term)，applied 前移，退回 follower
+    void restore_snapshot(LogIndex index, Term term);
 
     [[nodiscard]] Role role() const { return role_; }
     [[nodiscard]] bool is_leader() const { return role_ == Role::Leader; }
@@ -123,6 +131,7 @@ private:
     std::vector<raftpb::Message> outbox_;
     std::vector<Entry> to_apply_;
     std::vector<std::uint64_t> confirmed_reads_;
+    std::vector<PeerId> snapshot_targets_;
     std::map<std::uint64_t, PendingRead> pending_reads_;
     std::uint64_t read_ctx_seq_{0};
     std::uint64_t now_ticks_{0};        // 单调 tick 计数（租约用，不读墙钟保证可复现）

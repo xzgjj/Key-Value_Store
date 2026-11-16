@@ -162,6 +162,17 @@ void Raft::send_append(PeerId to) {
     const std::uint64_t next = it == next_index_.end() ? log_.last_index().value + 1 : it->second;
     const std::uint64_t prev = next > 0 ? next - 1 : 0;
 
+    // leader 主动发现"该 follower 需要的条目已被压缩"：这条路径不靠 reject 驱动——
+    // next_index 可能还停在被压缩之前（如 follower 长时间不可达），此时 slice 会失败、
+    // 发出去的是空 AppendEntries，follower 永远追不上。
+    if (next < log_.first_index().value) {
+        if (std::none_of(snapshot_targets_.begin(), snapshot_targets_.end(),
+                         [&](const PeerId& p) { return same(p, to); })) {
+            snapshot_targets_.push_back(to);
+        }
+        return;
+    }
+
     auto msg = make(raftpb::MSG_APPEND, to);
     msg.set_index(prev);
     auto prev_term = log_.term(LogIndex{prev});
@@ -224,9 +235,11 @@ Ready Raft::take_ready() {
     ready.messages = std::move(outbox_);
     ready.to_apply = std::move(to_apply_);
     ready.confirmed_reads = std::move(confirmed_reads_);
+    ready.snapshot_targets = std::move(snapshot_targets_);
     outbox_.clear();
     to_apply_.clear();
     confirmed_reads_.clear();
+    snapshot_targets_.clear();
     return ready;
 }
 
@@ -416,6 +429,11 @@ void Raft::handle_append_response(const raftpb::Message& msg) {
         if (next == 0) {
             next = std::max<std::uint64_t>(msg.index(), log_.first_index().value);
         }
+        if (next < log_.first_index().value) {
+            // 需要的条目已被压缩：标记该 follower 走快照，别再逐条退格（退格永远退不到）
+            snapshot_targets_.push_back(from);
+            return;
+        }
         next_index_[from.value] = next;
         send_append(from);
         return;
@@ -471,6 +489,21 @@ void Raft::handle_heartbeat(const raftpb::Message& msg) {
     reply.set_commit(log_.committed().value);
     reply.set_read_ctx(msg.read_ctx());   // 原样带回，leader 据此做 quorum 确认
     outbox_.push_back(std::move(reply));
+}
+
+void Raft::restore_snapshot(LogIndex index, Term term) {
+    (void)log_.reset_snapshot(index, term);
+    applied_ = index.value;
+    if (term.value > term_) {
+        term_ = term.value;
+        voted_for_.reset();
+        (void)log_.set_hard_state(Term{term_}, std::nullopt);
+    }
+    role_ = Role::Follower;
+    election_elapsed_ = 0;
+    votes_.clear();
+    leader_ = 0;
+    pending_reads_.clear();
 }
 
 void Raft::advance_commit() {

@@ -29,7 +29,7 @@ std::string as_string(const std::string& bytes) { return bytes; }
 }  // namespace
 
 Peer::Peer(std::unique_ptr<raft::RaftLog> log, Storage& storage, const raft::Config& cfg)
-    : log_(std::move(log)), storage_(storage) {
+    : self_(cfg.id), log_(std::move(log)), storage_(storage) {   // 顺序须与声明一致
     raft_ = std::make_unique<raft::Raft>(cfg, *log_);
 }
 
@@ -78,7 +78,91 @@ std::vector<raftpb::Message> Peer::take_messages() {
     return out;
 }
 
-result<void> Peer::step_message(const raftpb::Message& msg) { return raft_->step(msg); }
+result<void> Peer::step_message(const raftpb::Message& msg) {
+    if (msg.id() != raftpb::MSG_SNAPSHOT) {
+        return raft_->step(msg);
+    }
+    // 快照安装是应用层动作（要写存储），状态机只负责重置日志指针
+    if (msg.term() < raft_->term().value) {
+        return {};   // 过期快照直接丢弃
+    }
+    raftpb::SnapshotData data;
+    if (!data.ParseFromString(msg.snapshot_data())) {
+        return std::unexpected(Corrupted{.where = "peer:snapshot", .reason = "快照载荷解析失败"});
+    }
+    if (auto r = install_snapshot(data); !r) {
+        return r;
+    }
+    raft_->restore_snapshot(LogIndex{msg.index()}, Term{msg.log_term()});
+
+    // 回执让 leader 知道该 follower 已到快照位点，可以接着发增量
+    raftpb::Message reply;
+    reply.set_id(raftpb::MSG_APPEND_RESPONSE);
+    reply.set_term(raft_->term().value);
+    reply.set_from(self_.value);
+    reply.set_to(msg.from());
+    reply.set_index(msg.index());
+    reply.set_commit(msg.index());
+    outbox_.push_back(std::move(reply));
+    return {};
+}
+
+result<void> Peer::for_each_entry(
+    const std::function<void(Cf, const std::string&, const std::string&)>& fn) const {
+    constexpr std::size_t kAll = 1U << 24U;   // 单 region 全量；超限属 M4 分块范畴
+    for (const Cf cf : {Cf::Default, Cf::Write, Cf::Lock}) {
+        auto reader = storage_.create_reader();
+        if (!reader) {
+            return std::unexpected(reader.error());
+        }
+        auto it = (*reader)->scan(cf, {}, kAll);
+        if (!it) {
+            return std::unexpected(it.error());
+        }
+        for (; (**it).valid(); (**it).next()) {
+            fn(cf, std::string((**it).key()), std::string((**it).value()));
+        }
+    }
+    return {};
+}
+
+result<raftpb::SnapshotData> Peer::dump_snapshot() const {
+    raftpb::SnapshotData data;
+    auto walk = for_each_entry([&](Cf cf, const std::string& key, const std::string& value) {
+        auto* kv = data.add_kvs();
+        kv->set_cf(static_cast<std::uint32_t>(cf));
+        kv->set_key(key);
+        kv->set_value(value);
+    });
+    if (!walk) {
+        return std::unexpected(walk.error());
+    }
+    return data;
+}
+
+result<void> Peer::install_snapshot(const raftpb::SnapshotData& data) {
+    ModifyVec batch;
+    std::map<std::pair<std::uint32_t, std::string>, bool> incoming;
+    for (const raftpb::SnapshotKv& kv : data.kvs()) {
+        incoming[{kv.cf(), kv.key()}] = true;
+        batch.push_back(Modify{Put{.cf = static_cast<Cf>(kv.cf()),
+                                   .key = kv.key(),
+                                   .value = kv.value()}});
+    }
+    // 删除本地有、快照无的键：只覆盖不删除，分叉日志留下的脏键会永久残留
+    auto walk = for_each_entry([&](Cf cf, const std::string& key, const std::string&) {
+        if (incoming.find({static_cast<std::uint32_t>(cf), key}) == incoming.end()) {
+            batch.push_back(Modify{Delete{.cf = cf, .key = key}});
+        }
+    });
+    if (!walk) {
+        return std::unexpected(walk.error());
+    }
+    if (batch.empty()) {
+        return {};
+    }
+    return storage_.write(batch);
+}
 
 std::vector<std::uint64_t> Peer::take_confirmed_reads() {
     std::vector<std::uint64_t> out;
@@ -103,6 +187,26 @@ result<std::size_t> Peer::on_ready() {
     }
     for (const auto idx : ready.confirmed_reads) {
         confirmed_reads_.push_back(idx);
+    }
+    if (!ready.snapshot_targets.empty()) {
+        auto data = dump_snapshot();
+        if (data.has_value()) {
+            std::string blob;
+            if (data->SerializeToString(&blob)) {
+                const auto last = raft_->last_index();
+                for (const PeerId& target : ready.snapshot_targets) {
+                    raftpb::Message msg;
+                    msg.set_id(raftpb::MSG_SNAPSHOT);
+                    msg.set_term(raft_->term().value);
+                    msg.set_from(self_.value);
+                    msg.set_to(target.value);
+                    msg.set_index(last.value);
+                    msg.set_log_term(raft_->term().value);
+                    msg.set_snapshot_data(blob);
+                    outbox_.push_back(std::move(msg));
+                }
+            }
+        }
     }
     std::size_t applied = 0;
     for (const raftpb::Entry& entry : ready.to_apply) {

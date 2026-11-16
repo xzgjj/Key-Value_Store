@@ -152,6 +152,7 @@ CI 用 `ctest -L unit|simulation|integration|bench` 选择，无需解析本页�
 | tests/bench/read_bench_test.cpp | bench | `read_bench` | - | nightly |
 | tests/integration/lincheck_readindex_test.cpp | integration | `lincheck_readindex` | - | nightly |
 | tests/unit/cli/cli_cluster_get_test.cpp | unit | `cli_cluster_get_test` | - | fast |
+| tests/integration/snapshot_test.cpp | integration | `snapshot_test` | - | nightly |
 <!-- registry:end -->
 
 > **M0 起步批次**（2026-11-16 落地登记，见上表）：encode / kv_error / strong_id / common_log 四个
