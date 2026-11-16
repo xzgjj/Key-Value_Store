@@ -32,6 +32,12 @@ else()
     add_compile_options(-Wall -Wextra -Wpedantic -Werror)
 endif()
 
+# MinGW（Windows + GNU）运行时静态链接：可执行自包含，规避 PATH 上异源 MinGW DLL
+# 抢占解析（如 Git for Windows 自带旧 libstdc++-6.dll 导致 0xc0000139）；Linux/MSVC 不受影响。
+if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    add_link_options(-static)
+endif()
+
 enable_testing()
 
 # src/ 子目录按里程碑增量创建（SPEC-0 红线 6，禁一次建空树）：
