@@ -23,17 +23,11 @@
 
 #include "raft_test_base.h"
 #include "raftstore/peer.h"
-#include "raftstore/tcp_transport.h"
+#include "tcp_test_base.h"
 
 namespace {
 
-namespace cmdpb = tinykv::cmdpb;
 using namespace tinykv::testlib;   // NOLINT(google-build-using-namespace)
-using tinykv::raftstore::Peer;
-using tinykv::raftstore::TcpOptions;
-using tinykv::raftstore::TcpTransport;
-
-constexpr int kNodes = 3;
 constexpr int kSpinPerTick = 300;   // 每 300 次自旋推进一拍（约 30ms/tick）
 
 // 自旋等待条件成立（不 sleep；上限内未满足即判失败，避免挂死）
@@ -52,17 +46,7 @@ bool wait_until(Pred pred, int max_spins = 100000) {
 class TcpCluster {
 public:
     void start() {
-        std::map<std::uint64_t, std::uint16_t> ports;
-        for (int i = 0; i < kNodes; ++i) {
-            auto t = TcpTransport::start(
-                TcpOptions{.self = PeerId{static_cast<std::uint64_t>(i) + 1}, .listen_port = 0});
-            EXPECT_TRUE(t.has_value()) << "节点 " << i << " 启动失败";
-            ports[static_cast<std::uint64_t>(i) + 1] = (*t)->port();
-            transports_.push_back(std::move(*t));
-        }
-        for (auto& t : transports_) {
-            t->set_peers(ports);
-        }
+        (void)start_transports(kNodes, transports_);   // 端口自动分配并互相 set_peers
 
         std::vector<PeerId> voters;
         for (int i = 0; i < kNodes; ++i) {

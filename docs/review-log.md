@@ -31,6 +31,9 @@
 | M2 | 7 | 可判定性：29 个测试 + 四项欠账证据 | PASS | ctest 29/29；CI PASS×13；snapshot/crash/bench/cluster-write 全绿 |
 | M2 | 8 | 契约与复用：对齐三项 + 登记对账 | PASS | align 3/3；registry PASS |
 | M2 | 9 | 文档与红线：预算/查重/链接 + guard | PASS | docs PASS×4；guard PASS |
+| M2 | 10 | 可判定性：30 个测试 + 真 TCP 压测驱动 | PASS | ctest 30/30；CI PASS×13；tcp_perf_bench A/B/C 三阶段出数 |
+| M2 | 11 | 契约与复用：对齐三项 + 登记对账 | PASS | align 3/3；registry PASS |
+| M2 | 12 | 文档与红线：预算/查重/链接 + guard | PASS | docs PASS×4；guard PASS |
 <!-- review:end -->
 
 ## 约定
