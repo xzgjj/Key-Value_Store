@@ -17,6 +17,8 @@ server:
   auth_token: ""              # 空 = 不鉴权（启动即在 /status 标 "auth":false）；非空 = 必须带 Authorization: Bearer <token>
   lock_shards: 16             # ⑨a 锁分片：>1 且单节点时同区串行/跨区并行；1 = 一把大锁（改造前行为）；多副本模式强制 1
   http_threads: 2             # ⑪ 业务端口 io_context 线程数：默认 2（跨区吞吐随线程数提升）；1 = 单线程（M7 行为）；0 = 按 CPU 数（bench 档）；观测端口恒为独立单线程
+  tls_cert: ""                # ⑭ TLS 证书链（PEM）：空 = 明文 + 强制回环守卫（M7 行为逐字节）；与 tls_key 必须同给；配 TLS 后 token 可选（传输已加密）
+  tls_key: ""                 # ⑭ TLS 私钥（PEM）：与 tls_cert 必须同给，只给一个启动报错；证书/私钥加载失败 = 启动失败（不静默明文）
 
 txn:
   cross_region_enabled: true  # 跨区事务协调器（M7 ⑦，已转正）。开=按 region 分组两阶段提交；关=跨区写入明确拒绝

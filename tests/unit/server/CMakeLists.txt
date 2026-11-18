@@ -13,3 +13,5 @@ add_tinykv_test(lock_shards_wiring_test SRCS lock_shards_wiring_test.cpp LIBS ti
 add_tinykv_test(auth_test SRCS auth_test.cpp LIBS tinykv_server tinykv_cli LEVEL unit)
 add_tinykv_test(admin_endpoints_test SRCS admin_endpoints_test.cpp LIBS tinykv_server tinykv_cli LEVEL unit)
 add_tinykv_test(http_concurrency_test SRCS http_concurrency_test.cpp LIBS tinykv_server tinykv_cli LEVEL unit)
+add_tinykv_test(tls_transport_test SRCS tls_transport_test.cpp LIBS tinykv_server tinykv_cli LEVEL unit)
+add_tinykv_test(tls_config_test SRCS tls_config_test.cpp LIBS tinykv_server tinykv_cli LEVEL unit)

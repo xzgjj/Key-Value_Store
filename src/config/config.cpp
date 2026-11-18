@@ -119,6 +119,14 @@ result<void> apply_server(ServerSection& cfg, const std::string& key, const std:
                    ? result<void>{}
                    : bad("server.http_threads 必须是非负整数（0 = 按 CPU 数）");
     }
+    if (key == "tls_cert") {
+        cfg.tls_cert = unquote(value);
+        return {};
+    }
+    if (key == "tls_key") {
+        cfg.tls_key = unquote(value);
+        return {};
+    }
     return bad("server 段未知键 '" + key + "'");
 }
 

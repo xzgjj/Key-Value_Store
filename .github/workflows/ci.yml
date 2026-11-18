@@ -39,7 +39,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             ninja-build clang-tidy \
-            libprotobuf-dev protobuf-compiler libspdlog-dev
+            libprotobuf-dev protobuf-compiler libspdlog-dev libssl-dev
           # 格式检查用 pip 版：版本可钉死（apt 只给发行版绑定版本，跨版本输出会漂）
           python3 -m pip install --break-system-packages "clang-format==22.1.8"
 
@@ -108,6 +108,7 @@ jobs:
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-openssl
             mingw-w64-ucrt-x86_64-protobuf
             mingw-w64-ucrt-x86_64-spdlog
             python

@@ -78,6 +78,13 @@ struct ServerOptions {
     // 0 = hardware_concurrency（bench 档）。handler 并发安全以 ⑪-0 审计清单为前提
     // （docs/落实/notes-m8.md §1，红线 1：未审计的 handler 不许进线程池）。
     std::size_t http_threads{2};
+    // ⑭ TLS 传输（M8-SEC-01，SPEC-7 §7.6 `server.tls_cert/tls_key`）：均空 = 明文
+    // （M7 行为逐字节，红线 3）；非空 = 业务端口 TLS（两者必须同给，只给一个 = 启动报错，
+    // 错误矩阵见 SPEC-7 §7.3.3）。观测端口维持明文内网面，不随此项开启。
+    // 组合语义（D7-3）：配 TLS 后 token 可选（传输已加密，未配 token 不再强制回环）；
+    // 未配 TLS 保持强制回环守卫不动。
+    std::string tls_cert{};
+    std::string tls_key{};
 
     // ---- Raft 传输层（M7 ⑤：单机 KV → 分布式 store 的分水岭） ----
     // voters 为空 = 单节点模式（不创建 Transport，保持既有行为）；非空 = 多副本组。
@@ -390,8 +397,16 @@ private:
 
     // 业务 HTTP 端点 + 独立观测端点。观测端点 try_lock 快照，业务泵持闸时返回上一份。
     [[nodiscard]] result<void> start_http_locked() {
-        // ⑩ D6-3：未配置 token 时不许对外监听。这里直接改写 host 为回环并把事实记进 /status，
-        // 而不是"只告警"——告警会被忽略，绑定面不会。
+        // ⑭ 错误矩阵（SPEC-7 §7.3.3）：只给 cert/key 之一 = 半配置，启动即拒绝，不许半配置运行
+        const bool tls_partial =
+            (opt_.tls_cert.empty() != opt_.tls_key.empty());
+        if (tls_partial) {
+            return tinykv::unexpected(InvalidArgument{"tls_cert 与 tls_key 必须同给"});
+        }
+        // ⑩ D6-3 + ⑭ D7-3：未配置 token 时不许对外监听——除非传输已加密（TLS）。
+        // 未配 TLS 的回环守卫逐字节不动（红线 3：配了证书也不许放松对"明文"的判定）。
+        // 这里直接改写 host 为回环并把事实记进 /status，而不是"只告警"——告警会被忽略，
+        // 绑定面不会。
         if (opt_.auth_token.empty() && !is_loopback(opt_.host)) {
             auth_forced_loopback_ = true;
             opt_.host = "127.0.0.1";
@@ -410,7 +425,8 @@ private:
                 return intercepted(m, p, "", [&] { return admin(m, p, q, b); });
             },
             opt_.auth_token,
-            opt_.http_threads);  // ⑪：业务端口进线程池（审计清单前置，notes-m8.md §1）
+            opt_.http_threads,                          // ⑪：业务端口进线程池（审计前置）
+            TlsOptions{opt_.tls_cert, opt_.tls_key});   // ⑭：业务端口 TLS（观测端口维持明文）
         if (!started.has_value()) {
             return tinykv::unexpected(started.error());
         }
@@ -933,10 +949,15 @@ private:
                ",\"txn_errors\":" + std::to_string(txn_errors) + ",\"last_apply_error\":\"" +
                http::escape(last_error) + "\"" +                ",\"now_ms\":" + std::to_string(now_ms_.load()) +
                ",\"auth\":" + (opt_.auth_token.empty() ? "false" : "true") +
+               // ⑭ 红线 3：未配 TLS 时 /status 逐字节不变——"tls" 字段只在配置证书时出现
+               (opt_.tls_cert.empty() ? "" : ",\"tls\":true") +
                ",\"txn_cross_region\":" + (opt_.cross_region_enabled ? "true" : "false") +
                ",\"bind\":\"" +
                http::escape(opt_.host) + "\"" +
-               (!opt_.auth_token.empty() || is_loopback(opt_.host) ? "" : ",\"warn\":\"未鉴权\"") +
+               // ⑭ D7-3：TLS 下 token 可选（传输已加密），不再标"未鉴权"
+               (!opt_.auth_token.empty() || !opt_.tls_cert.empty() || is_loopback(opt_.host)
+                    ? ""
+                    : ",\"warn\":\"未鉴权\"") +
                ",\"replica_id\":" + std::to_string(opt_.replica_id.value) +
                ",\"voters\":" + std::to_string(opt_.voters.size()) +
                ",\"leader\":" + (is_leader() ? "true" : "false") +

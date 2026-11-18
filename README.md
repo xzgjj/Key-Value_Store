@@ -164,8 +164,9 @@ auto got = (*engine)->get(Cf::Default, std::as_bytes(std::span{"k1", 2}));
 - **并发与安全边界**：锁已按 region 分片（`server.lock_shards`，默认 16，同区串行/跨区并行；
   多副本模式强制一把大锁）；M8 ⑪ 起 HTTP handler 并发执行（`server.http_threads`，默认 2；
   显式 1 = 单线程回退档）——io=4 跨区吞吐达 M7 基线 1.36× 以上（`docs/落实/notes-m8.md` §2）；
-  鉴权为 Bearer token，**未做 TLS**（M8 ⑭ 规划中，见 CONTRACT-REVIEW D-2）；
-  未配 token 时强制绑回环并在 `/status` 标 `"auth":false`。
+  鉴权为 Bearer token；M8 ⑭ 起可配 TLS（`server.tls_cert/tls_key`，必须同给；未配 = 明文 +
+  强制回环守卫逐字节不变，配 TLS 后 token 可选）；未配 token 且未配 TLS 时强制绑回环并在
+  `/status` 标 `"auth":false`。
 - **编译器/标准**：默认 C++23；C++20/17 走 `src/common/compat.h`，g++ 与 clang++ 均在 CI 矩阵内。
 - **非目标**：Region Merge、完整 PD 调度策略、Joint Consensus、悲观事务、RDMA/GPU 传输。
 

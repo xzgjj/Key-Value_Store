@@ -176,13 +176,31 @@ std::string not_found(bool keep_alive) {
 result<std::unique_ptr<StatusServer>> StatusServer::start(
     const std::string& host, std::uint16_t port, std::function<std::string()> provider,
     KvHandler kv_handler, KvWriteHandler kv_write, AdminHandler admin_handler,
-    std::string auth_token, std::size_t io_threads) {
+    std::string auth_token, std::size_t io_threads, TlsOptions tls) {
     auto server = std::unique_ptr<StatusServer>(new StatusServer());  // NOLINT：构造私有
     server->provider_ = std::move(provider);
     server->kv_handler_ = std::move(kv_handler);
     server->kv_write_ = std::move(kv_write);
     server->admin_handler_ = std::move(admin_handler);
     server->auth_token_ = std::move(auth_token);
+    server->tls_opt_ = std::move(tls);
+    // ⑭：证书/私钥在启动时装载——文件缺失/格式错 = 启动失败（错误优于静默明文）
+    if (server->tls_opt_.enabled()) {
+        server->tls_ctx_ = std::make_unique<asio::ssl::context>(
+            asio::ssl::context::tls_server);
+        asio::error_code tls_ec;
+        server->tls_ctx_->use_certificate_chain_file(server->tls_opt_.cert_path, tls_ec);
+        if (tls_ec) {
+            return tinykv::unexpected(InvalidArgument{
+                "证书/私钥加载失败: " + server->tls_opt_.cert_path + ": " + tls_ec.message()});
+        }
+        server->tls_ctx_->use_private_key_file(server->tls_opt_.key_path,
+                                               asio::ssl::context::pem, tls_ec);
+        if (tls_ec) {
+            return tinykv::unexpected(InvalidArgument{
+                "证书/私钥加载失败: " + server->tls_opt_.key_path + ": " + tls_ec.message()});
+        }
+    }
 
     asio::error_code ec;
     const asio::ip::tcp::endpoint endpoint(asio::ip::make_address(host, ec), port);
@@ -235,10 +253,15 @@ StatusServer::~StatusServer() {
 }
 
 void StatusServer::accept_loop() {
+    // ⑭：TLS 模式由 accept_tls 独立承担 accept（握手成功才进帧解析）；明文 = M7 路径逐字节
+    if (tls_ctx_ != nullptr) {
+        accept_tls();
+        return;
+    }
     auto sock = std::make_shared<asio::ip::tcp::socket>(ctx_);
     acceptor_->async_accept(*sock, [this, sock](const asio::error_code& ec) {
         if (!ec) {
-            serve(sock);
+            serve_loop(sock, std::make_shared<FrameReader>());
         }
         if (acceptor_ != nullptr && acceptor_->is_open()) {
             accept_loop();
@@ -246,27 +269,25 @@ void StatusServer::accept_loop() {
     });
 }
 
-void StatusServer::respond(std::shared_ptr<asio::ip::tcp::socket> sock, const std::string& text,
-                           bool keep_alive, std::shared_ptr<FrameReader> reader) {
-    if (!keep_alive) {
-        asio::async_write(*sock, asio::buffer(text), [sock](const asio::error_code&, std::size_t) {
-            asio::error_code ig;
-            sock->shutdown(asio::ip::tcp::socket::shutdown_both, ig);
-            sock->close(ig);
-        });
-        return;
-    }
-    // keep-alive：写完继续用同一个 reader——残余字节（客户端连发）不能丢。
-    // 写失败说明对端已断，直接关连接（对端先走是常态，不记错误）。
-    asio::async_write(*sock, asio::buffer(text),
-                      [this, sock, reader](const asio::error_code& ec, std::size_t) {
-                          if (ec) {
-                              asio::error_code ig;
-                              sock->close(ig);
-                              return;
-                          }
-                          serve_loop(sock, reader);
-                      });
+// ⑭ TLS accept：握手成功才进 serve_loop；失败断连（对端问题，不记业务错误计数）。
+// 握手在 accept 回调链内继续，之后 accept_loop 重启（单点 accept，顺序性不受影响）。
+void StatusServer::accept_tls() {
+    auto stream =
+        std::make_shared<asio::ssl::stream<asio::ip::tcp::socket>>(ctx_, *tls_ctx_);
+    acceptor_->async_accept(stream->next_layer(), [this, stream](const asio::error_code& ec) {
+        if (!ec) {
+            stream->async_handshake(
+                asio::ssl::stream_base::server, [this, stream](const asio::error_code& hec) {
+                    if (!hec) {
+                        serve_loop(stream, std::make_shared<FrameReader>());
+                    }
+                    // 握手失败 = Corrupted{where="tls-handshake"} 语义：直接断连，不回应
+                });
+        }
+        if (acceptor_ != nullptr && acceptor_->is_open()) {
+            accept_loop();
+        }
+    });
 }
 
 std::optional<std::string> StatusServer::handle_get(const RequestLine& line) const {
@@ -358,14 +379,39 @@ std::string StatusServer::dispatch(const std::string& request) {
     }
 }
 
-void StatusServer::serve(std::shared_ptr<asio::ip::tcp::socket> sock) {
-    serve_loop(std::move(sock), std::make_shared<FrameReader>());
+// ---- 连接级处理（⑭ 对传输类型模板化：明文 socket 与 ssl::stream 跑同一套帧解析）----
+
+// 回一段固定文本；keep_alive=true 时不断开，写完后用同一个 reader 继续处理残余帧。
+// 非 keep-alive 写完即 shutdown/close（明文）；TLS 流由 ssl 层 shutdown 处理（close 只关底层）。
+template <typename Stream>
+void StatusServer::respond(std::shared_ptr<Stream> sock, const std::string& text,
+                           bool keep_alive, std::shared_ptr<FrameReader> reader) {
+    if (!keep_alive) {
+        asio::async_write(*sock, asio::buffer(text), [sock](const asio::error_code&, std::size_t) {
+            asio::error_code ig;
+            auto& raw = sock->lowest_layer();
+            raw.shutdown(asio::ip::tcp::socket::shutdown_both, ig);
+            raw.close(ig);
+        });
+        return;
+    }
+    // keep-alive：写完继续用同一个 reader——残余字节（客户端连发）不能丢。
+    // 写失败说明对端已断，直接关连接（对端先走是常态，不记错误）。
+    asio::async_write(*sock, asio::buffer(text),
+                      [this, sock, reader](const asio::error_code& ec, std::size_t) {
+                          if (ec) {
+                              asio::error_code ig;
+                              sock->lowest_layer().close(ig);
+                              return;
+                          }
+                          serve_loop(sock, reader);
+                      });
 }
 
 // 连接级循环：一次只推进一帧。缓冲区里已有完整帧（keep-alive 下客户端可能连发）就直接处理，
 // 否则去读。只有 EOF / 写失败 / Rejected 才退出——一条 TCP 上可跑任意多个请求。
-void StatusServer::serve_loop(std::shared_ptr<asio::ip::tcp::socket> sock,
-                              std::shared_ptr<FrameReader> reader) {
+template <typename Stream>
+void StatusServer::serve_loop(std::shared_ptr<Stream> sock, std::shared_ptr<FrameReader> reader) {
     if (reader->pending_bytes()) {
         const auto state = reader->consume("");
         if (state == FrameReader::State::Rejected) {
@@ -384,8 +430,8 @@ void StatusServer::serve_loop(std::shared_ptr<asio::ip::tcp::socket> sock,
     read_frame(std::move(sock), std::move(reader));
 }
 
-void StatusServer::read_frame(std::shared_ptr<asio::ip::tcp::socket> sock,
-                              std::shared_ptr<FrameReader> reader) {
+template <typename Stream>
+void StatusServer::read_frame(std::shared_ptr<Stream> sock, std::shared_ptr<FrameReader> reader) {
     auto buf = std::make_shared<std::array<char, 4096>>();
     sock->async_read_some(asio::buffer(*buf),
                           [this, sock, reader, buf](const asio::error_code& ec, std::size_t n) {
@@ -409,5 +455,21 @@ void StatusServer::read_frame(std::shared_ptr<asio::ip::tcp::socket> sock,
                               respond(sock, dispatch(frame), keep_alive, reader);
                           });
 }
+
+// 模板只在 .cpp 内实例化（明文 socket 与 ssl::stream 两个 TU 内点），避免头文件膨胀
+template void StatusServer::respond<asio::ip::tcp::socket>(
+    std::shared_ptr<asio::ip::tcp::socket>, const std::string&, bool,
+    std::shared_ptr<FrameReader>);
+template void StatusServer::serve_loop<asio::ip::tcp::socket>(
+    std::shared_ptr<asio::ip::tcp::socket>, std::shared_ptr<FrameReader>);
+template void StatusServer::read_frame<asio::ip::tcp::socket>(
+    std::shared_ptr<asio::ip::tcp::socket>, std::shared_ptr<FrameReader>);
+template void StatusServer::respond<asio::ssl::stream<asio::ip::tcp::socket>>(
+    std::shared_ptr<asio::ssl::stream<asio::ip::tcp::socket>>, const std::string&, bool,
+    std::shared_ptr<FrameReader>);
+template void StatusServer::serve_loop<asio::ssl::stream<asio::ip::tcp::socket>>(
+    std::shared_ptr<asio::ssl::stream<asio::ip::tcp::socket>>, std::shared_ptr<FrameReader>);
+template void StatusServer::read_frame<asio::ssl::stream<asio::ip::tcp::socket>>(
+    std::shared_ptr<asio::ssl::stream<asio::ip::tcp::socket>>, std::shared_ptr<FrameReader>);
 
 }  // namespace tinykv::server

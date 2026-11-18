@@ -37,6 +37,10 @@ struct ServerSection {
     // ⑪ 业务端口 io_context 线程数（SPEC-7 §7.6）：默认 2 保守起步；0 = hardware_concurrency
     // （留给 bench 档）；显式 1 = 回 M7 单线程行为。观测端点恒为独立单线程，不受此项影响。
     std::size_t http_threads{2};
+    // ⑭ TLS（M8-SEC-01）：均空 = 明文 + 强制回环守卫（M7 行为逐字节）；非空 = 业务端口
+    // TLS，两者必须同给（只给一个启动报错，SPEC-7 §7.3.3）。配 TLS 后 token 可选（D7-3）。
+    std::string tls_cert;
+    std::string tls_key;
 };
 
 // txn.* 段（M7 ⑦：跨区事务开关）

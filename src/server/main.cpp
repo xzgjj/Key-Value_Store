@@ -109,6 +109,8 @@ ParsedArgs parse_args(int argc, char** argv) {
     }
     opt.lock_shards = cfg->server.lock_shards;  // ⑨a：分片数（1 = 一把大锁回退档）
     opt.http_threads = cfg->server.http_threads;  // ⑪：业务端口 io_context 线程数（2 = 默认档）
+    opt.tls_cert = cfg->server.tls_cert;          // ⑭：TLS 证书链（空 = 明文）
+    opt.tls_key = cfg->server.tls_key;            // ⑭：TLS 私钥（与 cert 必须同给）
     opt.cross_region_enabled = cfg->txn.cross_region_enabled;
     return true;
 }

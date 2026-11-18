@@ -19,6 +19,7 @@
 #include <vector>
 
 #include <asio.hpp>
+#include <asio/ssl.hpp>
 
 #include "common/error.h"
 
@@ -29,6 +30,15 @@ struct RequestLine {
     std::string method;
     std::string path;
     std::string query;
+};
+
+// ⑭ TLS 传输选项（M8-SEC-01，SPEC-7 §7.2.4）：cert/key 均空 = 明文（M7 行为逐字节）；
+// 两者必须同给（只给一个由组合根拒绝，错误矩阵见 SPEC-7 §7.3.3）。
+// TLS 是传输装饰器：帧解析、鉴权语义、/status 字段全部不变。
+struct TlsOptions {
+    std::string cert_path;  // PEM 证书链；空 = 明文
+    std::string key_path;   // PEM 私钥；空 = 明文
+    [[nodiscard]] bool enabled() const { return !cert_path.empty() || !key_path.empty(); }
 };
 
 class StatusServer {
@@ -51,10 +61,11 @@ public:
     // 为空 = 不鉴权（调用方负责"未鉴权时只绑回环"，见 ServerApp 的强制回环逻辑）
     // io_threads = io_context 并发线程数（M8 ⑪，SPEC-7 §7.2.1）：默认 1 = M7 行为逐字节；
     // >1 时 handler 并发执行——并发安全由组合根的审计清单保证（docs/落实/notes-m8.md §1）。
+    // tls 非空 = accept 层 ssl::stream 握手后进同一套 HTTP 解析（⑭，证书加载失败启动即报错）。
     [[nodiscard]] static result<std::unique_ptr<StatusServer>> start(
         const std::string& host, std::uint16_t port, std::function<std::string()> provider,
         KvHandler kv_handler = {}, KvWriteHandler kv_write = {}, AdminHandler admin_handler = {},
-        std::string auth_token = {}, std::size_t io_threads = 1);
+        std::string auth_token = {}, std::size_t io_threads = 1, TlsOptions tls = {});
 
     [[nodiscard]] std::uint16_t port() const { return bound_port_; }
 
@@ -85,24 +96,28 @@ private:
         [[nodiscard]] bool pending_bytes() const { return !raw.empty(); }
     };
     void accept_loop();
-    void serve(std::shared_ptr<asio::ip::tcp::socket> sock);
-    void read_frame(std::shared_ptr<asio::ip::tcp::socket> sock,
-                    std::shared_ptr<FrameReader> reader);
+    // TLS accept 分支（⑭）：握手成功才进 serve_loop，失败断连（对端问题不记业务错误计数）
+    void accept_tls();
     // BUG-0002: 请求分派的唯一异常屏障——业务处理器抛出的异常到此为止
     [[nodiscard]] std::string dispatch(const std::string& request);
     // ⑦b：GET 分派（status/kv/admin 三路）；nullopt = 404
     [[nodiscard]] std::optional<std::string> handle_get(const RequestLine& line) const;
-    // 回一段固定文本；keep_alive=true 时不断开，写完后用同一个 reader 继续处理残余帧
-    void respond(std::shared_ptr<asio::ip::tcp::socket> sock, const std::string& text,
-                 bool keep_alive, std::shared_ptr<FrameReader> reader);
-    // 连接级循环：读帧 → 分派 → 回写 → 若 keep-alive 则继续（EOF/超时/close 才退出）
-    void serve_loop(std::shared_ptr<asio::ip::tcp::socket> sock,
-                    std::shared_ptr<FrameReader> reader);
+    // 连接级处理对传输类型模板化（⑭）：同一套帧解析跑在明文 socket 与 ssl::stream 上
+    template <typename Stream>
+    void serve_loop(std::shared_ptr<Stream> sock, std::shared_ptr<FrameReader> reader);
+    template <typename Stream>
+    void read_frame(std::shared_ptr<Stream> sock, std::shared_ptr<FrameReader> reader);
+    template <typename Stream>
+    void respond(std::shared_ptr<Stream> sock, const std::string& text, bool keep_alive,
+                 std::shared_ptr<FrameReader> reader);
 
     asio::io_context ctx_{1};
     std::unique_ptr<asio::ip::tcp::acceptor> acceptor_;
     std::unique_ptr<asio::executor_work_guard<asio::io_context::executor_type>> guard_;
     std::vector<std::thread> threads_;  // ⑪：io_context 线程池（1 = M7 单线程行为）
+    // ⑭ TLS：ctx 仅在配置证书时创建；ssl::stream 直持底层 socket 的握手与加解密
+    std::unique_ptr<asio::ssl::context> tls_ctx_;
+    TlsOptions tls_opt_;
     std::uint16_t bound_port_{0};
     std::function<std::string()> provider_;
     KvHandler kv_handler_;

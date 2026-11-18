@@ -5,6 +5,7 @@
     "dependencies": [
         "asio",
         "gtest",
+        "openssl",
         "protobuf",
         "spdlog",
         "unordered_dense"
