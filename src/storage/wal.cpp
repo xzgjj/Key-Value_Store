@@ -196,16 +196,27 @@ void Wal::commit_loop() {
         // 尊重 fsync_on_commit_：关掉时只 fflush（数据进页缓存），不做真 fsync
         std::lock_guard<std::mutex> lock(mu_);
         if (dirty_.load(std::memory_order_acquire)) {
+            // code-review P1-1：后台落盘失败不能只 continue 空转——已向调用方确认的写会永久丢失，
+            // 而错误无人可见。改为粘性失败状态：后续 append 一律返回 IoFailed，由上层停止接客。
             if (std::fflush(file_) != 0) {
+                mark_failed_locked("fflush 失败（后台提交者）");
                 continue;
             }
             if (fsync_on_commit_ && raw_fsync(file_) != 0) {
+                mark_failed_locked("fsync 失败（后台提交者）");
                 continue;
             }
             fsync_count_.fetch_add(1, std::memory_order_relaxed);
             dirty_.store(false, std::memory_order_release);
         }
     }
+}
+
+void Wal::mark_failed_locked(std::string_view reason) {
+    if (!failed_.exchange(true, std::memory_order_acq_rel)) {
+        fail_reason_ = std::string(reason);
+    }
+    dirty_.store(false, std::memory_order_release);   // 停止空转重试（错误已粘住，重试无意义）
 }
 
 result<void> Wal::open_new_segment() {
@@ -356,6 +367,11 @@ result<void> Wal::append(std::span<const Modify> batch) {
     std::lock_guard<std::mutex> lock(mu_);
     if (file_ == nullptr) {
         return std::unexpected(IoFailed{.path = dir_.string(), .reason = "段文件未打开"});
+    }
+    // code-review P1-1：后台提交者已判定落盘失败 → 继续接受写入等于向调用方撒谎
+    if (failed_.load(std::memory_order_acquire)) {
+        return std::unexpected(IoFailed{.path = current_.string(),
+                                        .reason = "WAL 已进入失败态: " + fail_reason_});
     }
     // 仅在段内已有数据时考虑切换：空段上直接写，避免"单条记录超上限"造成段号跳号
     if (current_size_ > 0 && current_size_ + record.size() > segment_bytes_) {

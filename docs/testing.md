@@ -150,6 +150,7 @@ CI 用 `ctest -L unit|simulation|integration|bench` 选择，无需解析本页�
 | tests/unit/raft/raft_log_test.cpp | unit | `raft_log_test` | - | fast |
 | tests/unit/raft/applied_recovery_test.cpp | unit | `applied_recovery_test` | - | fast |
 | tests/unit/storage/engine_compaction_test.cpp | unit | `engine_compaction_test` | - | fast |
+| tests/unit/storage/durability_guard_test.cpp | unit | `durability_guard_test` | - | fast |
 | tests/unit/raft/readindex_path_test.cpp | unit | `readindex_path_test` | - | fast |
 | tests/unit/raft/raft_step_test.cpp | unit | `raft_step_test` | - | fast |
 | tests/unit/raft/raft_kv_test.cpp | unit | `raft_kv_test` | - | fast |

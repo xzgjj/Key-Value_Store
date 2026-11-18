@@ -91,6 +91,12 @@ private:
     explicit RaftLog(Storage& storage) : storage_(storage) {}
 
     [[nodiscard]] result<void> persist_meta();
+    // meta 的持久化表示（"\0lm" + "\0la" 两条 Put），供单独落盘或与条目变更合并成一批
+    [[nodiscard]] static ModifyVec meta_modifies(const Meta& m);
+    // BUG-0014：条目变更与 meta 同批写。成功后才把 meta_ 推进到 next——
+    // 落盘失败时内存仍与盘上一致，不会出现"内存说 last_index=5、盘上只到 3"的幻影状态。
+    [[nodiscard]] result<void> write_with_meta(ModifyVec batch, const Meta& next);
+    [[nodiscard]] static ModifyVec range_modifies(LogIndex lo, LogIndex hi);  // [lo, hi) 的删除项
     [[nodiscard]] result<void> remove_range(LogIndex lo, LogIndex hi);  // 删 [lo, hi]
 
     Storage& storage_;

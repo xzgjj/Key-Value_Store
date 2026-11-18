@@ -5,8 +5,17 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
+#include <filesystem>
 #include <memory>
+#include <system_error>
 #include <utility>
+
+#ifdef _WIN32
+#include <io.h>     // _commit / _fileno（落盘原语，与 wal.cpp 同口径）
+#else
+#include <unistd.h>   // fdatasync / fileno
+#endif
 
 #include "common/crc32c.h"
 #include "common/varint.h"
@@ -146,15 +155,32 @@ result<void> SstWriter::finish() {
         crc32c(std::as_bytes(std::span{body_.data(), body_len}));
     put_u32(body_, count_);
     put_u32(body_, body_crc);
-    std::FILE* f = std::fopen(path_.string().c_str(), "wb");
+    // BUG-0012：先写临时名 → fsync → 改名为正式名。旧实现直接写正式名且只 fflush，
+    // 短写会留下半截 .sst；清单缺失时引擎按目录扫描会把半截表当合法表加载 → Corrupted 启动失败。
+    const auto tmp = path_.string() + ".tmp";
+    std::FILE* f = std::fopen(tmp.c_str(), "wb");
     if (f == nullptr) {
-        return std::unexpected(IoFailed{.path = path_.string(), .reason = "fopen(wb) 失败"});
+        return std::unexpected(IoFailed{.path = tmp, .reason = "fopen(wb) 失败"});
     }
     const std::size_t written = std::fwrite(body_.data(), 1, body_.size(), f);
-    std::fflush(f);
+    const bool flushed = std::fflush(f) == 0;
+#ifdef _WIN32
+    const bool synced = flushed && _commit(_fileno(f)) == 0;
+#else
+    const bool synced = flushed && ::fdatasync(::fileno(f)) == 0;
+#endif
     std::fclose(f);
-    if (written != body_.size()) {
-        return std::unexpected(IoFailed{.path = path_.string(), .reason = "fwrite 失败"});
+    if (written != body_.size() || !synced) {
+        std::error_code ignored;
+        std::filesystem::remove(tmp, ignored);   // 失败即删，不留半截文件
+        return std::unexpected(IoFailed{.path = tmp, .reason = "写 SST 失败（短写或落盘失败）"});
+    }
+    std::error_code ec;
+    std::filesystem::rename(tmp, path_, ec);
+    if (ec) {
+        std::error_code ignored;
+        std::filesystem::remove(tmp, ignored);
+        return std::unexpected(IoFailed{.path = path_.string(), .reason = "SST 改名失败: " + ec.message()});
     }
     finished_ = true;
     return {};

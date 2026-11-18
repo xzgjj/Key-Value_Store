@@ -120,7 +120,11 @@ public:
         if (!ri.has_value()) {
             return std::unexpected(ri.error());
         }
-        auto victims = p.mvcc().locks_of(primary, lock_start_ts);
+        auto found = p.mvcc().locks_of(primary, lock_start_ts);
+        if (!found.has_value()) {
+            return std::unexpected(found.error());   // 扫描失败/超上限：不静默遗留锁
+        }
+        std::vector<std::string> victims = std::move(*found);
         if (victims.empty()) {
             return std::size_t{0};
         }

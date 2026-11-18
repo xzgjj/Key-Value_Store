@@ -70,6 +70,9 @@ private:
     // 保证快照不可变；无 Reader 时零拷贝直接原地写。
     [[nodiscard]] MemTable& mutable_mem_locked();
     [[nodiscard]] result<void> flush_locked();
+    // 换段：关旧段 → 清空目录 → 打开新段。失败时尽力恢复，绝不留下空 WAL 指针（code-review P0-5）
+    [[nodiscard]] result<void> rotate_wal_locked();
+    [[nodiscard]] result<void> reopen_wal_locked();
     [[nodiscard]] result<void> compact_ssts_locked();
     [[nodiscard]] result<std::vector<std::string>> load_manifest() const;
     [[nodiscard]] result<void> write_manifest(const std::vector<std::string>& names) const;

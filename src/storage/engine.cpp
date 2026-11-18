@@ -281,10 +281,20 @@ result<void> Engine::write_manifest(const std::vector<std::string>& names) const
         for (const auto& n : names) {
             out << n << '\n';
         }
+        out.flush();
+        if (!out.good()) {
+            return std::unexpected(IoFailed{.path = tmp.string(), .reason = "清单写入失败（磁盘满？）"});
+        }
     }
+    // BUG-0012：先删后改名会在中间留一个"清单不存在"的窗口（此前注释称 Windows 必须如此）。
+    // 正确做法是先尝试原子改名（POSIX 覆盖语义），只有平台拒绝覆盖时才回退到"先删后改名"。
     std::error_code ec;
-    std::filesystem::remove(dst, ec);   // Windows 上 rename 不覆盖已存在文件
     std::filesystem::rename(tmp, dst, ec);
+    if (ec) {
+        std::error_code ignored;
+        std::filesystem::remove(dst, ignored);
+        std::filesystem::rename(tmp, dst, ec);
+    }
     if (ec) {
         return std::unexpected(IoFailed{.path = dst.string(), .reason = "rename 清单失败: " + ec.message()});
     }
@@ -402,6 +412,12 @@ result<void> Engine::write(std::span<const Modify> batch) {
     if (closed_) {
         return std::unexpected(IoFailed{.path = opt_.dir.string(), .reason = "引擎已关闭"});
     }
+    // code-review P0-5 第二道防线：flush 的换段窗口里 WAL 可能暂时为空（磁盘满/文件被占用）。
+    // 没有这一行，一次失败的 flush 之后每次写都会解引用空指针，进程直接崩。
+    if (wal_ == nullptr) {
+        return std::unexpected(IoFailed{.path = opt_.dir.string(),
+                                        .reason = "WAL 不可用（上次换段失败，需重开引擎）"});
+    }
     // 先落 WAL 再改内存表：WAL 失败时内存表未被污染（REL-02）
     if (auto r = wal_->append(batch); !r) {
         return r;
@@ -454,23 +470,42 @@ result<void> Engine::flush_locked() {
 
     // 清单已落盘 → 内存数据不再需要 WAL 重放，可清段；随后换新内存表与新段
     // 顺序要求：必须先关闭段文件句柄再删除——Windows 不允许删除仍被打开的文件
-    wal_.reset();
-    if (auto r = Wal::clear_all(wal_dir_); !r) {
+    // code-review P0-5：任何一步失败都不许留下 wal_ == nullptr 的状态；失败后要么重开成功，
+    // 要么明确标记（write() 的判空兜底），绝不让下一次写入解引用空指针。
+    if (auto r = rotate_wal_locked(); !r) {
         return r;
     }
-    auto wal = Wal::open(WalOptions{.dir = wal_dir_,
-                                    .fsync_on_commit = opt_.fsync_on_commit,
-                                    .segment_bytes = opt_.wal_segment_bytes});
-    if (!wal) {
-        return std::unexpected(wal.error());
-    }
-    wal_ = std::move(*wal);
     mem_ = std::make_shared<MemTable>();
 
     // 表数过阈值即合并：清单已落盘、WAL 已清段，合并失败只留下"表偏多"的可恢复状态
     if (opt_.sst_compact_threshold != 0 && ssts_.size() >= opt_.sst_compact_threshold) {
         return compact_ssts_locked();
     }
+    return {};
+}
+
+// 换段：先关旧段（Windows 不允许删打开的文件）→ 清空目录 → 打开新段。
+// code-review P0-5：旧实现先 `wal_.reset()` 再 clear_all/Wal::open，任一步失败就留下空指针，
+// 下一次 write 直接解引用崩溃。这里把"失败也要可用"作为契约：清段失败时尝试重开，
+// 重开也失败则置空并由 write() 的判空兜底返回 IoFailed（可恢复：重开引擎）。
+result<void> Engine::rotate_wal_locked() {
+    wal_.reset();
+    if (auto r = Wal::clear_all(wal_dir_); !r) {
+        (void)reopen_wal_locked();   // 尽力恢复；失败则留给 write() 的判空兜底
+        return r;
+    }
+    return reopen_wal_locked();
+}
+
+result<void> Engine::reopen_wal_locked() {
+    auto wal = Wal::open(WalOptions{.dir = wal_dir_,
+                                    .fsync_on_commit = opt_.fsync_on_commit,
+                                    .segment_bytes = opt_.wal_segment_bytes});
+    if (!wal) {
+        wal_ = nullptr;
+        return std::unexpected(wal.error());
+    }
+    wal_ = std::move(*wal);
     return {};
 }
 

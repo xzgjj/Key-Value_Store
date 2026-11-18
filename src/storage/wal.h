@@ -28,6 +28,7 @@
 #include <mutex>
 #include <span>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -83,6 +84,8 @@ private:
 
     [[nodiscard]] result<void> open_new_segment();
     [[nodiscard]] result<void> sync_locked();   // 持 mu_ 时调用：强制 fflush+fsync 当前段
+    // 后台提交者落盘失败 → 粘住错误（后续 append 一律 IoFailed），不再空转重试（code-review P1-1）
+    void mark_failed_locked(std::string_view reason);
     void commit_loop();                         // 后台提交者：窗口内合并 fsync
 
     std::filesystem::path dir_;
@@ -101,6 +104,8 @@ private:
     std::atomic<bool> stop_{false};
     std::atomic<bool> dirty_{false};
     std::atomic<std::uint64_t> fsync_count_{0};
+    std::atomic<bool> failed_{false};   // 粘性失败：落盘链路已不可信（code-review P1-1）
+    std::string fail_reason_;           // 受 mu_ 保护
 };
 
 }  // namespace tinykv

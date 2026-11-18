@@ -78,24 +78,39 @@ result<std::unique_ptr<RaftLog>> RaftLog::open(Storage& storage) {
     return log;
 }
 
-result<void> RaftLog::persist_meta() {
+ModifyVec RaftLog::meta_modifies(const Meta& m) {
     std::string buf;
     buf.reserve(kMetaBytes);
-    put_u64(buf, meta_.first_index);
-    put_u64(buf, meta_.last_index);
-    put_u64(buf, meta_.committed);
-    put_u64(buf, meta_.term);
-    put_u64(buf, meta_.vote);
-    put_u64(buf, meta_.dummy_term);
+    put_u64(buf, m.first_index);
+    put_u64(buf, m.last_index);
+    put_u64(buf, m.committed);
+    put_u64(buf, m.term);
+    put_u64(buf, m.vote);
+    put_u64(buf, m.dummy_term);
     std::string applied_buf;
     applied_buf.reserve(8);
-    put_u64(applied_buf, meta_.applied);
+    put_u64(applied_buf, m.applied);
     // 两条 Put 同批：快照重置位点与 meta 一起落盘，避免"meta 已改、applied 还是旧值"的窗口
-    ModifyVec batch{Modify{Put{.cf = Cf::Default, .key = meta_key(), .value = std::move(buf)}},
-                    Modify{Put{.cf = Cf::Default,
-                               .key = applied_key(),
-                               .value = std::move(applied_buf)}}};
-    return storage_.write(batch);
+    return ModifyVec{Modify{Put{.cf = Cf::Default, .key = meta_key(), .value = std::move(buf)}},
+                     Modify{Put{.cf = Cf::Default,
+                                .key = applied_key(),
+                                .value = std::move(applied_buf)}}};
+}
+
+result<void> RaftLog::persist_meta() { return storage_.write(meta_modifies(meta_)); }
+
+// BUG-0014：条目变更与 meta 必须同一批落盘。引擎的 write 是原子的，分两次写会留下
+// "条目已删、last_index/first_index 还是旧值"的崩溃窗口——重启后 at(last_index) 失败，
+// 恢复路径直接起不来。
+result<void> RaftLog::write_with_meta(ModifyVec batch, const Meta& next) {
+    auto meta_batch = meta_modifies(next);
+    batch.insert(batch.end(), std::make_move_iterator(meta_batch.begin()),
+                 std::make_move_iterator(meta_batch.end()));
+    if (auto r = storage_.write(batch); !r) {
+        return r;   // 失败：meta_ 未动（只在成功后提交），内存与盘上仍一致
+    }
+    meta_ = next;
+    return {};
 }
 
 result<void> RaftLog::set_applied(LogIndex idx) {
@@ -188,23 +203,28 @@ result<void> RaftLog::append(std::span<const Entry> entries) {
                                    .value = std::move(serialized)}});
         ++expected;
     }
-    if (auto r = storage_.write(batch); !r) {
-        return r;
+    Meta next = meta_;
+    next.last_index = expected - 1;
+    return write_with_meta(std::move(batch), next);
+}
+
+ModifyVec RaftLog::range_modifies(LogIndex lo, LogIndex hi) {
+    ModifyVec batch;
+    if (lo.value >= hi.value) {
+        return batch;
     }
-    meta_.last_index = expected - 1;
-    return persist_meta();
+    batch.reserve(static_cast<std::size_t>(hi.value - lo.value));
+    for (std::uint64_t i = lo.value; i < hi.value; ++i) {
+        batch.push_back(Modify{Delete{.cf = Cf::Default, .key = entry_key(i)}});
+    }
+    return batch;
 }
 
 result<void> RaftLog::remove_range(LogIndex lo, LogIndex hi) {
     if (lo.value >= hi.value) {
         return {};
     }
-    ModifyVec batch;
-    batch.reserve(static_cast<std::size_t>(hi.value - lo.value));
-    for (std::uint64_t i = lo.value; i < hi.value; ++i) {
-        batch.push_back(Modify{Delete{.cf = Cf::Default, .key = entry_key(i)}});
-    }
-    return storage_.write(batch);
+    return storage_.write(range_modifies(lo, hi));
 }
 
 result<void> RaftLog::truncate_from(LogIndex idx) {
@@ -216,11 +236,10 @@ result<void> RaftLog::truncate_from(LogIndex idx) {
     if (idx.value > meta_.last_index) {
         return {};   // 无事可做
     }
-    if (auto r = remove_range(idx, LogIndex{meta_.last_index + 1}); !r) {
-        return r;
-    }
-    meta_.last_index = idx.value - 1;
-    return persist_meta();
+    auto deletes = range_modifies(idx, LogIndex{meta_.last_index + 1});
+    Meta next = meta_;
+    next.last_index = idx.value - 1;
+    return write_with_meta(std::move(deletes), next);
 }
 
 result<void> RaftLog::compact(LogIndex upto) {
@@ -235,12 +254,11 @@ result<void> RaftLog::compact(LogIndex upto) {
     if (!last_compacted) {
         return std::unexpected(last_compacted.error());
     }
-    if (auto r = remove_range(LogIndex{meta_.first_index}, LogIndex{upto.value + 1}); !r) {
-        return r;
-    }
-    meta_.dummy_term = last_compacted->term();
-    meta_.first_index = upto.value + 1;
-    return persist_meta();
+    auto deletes = range_modifies(LogIndex{meta_.first_index}, LogIndex{upto.value + 1});
+    Meta next = meta_;
+    next.dummy_term = last_compacted->term();
+    next.first_index = upto.value + 1;
+    return write_with_meta(std::move(deletes), next);
 }
 
 result<void> RaftLog::set_committed(LogIndex idx) {
@@ -255,16 +273,15 @@ result<void> RaftLog::reset_snapshot(LogIndex index, Term term) {
     if (index.value < meta_.first_index - 1) {
         return std::unexpected(InvalidArgument{"快照位点早于已知起点，拒绝回退"});
     }
-    if (auto r = remove_range(LogIndex{meta_.first_index}, LogIndex{meta_.last_index + 1}); !r) {
-        return r;
-    }
-    meta_.first_index = index.value + 1;
-    meta_.last_index = index.value;
-    meta_.committed = index.value;
-    meta_.dummy_term = term.value;
+    auto deletes = range_modifies(LogIndex{meta_.first_index}, LogIndex{meta_.last_index + 1});
+    Meta next = meta_;
+    next.first_index = index.value + 1;
+    next.last_index = index.value;
+    next.committed = index.value;
+    next.dummy_term = term.value;
     // 快照覆盖到 index：旧日志已不可用，applied 必须同批前移，否则重启会从 0 重放已压缩条目
-    meta_.applied = index.value;
-    return persist_meta();
+    next.applied = index.value;
+    return write_with_meta(std::move(deletes), next);
 }
 
 result<void> RaftLog::set_hard_state(Term term, std::optional<PeerId> vote) {
