@@ -98,7 +98,7 @@ SID=$(./build/win-debug/src/cli/tinykv-cli --endpoint 127.0.0.1:3380 txn begin |
 ```
 
 退出码是契约的一部分（0 成功 / 1 用法错误 / 2 运行错误 / 3 key 不存在），脚本化调用只依赖它，  
-不要解析输出文本。完整子命令、参数与配置加载规则见 [docs/cli.md](docs/cli.md)。
+不要解析输出文本。
 
 ### 3.4 组件嵌入
 

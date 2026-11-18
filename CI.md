@@ -1,6 +1,6 @@
 # CI.md — TinyKV-CI 操作手册
 
-> 规则定义见 [SPEC.md](SPEC.md) 与 [ci/rules.toml](ci/rules.toml)；本文只讲怎么跑、怎么读结果、失败后做什么。
+> 规则定义见 [ci/rules.toml](ci/rules.toml)；本文只讲怎么跑、怎么读结果、失败后做什么。
 > 所有脚本仅用 Python 3.11+ 标准库，Windows / Linux 通用，不依赖构建产物。
 
 ## 1. 常用命令

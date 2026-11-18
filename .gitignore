@@ -13,9 +13,10 @@ notes.txt
 # 规则镜像与设计思路文档：本地维护、不入库不上传（CI 检查器按其逻辑运行，不依赖这两份文件存在）。
 SPEC.md
 TinyKV-CPP-设计思路与需求.md
-# docs/ 全目录：本地维护，不入库不上传（用户决定，2026-11-18）。CI 检查器按磁盘文件运行，
-# 不依赖 git 跟踪状态；文档变更不再进 diff/scope 统计。
-docs/
+# docs/：只允许上传测试登记表 docs/testing.md；其余文档本地维护，不入库不上传
+# （用户决定，2026-11-18）。其余文档变更不进 diff/scope 统计。
+docs/*
+!docs/testing.md
 
 # ===== 日志（日志只在根 log/，spdlog 轮转）=====
 log/
