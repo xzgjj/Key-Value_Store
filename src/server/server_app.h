@@ -29,6 +29,7 @@
 #include <utility>
 
 #include <cstdint>
+#include "raftstore/meta_store.h"
 #include "server/http_helpers.h"
 #include "server/interceptor.h"
 #include "server/peer_registry.h"
@@ -56,6 +57,9 @@ struct ServerOptions {
     // REL-02 开关：生产装配走配置（默认 true）。false 只允许出现在基准对比里——
     // 掉电会丢已向客户端确认的写，也会丢已提交的 Raft 日志（破坏 State Machine Safety）。
     bool fsync_on_commit{true};
+    // ⑩ 安全边界（M7-SEC-01/02）：非空 = 所有 HTTP 请求必须带 Authorization: Bearer <token>；
+    // 为空 = 不鉴权，此时强制绑回环（D6-3：默认关 + 启动告警 + 强制回环）。
+    std::string auth_token;
 
     // ---- Raft 传输层（M7 ⑤：单机 KV → 分布式 store 的分水岭） ----
     // voters 为空 = 单节点模式（不创建 Transport，保持既有行为）；非空 = 多副本组。
@@ -178,17 +182,34 @@ public:
 private:
     [[nodiscard]] bool multi_voter() const { return opt_.voters.size() > 1; }
 
+    // 回环判定：未鉴权时唯一允许的监听面（含 IPv6 回环与 localhost 别名）
+    [[nodiscard]] static bool is_loopback(std::string_view host) {
+        return host == "127.0.0.1" || host == "::1" || host == "localhost";
+    }
+
     // 存储面装配：region 元数据 → 传输层 → region/peer 注册表 → bootstrap → 选举。
     // 抽出来是因为 start() 单函数别超过 80 行（CI 静态门禁），且这三段的失败回滚语义不同。
     [[nodiscard]] result<void> mount_storage_locked() {
-        raftstore::Region region{.id = RegionId{1},
-                                 .start_key = "",
-                                 .end_key = "",
-                                 .peers = {},
-                                 .epoch = {1, 0},
-                                 .size_hint = 0};
-        if (!meta_.add_region(region).has_value()) {
-            return tinykv::unexpected(InvalidArgument{"region 1 注册失败"});
+        // ⑧ 元数据持久化（SPEC-6 / M7-REL-02）：先读盘上的路由真相，再决定建哪些 peer。
+        // 没有 meta = 首次启动 → 建 region 1 并落盘；有 meta → 按它恢复（split 过的拓扑不再回退）。
+        meta_store_ = std::make_unique<raftstore::StoreMetaStore>(opt_.data_dir, meta_);
+        auto has_meta = meta_store_->load();
+        if (!has_meta.has_value()) {
+            return tinykv::unexpected(has_meta.error());
+        }
+        if (!*has_meta) {
+            raftstore::Region region{.id = RegionId{1},
+                                     .start_key = "",
+                                     .end_key = "",
+                                     .peers = {},
+                                     .epoch = {1, 0},
+                                     .size_hint = 0};
+            if (!meta_.add_region(region).has_value()) {
+                return tinykv::unexpected(InvalidArgument{"region 1 注册失败"});
+            }
+            if (auto r = meta_store_->persist(); !r.has_value()) {
+                return r;
+            }
         }
         if (auto r = start_transport_locked(); !r.has_value()) {
             return r;
@@ -203,13 +224,24 @@ private:
                 auto res = registry_->on_split(l, r);
                 if (!res.has_value()) {
                     split_error_ = std::string(tinykv::describe_kind(res.error()));
+                } else if (meta_store_ != nullptr) {
+                    // ⑧：拓扑变了就落盘。失败不阻断 apply（数据已切分），但必须可见——
+                    // 否则下次重启会少一个 region，表现为"右半数据没人在管"。
+                    if (auto saved = meta_store_->persist(); !saved.has_value()) {
+                        split_error_ = std::string(tinykv::describe_kind(saved.error()));
+                    }
                 }
                 ++split_events_;
             });
         });
-        if (auto r = registry_->bootstrap(region); !r.has_value()) {
-            return tinykv::unexpected(r.error());
+        std::uint64_t max_region_id = 0;
+        for (const auto& region : meta_.all_regions()) {
+            if (auto r = registry_->bootstrap(region); !r.has_value()) {
+                return tinykv::unexpected(r.error());
+            }
+            max_region_id = std::max(max_region_id, region.id.value);
         }
+        next_region_id_.store(max_region_id);  // 新 region id 接着盘上最大值，避免复用
         // 单节点组可立即 tick 成 leader（无网络依赖）；多副本必须靠消息交换选主，
         // 这里只把日志基线建好，选举交给后台 Worker 的 pump 驱动。
         if (!multi_voter()) {
@@ -278,6 +310,12 @@ private:
 
     // 业务 HTTP 端点 + 独立观测端点。观测端点 try_lock 快照，业务泵持闸时返回上一份。
     [[nodiscard]] result<void> start_http_locked() {
+        // ⑩ D6-3：未配置 token 时不许对外监听。这里直接改写 host 为回环并把事实记进 /status，
+        // 而不是"只告警"——告警会被忽略，绑定面不会。
+        if (opt_.auth_token.empty() && !is_loopback(opt_.host)) {
+            auth_forced_loopback_ = true;
+            opt_.host = "127.0.0.1";
+        }
         auto started = StatusServer::start(
             opt_.host, opt_.status_port, [this] { return status_json(); },
             [this](const std::string& q) {
@@ -290,7 +328,8 @@ private:
             [this](const std::string& m, const std::string& p, const std::string& q,
                    const std::string& b) {
                 return intercepted(m, p, "", [&] { return admin(m, p, q, b); });
-            });
+            },
+            opt_.auth_token);
         if (!started.has_value()) {
             return tinykv::unexpected(started.error());
         }
@@ -303,7 +342,8 @@ private:
         auto observed = StatusServer::start(
             opt_.host, opt_.observe_port, [this] { return status_snapshot(); }, {}, {},
             [this](const std::string& m, const std::string& p, const std::string& q,
-                   const std::string& b) { return observe_admin(m, p, q, b); });
+                   const std::string& b) { return observe_admin(m, p, q, b); },
+            opt_.auth_token);
         if (!observed.has_value()) {
             status_.reset();
             return tinykv::unexpected(observed.error());
@@ -695,6 +735,9 @@ private:
                ",\"apply_errors\":" + std::to_string(apply_errors) +
                ",\"txn_errors\":" + std::to_string(txn_errors) + ",\"last_apply_error\":\"" +
                http::escape(last_error) + "\"" + ",\"now_ms\":" + std::to_string(now_ms_.load()) +
+               ",\"auth\":" + (opt_.auth_token.empty() ? "false" : "true") + ",\"bind\":\"" +
+               http::escape(opt_.host) + "\"" +
+               (!opt_.auth_token.empty() || is_loopback(opt_.host) ? "" : ",\"warn\":\"未鉴权\"") +
                ",\"replica_id\":" + std::to_string(opt_.replica_id.value) +
                ",\"voters\":" + std::to_string(opt_.voters.size()) +
                ",\"leader\":" + (is_leader() ? "true" : "false") +
@@ -735,6 +778,7 @@ private:
     std::unique_ptr<RegionPeerRegistry> registry_;
     std::unique_ptr<raftstore::TcpTransport> transport_;  // 多副本传输层（单节点为 nullptr）
     raftstore::StoreMeta meta_;
+    std::unique_ptr<raftstore::StoreMetaStore> meta_store_;  // ⑧ 路由真相仓储（start 时装配）
     // 物理基线 TSO（生产语义）+ Checked 装饰器（红线 6：非严格递增即拒绝服务）。
     // 声明顺序即构造顺序：装饰器引用前者，故前者先声明。
     tso::MonotonicTsProvider tso_{true};
@@ -756,6 +800,7 @@ private:
     InterceptorChain interceptors_;
     MetricsInterceptor* metrics_{nullptr};  // 拥有权在 interceptors_ 链中
     TraceInterceptor* trace_{nullptr};      // 拥有权在 interceptors_ 链中
+    bool auth_forced_loopback_{false};      // 未鉴权被强制绑回环（启动告警的事实来源）
     bool running_{false};
 
 public:

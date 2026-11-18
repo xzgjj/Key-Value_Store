@@ -142,6 +142,7 @@ CI 用 `ctest -L unit|simulation|integration|bench` 选择，无需解析本页�
 | tests/unit/raftstore/region_route_test.cpp | unit | `region_route_test` | - | fast |
 | tests/unit/raftstore/split_test.cpp | unit | `split_test` | - | fast |
 | tests/unit/raftstore/snapshot_chunk_test.cpp | unit | `snapshot_chunk_test` | - | fast |
+| tests/unit/raftstore/meta_store_test.cpp | unit | `meta_store_test` | - | fast |
 | tests/unit/storage/engine_get_put_test.cpp | unit | `engine_get_put_test` | - | fast |
 | tests/unit/storage/engine_scan_test.cpp | unit | `engine_scan_test` | - | fast |
 | tests/unit/storage/engine_cf_test.cpp | unit | `engine_cf_test` | - | fast |
@@ -185,8 +186,11 @@ CI 用 `ctest -L unit|simulation|integration|bench` 选择，无需解析本页�
 | tests/unit/server/peer_registry_test.cpp | unit | `peer_registry_test` | - | fast |
 | tests/unit/server/http_frame_test.cpp | unit | `http_frame_test` | - | fast |
 | tests/unit/server/multi_replica_test.cpp | unit | `multi_replica_test` | - | fast |
+| tests/unit/server/lock_registry_test.cpp | unit | `lock_registry_test` | - | fast |
+| tests/unit/server/auth_test.cpp | unit | `auth_test` | - | fast |
 | tests/unit/txn/gc_test.cpp | unit | `gc_test` | - | fast |
 | tests/integration/snapshot_test.cpp | integration | `snapshot_test` | - | nightly |
+| tests/integration/split_meta_persistence_test.cpp | integration | `split_meta_persistence_test` | - | nightly |
 | tests/integration/crash_recovery_test.cpp | integration | `crash_recovery_test` | - | nightly |
 | tests/bench/cluster_bench_test.cpp | bench | `cluster_bench` | - | nightly |
 | tests/bench/tcp_perf_bench_test.cpp | bench | `tcp_perf_bench` | - | nightly |

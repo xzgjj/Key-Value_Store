@@ -43,14 +43,15 @@ public:
     //   GET  /regions / /region / /region/peers / /scheduler/status（query 携带 id）
     //   POST /region/split、/trace（body 为制表符文本，与 /kv 同风格）
     // 返回空串 = 404（region 不存在 / 端点未装配）。
-    using AdminHandler = std::function<std::string(const std::string& method,
-                                                   const std::string& path,
-                                                   const std::string& query,
-                                                   const std::string& body)>;
+    using AdminHandler =
+        std::function<std::string(const std::string& method, const std::string& path,
+                                  const std::string& query, const std::string& body)>;
+    // auth_token 非空 = 所有请求必须带 `Authorization: Bearer <token>`（⑩ M7-SEC-01）；
+    // 为空 = 不鉴权（调用方负责"未鉴权时只绑回环"，见 ServerApp 的强制回环逻辑）
     [[nodiscard]] static result<std::unique_ptr<StatusServer>> start(
         const std::string& host, std::uint16_t port, std::function<std::string()> provider,
-        KvHandler kv_handler = {}, KvWriteHandler kv_write = {},
-        AdminHandler admin_handler = {});
+        KvHandler kv_handler = {}, KvWriteHandler kv_write = {}, AdminHandler admin_handler = {},
+        std::string auth_token = {});
 
     [[nodiscard]] std::uint16_t port() const { return bound_port_; }
 
@@ -62,13 +63,23 @@ public:
 
 private:
     StatusServer() = default;
-    // BUG-0002/P0-2：逐块累积到"头结束 + Content-Length 字节体"齐全再分派
+    // BUG-0002/P0-2：逐块累积到"头结束 + Content-Length 字节体"齐全再分派。
+    // keep-alive（M7）：同一条连接上可连续解析多个请求——取走一帧后残余字节留给下一次，
+    // 这是"每请求新建 TCP"被消掉的关键（串行与并发的差距主要来自建连）。
     struct FrameReader {
         enum class State { More, Done, Rejected };
         std::string raw;
         std::size_t header_end{0};
         std::size_t body_need{0};
         [[nodiscard]] State consume(std::string_view chunk);
+        // 取走已完整的一帧并从缓冲区移除；无完整帧返回空串
+        [[nodiscard]] std::string take_frame();
+        // 复位解析状态（保留残余字节，供同一连接上的下一个请求）
+        void reset_for_next() {
+            header_end = 0;
+            body_need = 0;
+        }
+        [[nodiscard]] bool pending_bytes() const { return !raw.empty(); }
     };
     void accept_loop();
     void serve(std::shared_ptr<asio::ip::tcp::socket> sock);
@@ -78,8 +89,12 @@ private:
     [[nodiscard]] std::string dispatch(const std::string& request);
     // ⑦b：GET 分派（status/kv/admin 三路）；nullopt = 404
     [[nodiscard]] std::optional<std::string> handle_get(const RequestLine& line) const;
-    // 回一段固定文本并断开（三个 serve 路径共用的收尾）
-    static void respond(std::shared_ptr<asio::ip::tcp::socket> sock, const std::string& text);
+    // 回一段固定文本；keep_alive=true 时不断开，写完后用同一个 reader 继续处理残余帧
+    void respond(std::shared_ptr<asio::ip::tcp::socket> sock, const std::string& text,
+                 bool keep_alive, std::shared_ptr<FrameReader> reader);
+    // 连接级循环：读帧 → 分派 → 回写 → 若 keep-alive 则继续（EOF/超时/close 才退出）
+    void serve_loop(std::shared_ptr<asio::ip::tcp::socket> sock,
+                    std::shared_ptr<FrameReader> reader);
 
     asio::io_context ctx_{1};
     std::unique_ptr<asio::ip::tcp::acceptor> acceptor_;
@@ -90,6 +105,7 @@ private:
     KvHandler kv_handler_;
     KvWriteHandler kv_write_;
     AdminHandler admin_handler_;
+    std::string auth_token_;  // 空 = 鉴权关闭
 };
 
 }  // namespace tinykv::server

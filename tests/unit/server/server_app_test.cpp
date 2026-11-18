@@ -9,8 +9,8 @@
 //   (d) GC 端点：/txn/gc 走共识返回 OK；
 //   (e) /status 暴露可观测点（worker_cycles 增长、sessions 计数）。
 
-#include "cli/cli.h"
 #include "server/server_app.h"
+#include "cli/cli.h"
 
 #include <gtest/gtest.h>
 
@@ -23,7 +23,7 @@
 
 namespace {
 
-using namespace tinykv::testlib;   // NOLINT(google-build-using-namespace)
+using namespace tinykv::testlib;  // NOLINT(google-build-using-namespace)
 using tinykv::server::ServerApp;
 using tinykv::server::ServerOptions;
 
@@ -55,9 +55,11 @@ int cli_at(const std::string& endpoint, const std::vector<std::string>& args,
 
 struct DaemonFixture {
     TempDir tmp{"tinykv_daemon"};
-    ServerApp app{ServerOptions{.data_dir = tmp.path() / "db", .status_port = 0,
+    ServerApp app{ServerOptions{.data_dir = tmp.path() / "db",
+                                .status_port = 0,
                                 .worker_interval = std::chrono::milliseconds(2),
-                                .log_sink = {}}};
+                                .log_sink = {},
+                                .auth_token = {}}};
     std::string endpoint;
 
     DaemonFixture() {
@@ -96,8 +98,7 @@ TEST(ServerAppTest, StartsStopsAndServesStatus) {
         std::string b;
         (void)f.cli({"status"}, &b);
         const auto at = b.find("\"worker_cycles\":");
-        return at != std::string::npos &&
-               std::stoull(b.substr(at + 16)) > 0;
+        return at != std::string::npos && std::stoull(b.substr(at + 16)) > 0;
     })) << "Worker 未驱动泵循环";
 }
 
@@ -184,9 +185,11 @@ TEST(ServerAppTest, GcEndpointRunsThroughRaft) {
 TEST(ServerAppTest, InterceptorCountsRequestsAndLogSinkReceives) {
     std::vector<std::string> lines;
     TempDir tmp{"tinykv_daemon_intercept"};
-    ServerApp app(ServerOptions{.data_dir = tmp.path() / "db", .status_port = 0,
+    ServerApp app(ServerOptions{.data_dir = tmp.path() / "db",
+                                .status_port = 0,
                                 .worker_interval = std::chrono::milliseconds(2),
-                                .log_sink = [&](const std::string& l) { lines.push_back(l); }});
+                                .log_sink = [&](const std::string& l) { lines.push_back(l); },
+                                .auth_token = {}});
     ASSERT_TRUE(app.start().has_value());
     const std::string endpoint = "127.0.0.1:" + std::to_string(app.status_port());
     const std::vector<std::string> args{"--endpoint", endpoint, "put", "ik", "iv"};
@@ -262,15 +265,17 @@ TEST(ServerAppTest, RestartWithoutPendingEntriesKeepsReadable) {
     const auto data_dir = tmp.path() / "db";
     std::uint16_t port = 0;
     {
-        ServerApp app(ServerOptions{.data_dir = data_dir, .status_port = 0,
+        ServerApp app(ServerOptions{.data_dir = data_dir,
+                                    .status_port = 0,
                                     .worker_interval = std::chrono::milliseconds(2),
-                                    .log_sink = {}});
+                                    .log_sink = {},
+                                    .auth_token = {}});
         ASSERT_TRUE(app.start().has_value());
         port = app.status_port();
         ASSERT_GT(port, 0);
         const std::string endpoint = "127.0.0.1:" + std::to_string(port);
-        for (const auto& args : std::vector<std::vector<std::string>>{
-                 {"put", "rk1", "rv1"}, {"put", "rk2", "rv2"}}) {
+        for (const auto& args :
+             std::vector<std::vector<std::string>>{{"put", "rk1", "rv1"}, {"put", "rk2", "rv2"}}) {
             std::vector<std::string> full{"--endpoint", endpoint};
             full.insert(full.end(), args.begin(), args.end());
             std::ostringstream out;
@@ -280,9 +285,11 @@ TEST(ServerAppTest, RestartWithoutPendingEntriesKeepsReadable) {
         ASSERT_TRUE(app.stop().has_value());
     }
     // 重启：读写分离——先只读，不写任何东西
-    ServerApp app(ServerOptions{.data_dir = data_dir, .status_port = 0,
+    ServerApp app(ServerOptions{.data_dir = data_dir,
+                                .status_port = 0,
                                 .worker_interval = std::chrono::milliseconds(2),
-                                .log_sink = {}});
+                                .log_sink = {},
+                                .auth_token = {}});
     ASSERT_TRUE(app.start().has_value());
     const std::string endpoint = "127.0.0.1:" + std::to_string(app.status_port());
     std::ostringstream out;
@@ -302,9 +309,11 @@ TEST(ServerAppTest, TsoResumesAboveExistingCommitTsAfterRestart) {
     TempDir tmp{"tinykv_tso_restart"};
     const auto data_dir = tmp.path() / "db";
     {
-        ServerApp app(ServerOptions{.data_dir = data_dir, .status_port = 0,
+        ServerApp app(ServerOptions{.data_dir = data_dir,
+                                    .status_port = 0,
                                     .worker_interval = std::chrono::milliseconds(2),
-                                    .log_sink = {}});
+                                    .log_sink = {},
+                                    .auth_token = {}});
         ASSERT_TRUE(app.start().has_value());
         const std::string endpoint = "127.0.0.1:" + std::to_string(app.status_port());
         // begin 拿 session
@@ -331,9 +340,11 @@ TEST(ServerAppTest, TsoResumesAboveExistingCommitTsAfterRestart) {
         ASSERT_TRUE(app.stop().has_value());
     }
     // 重启：新事务必须看到重启前提交的数据
-    ServerApp restarted(ServerOptions{.data_dir = data_dir, .status_port = 0,
+    ServerApp restarted(ServerOptions{.data_dir = data_dir,
+                                      .status_port = 0,
                                       .worker_interval = std::chrono::milliseconds(2),
-                                      .log_sink = {}});
+                                      .log_sink = {},
+                                      .auth_token = {}});
     ASSERT_TRUE(restarted.start().has_value());
     const std::string endpoint = "127.0.0.1:" + std::to_string(restarted.status_port());
     std::string begin2_text;
@@ -357,14 +368,16 @@ TEST(ServerAppTest, TsoResumesAboveExistingCommitTsAfterRestart) {
 
 TEST(ServerAppTest, StopIsIdempotentAndPortGoesDown) {
     TempDir tmp{"tinykv_daemon_stop"};
-    ServerApp app(ServerOptions{.data_dir = tmp.path() / "db", .status_port = 0,
+    ServerApp app(ServerOptions{.data_dir = tmp.path() / "db",
+                                .status_port = 0,
                                 .worker_interval = std::chrono::milliseconds(2),
-                                        .log_sink = {}});
+                                .log_sink = {},
+                                .auth_token = {}});
     ASSERT_TRUE(app.start().has_value());
     const auto port = app.status_port();
     ASSERT_GT(port, 0);
     ASSERT_TRUE(app.stop().has_value());
-    EXPECT_TRUE(app.stop().has_value());   // 幂等
+    EXPECT_TRUE(app.stop().has_value());  // 幂等
     // 端口已下线：CLI 访问应失败（非 0 退出码）
     std::ostringstream out;
     std::ostringstream err;

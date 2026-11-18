@@ -9,8 +9,9 @@
 
 #include <atomic>
 #include <chrono>
-#include <csignal>
 #include <condition_variable>
+#include <csignal>
+#include <cstdio>
 #include <iostream>
 #include <mutex>
 #include <optional>
@@ -28,7 +29,7 @@ std::condition_variable g_cv;
 
 void on_signal(int) {
     g_stop.store(true);
-    g_cv.notify_all();   // 唤醒主循环（cv 是进程内安全的通知路径）
+    g_cv.notify_all();  // 唤醒主循环（cv 是进程内安全的通知路径）
 }
 
 }  // namespace
@@ -98,12 +99,25 @@ ParsedArgs parse_args(int argc, char** argv) {
         opt.data_dir = cfg->engine.dir;
     }
     opt.fsync_on_commit = cfg->engine.fsync_on_commit;
+    // ⑩ 安全边界：token 为空即不鉴权（此时 ServerApp 会强制绑回环并把它写进 /status），
+    // host 只在配置里显式给出时覆盖（命令行/默认 127.0.0.1 优先）
+    if (!cfg->server.auth_token.empty()) {
+        opt.auth_token = cfg->server.auth_token;
+    }
+    if (!cfg->server.host.empty() && cfg->server.host != "127.0.0.1") {
+        opt.host = cfg->server.host;
+    }
     return true;
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
+    // stdout 默认全缓冲：重定向到日志文件时，"就绪"行会在缓冲区里躺到进程退出才出现，
+    // 脚本化部署只能轮询端口（M7 验证清单里的第 3 条）。行缓冲 + 每行 flush 让
+    // "tinykv-server 就绪: ..." 一写出就落盘，启动脚本可以正儿八经地等这一行。
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);
+
     auto parsed = parse_args(argc, argv);
     if (parsed.help) {
         print_usage();
@@ -118,7 +132,7 @@ int main(int argc, char** argv) {
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
 
-    const auto host = opt.host;   // opt 随即 move 进 app，日志保留实际监听地址
+    const auto host = opt.host;  // opt 随即 move 进 app，日志保留实际监听地址
     tinykv::server::ServerApp app(std::move(opt));
     auto started = app.start();
     if (!started.has_value()) {
@@ -126,7 +140,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::cout << "tinykv-server 就绪: status=" << host << ':' << app.status_port()
-              << " observe=" << host << ':' << app.observe_port() << "\n";
+              << " observe=" << host << ':' << app.observe_port() << std::endl;  // 立即 flush
 
     // 主循环：每秒唤醒推进注入时钟，收到信号才退出（ENG-04 禁 sleep_for，用 cv::wait_for）。
     // 时钟推进是 TTL 锁决议与 GC 安全点在真实进程里可自愈的前提（P1 修复）。
@@ -136,16 +150,16 @@ int main(int argc, char** argv) {
             g_cv.wait_for(lock, std::chrono::seconds(1), [] { return g_stop.load(); });
             if (!g_stop.load()) {
                 app.advance_clock(1000);
-                app.sweep_sessions();   // 空闲会话回收：GC 安全点不被僵尸会话钉死
+                app.sweep_sessions();  // 空闲会话回收：GC 安全点不被僵尸会话钉死
             }
         }
     }
-    std::cout << "收到停止信号，优雅关闭中…\n";
+    std::cout << "收到停止信号，优雅关闭中…" << std::endl;
     auto stopped = app.stop();
     if (!stopped.has_value()) {
         std::cerr << "关闭异常: " << tinykv::describe_kind(stopped.error()) << "\n";
         return 1;
     }
-    std::cout << "已退出。\n";
+    std::cout << "已退出。" << std::endl;
     return 0;
 }

@@ -11,3 +11,7 @@ engine:
 log:
   level: info                 # trace/debug/info/warn/err/critical
   dir: log                    # spdlog 轮转目录（单文件 10MB，保留 5 个）
+
+server:
+  host: 127.0.0.1             # 监听地址；未配置 auth_token 时服务端强制改回环（M7-SEC-02）
+  auth_token: ""              # 空 = 不鉴权（启动即在 /status 标 "auth":false）；非空 = 必须带 Authorization: Bearer <token>

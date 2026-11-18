@@ -1,23 +1,20 @@
 {
-  "task": "拓宽适用性：C++17/20/23 三档共用一份源码（compat 桥接层）+ clang++ 第二编译器 + 格式基线与 clang-format 22.1.8 对齐",
+  "task": "SPEC-6 M7 落地（第一批）：⑧Region 元数据持久化 + ⑨a 锁分片原语 + ⑩ 鉴权与强制回环；并修三个已验证的运维问题（HTTP keep-alive、请求体格式未文档化、就绪行不落盘）",
   "paths": [
-    "src/",
+    "src/raftstore/",
+    "src/server/",
+    "src/config/",
     "tests/",
-    "examples/",
-    "proto/CMakeLists.txt",
-    "CMakeLists.txt",
-    "CMakePresets.json",
-    ".github/workflows/ci.yml",
-    "docs/testing.md",
-    "tools/ci/check_code.py",
+    "docs/",
+    "demo.yaml",
     "ci/task_scope.json"
   ],
-  "reason": "用户要求默认 C++23、用 #if 兜底 C++17 以拓宽支持面，并验证多编译器可过。落地方式是把 std::expected/span/unexpected/as_bytes/starts_with/unreachable/atomic<shared_ptr> 收敛到 src/common/compat.h，上层只写 tinykv:: 前缀的等价物；三档 + 两编译器实测均 67/67。同批把仓库整体格式与 clang-format 22.1.8 对齐——此前约 50 个文件存在格式违规（HEAD 即可复现），格式化门禁一直是假绿。 另修 tools/ci/check_code.py 的重复代码检测：#include 行不参与判定——clang-format 把项目内 include 归成连续块后，`#include \"x\"` 规范化完全同形，正常的分块风格会被自我匹配成重复（本次一跑就报了 4 处假阳性）。规则资产的这次改动是收紧误报、不放松任何阈值。",
+  "reason": "SPEC-6 §6.1 把 ⑧ 列为 M7 第一优先：路由不持久化就上 2PC，未决事务会被解析到错误分区。⑨a 与 ⑩ 按 ARCH-3 W4 可与主序列并行。三个运维问题是用户点出的验证发现：HTTP 每请求新建连接、/kv 的制表符请求体只有源码里有、stdout 全缓冲导致就绪行不落盘。⑨c（拆组合根）按 SPEC-6 §6.7 属持续项、不设完成判定，本批不动。",
   "bugfix": false,
   "fixes": [],
   "overflow_approved": true,
   "behavior_change_approved": false,
-  "rule_asset_approved": true,
-  "behavior_change_note": "①默认标准不变（23），新增 TINYKV_CXX_STANDARD=20/17 两档；②17 档关闭 -Wpedantic（指定初始化器是编译器扩展，开着等于不能编译）；③src/common/compat.h 提供 17 档的 expected/span/starts_with/unreachable/atomic<shared_ptr> 替代；④新增 compat_test 断言兼容层语义；⑤新增 6 个 preset（win/linux × cxx17/cxx20、win/linux clang23）与 CI 兼容矩阵 job；⑥全仓 clang-format 对齐（纯格式）。",
-  "approver": "用户（2026-11-18：'提高规划下提高项目适用性 测试多个编译器能通过和c++版本 c++23和c++20的内容最好利用#if 有17来实现对应功能版本也能兼容（默认还是23，17是用来拓宽支持和兜底的）'）"
+  "rule_asset_approved": false,
+  "behavior_change_note": "①新增 data_dir/meta/regions.pb（+ .bak）保存路由真相，split 后重启不再回退单 region；②HTTP 默认 keep-alive（HTTP/1.1 且未声明 close 时不断开），支持流水线；③tinykv-server 新增 --config，可配 engine.*/server.host/server.auth_token；④未配 auth_token 时强制绑回环并在 /status 标 auth:false；⑤配 token 后所有请求校验 Authorization: Bearer，失败 401 且不回显凭据；⑥stdout 改行缓冲 + 就绪行立即 flush；⑦新增锁分片原语 LockRegistry（默认未接线，shards=1 等价改造前）。",
+  "approver": "用户（2026-11-18：落地最新 SPEC 的 M7 部分与验证发现的 P0，并处理三个问题：HTTP 单线程+无 keep-alive／请求体格式未文档化／stdout 全缓冲）"
 }

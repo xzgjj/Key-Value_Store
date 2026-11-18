@@ -7,11 +7,12 @@
 
 // 先包含 server_app.h：它内部的 peer_txn.h 引用 proto 的 Mutation::DELETE，
 // 若 asio（Windows SDK）先入场会把 DELETE 宏展开，故顺序不可颠倒。
-#include "server/server_app.h"
 #include "cli/http_client.h"
+#include "server/server_app.h"
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <chrono>
 #include <string>
 #include <vector>
@@ -26,9 +27,11 @@ using tinykv::testlib::TempDir;
 
 struct HttpFixture {
     TempDir tmp{"tinykv_http_frame"};
-    ServerApp app{ServerOptions{.data_dir = tmp.path() / "db", .status_port = 0,
+    ServerApp app{ServerOptions{.data_dir = tmp.path() / "db",
+                                .status_port = 0,
                                 .worker_interval = std::chrono::milliseconds(2),
-                                .log_sink = {}}};
+                                .log_sink = {},
+                                .auth_token = {}}};
 
     HttpFixture() {
         auto started = app.start();
@@ -97,7 +100,7 @@ TEST(HttpFrameTest, IdleSessionsAndRepliesAreReclaimed) {
     ASSERT_TRUE(busy.has_value());
     EXPECT_NE(busy->find("\"sessions\":1"), std::string::npos);
 
-    f.app.advance_clock(31'000);   // 超过 30s 空闲线
+    f.app.advance_clock(31'000);  // 超过 30s 空闲线
     f.app.sweep_sessions();
     const auto swept = f.get("/status");
     ASSERT_TRUE(swept.has_value());
@@ -159,8 +162,7 @@ TEST(HttpFrameTest, ObserveEndpointIsIndependentAndReportsApplyErrors) {
         if (updated.has_value()) {
             last_status = *updated;
         }
-        saw_update = updated.has_value() &&
-                     updated->find("\"kv_writes\":1") != std::string::npos &&
+        saw_update = updated.has_value() && updated->find("\"kv_writes\":1") != std::string::npos &&
                      updated->find("\"read_index_reads\":1") != std::string::npos;
     }
     EXPECT_TRUE(saw_update) << "观测端点应最終看到业务写入: " << last_status;
@@ -187,6 +189,46 @@ TEST(HttpFrameTest, ControlCharsInValueProduceValidJson) {
     EXPECT_NE(body->find("\\n"), std::string::npos) << *body;
     EXPECT_NE(body->find("\\\""), std::string::npos) << *body;
     EXPECT_NE(body->find("line1"), std::string::npos) << "值必须能读回: " << *body;
+}
+
+// M7 验证清单第 1 条：同一条 TCP 上连续多个请求必须都得到响应（keep-alive）。
+// 旧实现每请求新建连接并在响应后 close，"串行 vs 并发"的差距主要来自建连开销；
+// 这里用裸 socket 在一个连接上连发两条请求（pipeline），断言收到两条 200。
+TEST(HttpFrameTest, KeepsConnectionAliveAcrossMultipleRequests) {
+    HttpFixture f;
+    asio::io_context ctx;
+    asio::ip::tcp::socket sock(ctx);
+    asio::error_code ec;
+    sock.connect({asio::ip::make_address("127.0.0.1"), f.app.status_port()}, ec);
+    ASSERT_FALSE(ec) << "连接失败: " << ec.message();
+
+    const std::string request = "GET /status HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+    asio::write(sock, asio::buffer(request + request), ec);  // 两条一起发：pipeline
+    ASSERT_FALSE(ec) << ec.message();
+
+    std::string raw;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    std::array<char, 4096> buf{};
+    auto count_responses = [](const std::string& text) {
+        std::size_t n = 0;
+        for (std::size_t at = text.find("HTTP/1.1 200"); at != std::string::npos;
+             at = text.find("HTTP/1.1 200", at + 1)) {
+            ++n;
+        }
+        return n;
+    };
+    while (count_responses(raw) < 2 && std::chrono::steady_clock::now() < deadline) {
+        const std::size_t n = sock.read_some(asio::buffer(buf), ec);
+        if (ec) {
+            break;
+        }
+        raw.append(buf.data(), n);
+    }
+    EXPECT_EQ(count_responses(raw), 2U) << "同一连接上的第二个请求没有响应（未启用 keep-alive）";
+    EXPECT_NE(raw.find("Connection: keep-alive"), std::string::npos)
+        << "响应未声明 keep-alive: " << raw.substr(0, 120);
+    // 服务端在 HTTP/1.1 + 无 Connection: close 时不得主动断开（否则第二条无从谈起）
+    EXPECT_FALSE(ec) << "连接被提前关闭: " << ec.message();
 }
 
 }  // namespace

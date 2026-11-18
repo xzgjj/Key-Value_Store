@@ -10,6 +10,7 @@
 // 先包含 server_app.h：peer_txn.h 引用 proto 的 Mutation::DELETE，
 // 若 asio（Windows SDK）先入场会把 DELETE 宏展开，顺序不可颠倒。
 #include "server/server_app.h"
+
 #include "cli/http_client.h"
 
 #include <gtest/gtest.h>
@@ -62,6 +63,7 @@ public:
                 .heartbeat = 3,
                 .worker_interval = std::chrono::milliseconds(5),
                 .log_sink = {},
+                .auth_token = {},
                 .replica_id = voters[static_cast<std::size_t>(i)],
                 .voters = voters,
                 .raft_port = 0,
@@ -77,7 +79,8 @@ public:
         // 端口由系统分配：全部启动后互告，形成完整路由表
         std::map<std::uint64_t, std::uint16_t> ports;
         for (int i = 0; i < kNodes; ++i) {
-            ports[static_cast<std::uint64_t>(i + 1)] = apps_[static_cast<std::size_t>(i)]->raft_port();
+            ports[static_cast<std::uint64_t>(i + 1)] =
+                apps_[static_cast<std::size_t>(i)]->raft_port();
         }
         for (auto& app : apps_) {
             app->set_raft_peers(ports);
@@ -86,7 +89,7 @@ public:
 
     ~MultiReplicaCluster() {
         for (auto& app : apps_) {
-            (void)app->stop();   // 逆序无关：每个 app 独立线程，stop 内部各自 join
+            (void)app->stop();  // 逆序无关：每个 app 独立线程，stop 内部各自 join
         }
     }
 
@@ -101,8 +104,8 @@ public:
 
     // 从指定副本的 /status 抽取数值字段（HTTP 线程读，不持 peer_mu_）
     [[nodiscard]] std::uint64_t status_number(int idx, const std::string& field) const {
-        const auto json = tinykv::cli::http_get("127.0.0.1", apps_[static_cast<std::size_t>(idx)]->status_port(),
-                                                "/status");
+        const auto json = tinykv::cli::http_get(
+            "127.0.0.1", apps_[static_cast<std::size_t>(idx)]->status_port(), "/status");
         if (!json.has_value()) {
             return 0;
         }
@@ -158,8 +161,8 @@ TEST(MultiReplicaTest, ElectsLeaderAndReplicatesWrite) {
         << "写入未在 20s 内复制到全部副本";
 
     // 从 leader 读（ReadIndex + applied 追平）；follower 读转发是后续项，此处不测
-    const auto got = tinykv::cli::http_get("127.0.0.1", cluster.status_port(leader),
-                                           "/kv?key=repl-key");
+    const auto got =
+        tinykv::cli::http_get("127.0.0.1", cluster.status_port(leader), "/kv?key=repl-key");
     ASSERT_TRUE(got.has_value());
     EXPECT_EQ(*got, "{\"found\":true,\"value\":\"repl-value\"}");
 
@@ -172,8 +175,8 @@ TEST(MultiReplicaTest, ElectsLeaderAndReplicatesWrite) {
 TEST(MultiReplicaTest, SplitIsRejectedWithMultiVoter) {
     MultiReplicaCluster cluster;
     ASSERT_TRUE(wait_until([&] { return cluster.leader_index() >= 0; }));
-    const auto split = tinykv::cli::http_post("127.0.0.1", cluster.status_port(cluster.leader_index()),
-                                              "/region/split", "split\t1\tm");
+    const auto split = tinykv::cli::http_post(
+        "127.0.0.1", cluster.status_port(cluster.leader_index()), "/region/split", "split\t1\tm");
     ASSERT_TRUE(split.has_value());
     // raftpb::Message 只带 to=PeerId，无 region_id：多 region×多 voter 会路由歧义。
     // 明确拒绝优于造出不可路由的 peer；单节点 split 由 http_frame_test 覆盖。

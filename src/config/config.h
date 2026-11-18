@@ -29,9 +29,16 @@ struct LogSection {
     std::string dir{"log"};
 };
 
+// server.* 段（M7 ⑩：安全边界与监听面）
+struct ServerSection {
+    std::string host{"127.0.0.1"};  // 未启用鉴权时强制回环（见 docs/cli.md 安全一节）
+    std::string auth_token;         // 空 = 不鉴权（启动告警 + 强制绑回环）
+};
+
 struct Config {
     EngineSection engine;
     LogSection log;
+    ServerSection server;
 };
 
 // 加载配置；文件不存在或语法不支持均返回 InvalidArgument/IoFailed，不使用默认值掩盖错误

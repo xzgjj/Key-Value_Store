@@ -87,6 +87,17 @@ result<void> apply_key(Config& cfg, const std::string& section, const std::strin
         }
         return bad("engine 段未知键 '" + key + "'");
     }
+    if (section == "server") {
+        if (key == "host") {
+            cfg.server.host = unquote(value);
+            return result<void>{};
+        }
+        if (key == "auth_token") {
+            cfg.server.auth_token = unquote(value);
+            return result<void>{};
+        }
+        return bad("server 段未知键 '" + key + "'");
+    }
     if (section == "log") {
         if (key == "level") {
             cfg.log.level = unquote(value);

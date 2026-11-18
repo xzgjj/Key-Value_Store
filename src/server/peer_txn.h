@@ -23,6 +23,13 @@
 
 namespace tinykv::server {
 
+// proto 枚举里的 DELETE 与 Windows SDK 的 DELETE 宏同名（winnt.h，经 asio/网页头引入）。
+// 在宏处于展开状态时写 `kvpb::Mutation::DELETE` 会被换成 `kvpb::Mutation::0x00010000L`，
+// 报错信息还离现场很远。这里按数值引用一次，彻底绕开宏——proto/kv.proto 已把 Op 固定为
+// PUT=0 / DELETE=1，数值是契约的一部分（改枚举值等于改线上格式，本就在禁改清单里）。
+inline constexpr kvpb::Mutation::Op kMutationDelete =
+    static_cast<kvpb::Mutation::Op>(1);
+
 class PeerTxnExecutor : public tinykv::txn::TxnExecutor {  // 非 final：测试适配器派生注入收敛策略
 public:
     using PeerRef = std::function<tinykv::raftstore::Peer&(std::string_view key)>;
@@ -73,7 +80,7 @@ public:
         for (const auto& m : mutations) {
             auto* one = req.add_mutations();
             one->set_op(m.op == tinykv::txn::Mutation::Op::kPut ? kvpb::Mutation::PUT
-                                                                : kvpb::Mutation::DELETE);
+                                                                : kMutationDelete);
             one->set_key(m.key);
             one->set_value(m.value);
         }

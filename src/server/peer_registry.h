@@ -65,9 +65,11 @@ public:
 
     void set_observer_factory(ObserverFactory fn) { observer_factory_ = std::move(fn); }
 
-    // 建初始 slot：region 1 独占全空间（用 data_dir 根，兼容既有单 region 数据布局）
+    // 建 slot：region 1 独占全空间时用 data_dir 根（兼容 M1 起的单 region 数据布局），
+    // 其余 region 用 data_dir/regions/<id>。meta 恢复时逐个 region 走这里（⑧）。
     [[nodiscard]] result<void> bootstrap(const raftstore::Region& region) {
-        auto eng = Engine::open({.dir = data_dir_, .fsync_on_commit = fsync_on_commit_});
+        auto eng =
+            Engine::open({.dir = engine_dir_for(region.id), .fsync_on_commit = fsync_on_commit_});
         if (!eng.has_value()) {
             return tinykv::unexpected(eng.error());
         }
@@ -83,6 +85,15 @@ public:
         (*peer)->set_store_meta(&meta_);
         install(region, std::move(*eng), std::move(*peer));
         return {};
+    }
+
+    // region 的数据目录：region 1 沿用根目录（M1 布局），子 region 各自 regions/<id>。
+    // 双布局并存是既有事实（ARCH-3 §4.4 已记录），迁移属 format 变更，不在本波次做。
+    [[nodiscard]] std::filesystem::path engine_dir_for(RegionId id) const {
+        if (id.value == 1) {
+            return data_dir_;
+        }
+        return data_dir_ / "regions" / std::to_string(id.value);
     }
 
     // 按 key 找覆盖它的 region 对应的 Peer（route = StoreMeta 区间索引 + 本表 id 索引）
@@ -144,8 +155,8 @@ public:
         if (old_slot == nullptr) {
             return tinykv::unexpected(InvalidArgument{"split 宿主 slot 不存在"});
         }
-        auto eng = Engine::open({.dir = data_dir_ / "regions" / std::to_string(right.id.value),
-                                 .fsync_on_commit = fsync_on_commit_});
+        auto eng =
+            Engine::open({.dir = engine_dir_for(right.id), .fsync_on_commit = fsync_on_commit_});
         if (!eng.has_value()) {
             return tinykv::unexpected(eng.error());
         }

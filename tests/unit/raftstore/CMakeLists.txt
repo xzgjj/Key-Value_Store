@@ -4,3 +4,4 @@
 add_tinykv_test(region_route_test SRCS region_route_test.cpp LIBS tinykv_raftstore)
 add_tinykv_test(split_test SRCS split_test.cpp LIBS tinykv_raftstore)
 add_tinykv_test(snapshot_chunk_test SRCS snapshot_chunk_test.cpp LIBS tinykv_raftstore)
+add_tinykv_test(meta_store_test SRCS meta_store_test.cpp LIBS tinykv_raftstore LEVEL unit)

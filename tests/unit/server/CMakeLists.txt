@@ -8,3 +8,5 @@ add_tinykv_test(interceptor_test SRCS interceptor_test.cpp LIBS tinykv_server LE
 add_tinykv_test(peer_registry_test SRCS peer_registry_test.cpp LIBS tinykv_server LEVEL unit)
 add_tinykv_test(http_frame_test SRCS http_frame_test.cpp LIBS tinykv_server tinykv_cli LEVEL unit)
 add_tinykv_test(multi_replica_test SRCS multi_replica_test.cpp LIBS tinykv_server tinykv_cli LEVEL unit)
+add_tinykv_test(lock_registry_test SRCS lock_registry_test.cpp LIBS tinykv_server LEVEL unit)
+add_tinykv_test(auth_test SRCS auth_test.cpp LIBS tinykv_server tinykv_cli LEVEL unit)

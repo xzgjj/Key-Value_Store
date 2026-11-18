@@ -6,7 +6,7 @@ if(NOT TINYKV_ASIO_INCLUDE_DIR)
     message(FATAL_ERROR "未找到 asio.hpp（本机 MSYS2: pacman -S asio；CI: apt install libasio-dev）")
 endif()
 
-add_library(tinykv_raftstore STATIC peer.cpp tcp_transport.cpp)
+add_library(tinykv_raftstore STATIC peer.cpp tcp_transport.cpp meta_store.cpp)
 target_include_directories(tinykv_raftstore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_include_directories(tinykv_raftstore PUBLIC ${TINYKV_ASIO_INCLUDE_DIR})
 target_link_libraries(tinykv_raftstore PUBLIC tinykv_raft tinykv_storage tinykv_proto tinykv_txn)
