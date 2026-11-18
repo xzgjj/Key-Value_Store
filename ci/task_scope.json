@@ -1,15 +1,24 @@
 {
-  "task": "M7 后构建收口：CMakePresets 移除 17/20/clang23 专用档（只留默认 23 档 + vcpkg 两档）+ clean.py build 预算 2500→2800MB",
+  "task": "M8 ⑪ HTTP 并发（SPEC-7 §7.1 ⑪）：io_context 线程池 + 审计 #15 split_error_ 补锁 + http_concurrency_test + 吞吐对照 bench",
   "paths": [
-    "CMakePresets.json",
-    "scripts/clean.py",
+    "src/config/config.h",
+    "src/config/config.cpp",
+    "src/server/status_server.h",
+    "src/server/status_server.cpp",
+    "src/server/server_app.h",
+    "src/server/main.cpp",
+    "tests/unit/server/http_concurrency_test.cpp",
+    "tests/unit/server/CMakeLists.txt",
+    "tests/bench/region_concurrency_bench_test.cpp",
+    "demo.yaml",
+    "README.md",
     "ci/task_scope.json"
   ],
-  "reason": "另一构建会话的实测教训落地：多档 preset 长期不跑会漂移，矩阵构建树累积曾把 build 推到 13GB（clean.py 口径注明）。兼容验证收敛到 verify_matrix.py 按需触发、测完即删（docs/testing.md §9a 同步更新，docs 本地维护不入库）。用户 2026-11-18 拍板：最终只留 23 档和必要部分。",
+  "reason": "⑪-0 并发安全审计（notes-m8.md §1）通过后开闸：StatusServer::start 尾部默认参数 io_threads（调用方零改动）、ServerOptions/config 新增 http_threads（默认 2，行为变更已批）、观测端点维持单线程。审计发现的 split_error_ 竞争（apply 可能发生在分区闸泵路径）补专用锁。吞吐对照（io=4/M7 基线 ≥1）随 bench 留 evidence。",
   "bugfix": false,
   "fixes": [],
   "overflow_approved": false,
-  "behavior_change_approved": false,
-  "behavior_change_note": "",
-  "approver": "用户（2026-11-18：预设收口与预算调整随 M7 收口提交分支 6）"
+  "behavior_change_approved": true,
+  "behavior_change_note": "http_threads 默认 1→2（并发度变更，D7-1）；用户 2026-11-18 按 SPEC-7 §7.3.2 批准。显式配 1 即回 M7 单线程行为。",
+  "approver": "用户（2026-11-18：契约变更与 D7-1~D7-7 全部按建议执行）"
 }

@@ -73,6 +73,11 @@ struct ServerOptions {
     // 所属桶（同区串行、跨区并行），跨区操作锁全部桶；1 = 一把大锁（改造前行为）。
     // 多副本模式强制退化为 1：泵路径触碰全部 peer + transport，分片收益为零。
     std::size_t lock_shards{16};
+    // ⑪ HTTP 并发（M8-PERF-01，SPEC-7 §7.6 `server.http_threads`）：业务端口 io_context
+    // 线程数。默认 2 是行为变更（并发度 1→2，用户 2026-11-18 已批）；显式 1 = 回 M7 行为；
+    // 0 = hardware_concurrency（bench 档）。handler 并发安全以 ⑪-0 审计清单为前提
+    // （docs/落实/notes-m8.md §1，红线 1：未审计的 handler 不许进线程池）。
+    std::size_t http_threads{2};
 
     // ---- Raft 传输层（M7 ⑤：单机 KV → 分布式 store 的分水岭） ----
     // voters 为空 = 单节点模式（不创建 Transport，保持既有行为）；非空 = 多副本组。
@@ -288,11 +293,13 @@ private:
             peer.set_split_observer([this](const raftstore::Region& l, const raftstore::Region& r) {
                 auto res = registry_->on_split(l, r);
                 if (!res.has_value()) {
+                    const std::lock_guard lock(split_error_mu_);  // ⑪ 审计 #15：apply 可能发生在分区闸泵路径
                     split_error_ = std::string(tinykv::describe_kind(res.error()));
                 } else if (meta_store_ != nullptr) {
                     // ⑧：拓扑变了就落盘。失败不阻断 apply（数据已切分），但必须可见——
                     // 否则下次重启会少一个 region，表现为"右半数据没人在管"。
                     if (auto saved = meta_store_->persist(); !saved.has_value()) {
+                        const std::lock_guard lock(split_error_mu_);
                         split_error_ = std::string(tinykv::describe_kind(saved.error()));
                     }
                 }
@@ -402,7 +409,8 @@ private:
                    const std::string& b) {
                 return intercepted(m, p, "", [&] { return admin(m, p, q, b); });
             },
-            opt_.auth_token);
+            opt_.auth_token,
+            opt_.http_threads);  // ⑪：业务端口进线程池（审计清单前置，notes-m8.md §1）
         if (!started.has_value()) {
             return tinykv::unexpected(started.error());
         }
@@ -720,7 +728,12 @@ private:
         }
         peer->drop_reply(kSplitClient, expect);  // admin 回执不消费，必须显式回收
         next_region_id_.fetch_add(1);
-        return split_error_.empty() ? "OK split" : "ERR " + split_error_;
+        std::string err;
+        {
+            const std::lock_guard lock(split_error_mu_);  // ⑪ 审计 #15：与 apply 路径的写入互斥
+            err = split_error_;
+        }
+        return err.empty() ? "OK split" : "ERR " + err;
     }
 
     // 会话写缓冲（set/del）：显式分支而非嵌套三元——三元链在这里既难读也会把
@@ -984,7 +997,8 @@ private:
     std::atomic<std::uint64_t> txn_ops_{0};
     std::atomic<std::uint64_t> split_events_{0};
     std::atomic<std::uint64_t> next_region_id_{1};  // 下一个 split 新 region id（CAS 前置）
-    std::string split_error_;                       // observer 里迁移失败的回执（split 线程写）
+    mutable std::mutex split_error_mu_;  // ⑪ 审计 #15：写入在 apply 路径（可能仅持分区闸），读在 admin_split
+    std::string split_error_;            // observer 里迁移失败的回执（split 线程写）
     InterceptorChain interceptors_;
     MetricsInterceptor* metrics_{nullptr};  // 拥有权在 interceptors_ 链中
     TraceInterceptor* trace_{nullptr};      // 拥有权在 interceptors_ 链中

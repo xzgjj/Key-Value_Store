@@ -16,6 +16,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 #include <asio.hpp>
 
@@ -48,10 +49,12 @@ public:
                                   const std::string& query, const std::string& body)>;
     // auth_token 非空 = 所有请求必须带 `Authorization: Bearer <token>`（⑩ M7-SEC-01）；
     // 为空 = 不鉴权（调用方负责"未鉴权时只绑回环"，见 ServerApp 的强制回环逻辑）
+    // io_threads = io_context 并发线程数（M8 ⑪，SPEC-7 §7.2.1）：默认 1 = M7 行为逐字节；
+    // >1 时 handler 并发执行——并发安全由组合根的审计清单保证（docs/落实/notes-m8.md §1）。
     [[nodiscard]] static result<std::unique_ptr<StatusServer>> start(
         const std::string& host, std::uint16_t port, std::function<std::string()> provider,
         KvHandler kv_handler = {}, KvWriteHandler kv_write = {}, AdminHandler admin_handler = {},
-        std::string auth_token = {});
+        std::string auth_token = {}, std::size_t io_threads = 1);
 
     [[nodiscard]] std::uint16_t port() const { return bound_port_; }
 
@@ -99,7 +102,7 @@ private:
     asio::io_context ctx_{1};
     std::unique_ptr<asio::ip::tcp::acceptor> acceptor_;
     std::unique_ptr<asio::executor_work_guard<asio::io_context::executor_type>> guard_;
-    std::thread thread_;
+    std::vector<std::thread> threads_;  // ⑪：io_context 线程池（1 = M7 单线程行为）
     std::uint16_t bound_port_{0};
     std::function<std::string()> provider_;
     KvHandler kv_handler_;

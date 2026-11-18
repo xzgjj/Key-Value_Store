@@ -16,6 +16,7 @@ server:
   host: 127.0.0.1             # 监听地址；未配置 auth_token 时服务端强制改回环（M7-SEC-02）
   auth_token: ""              # 空 = 不鉴权（启动即在 /status 标 "auth":false）；非空 = 必须带 Authorization: Bearer <token>
   lock_shards: 16             # ⑨a 锁分片：>1 且单节点时同区串行/跨区并行；1 = 一把大锁（改造前行为）；多副本模式强制 1
+  http_threads: 2             # ⑪ 业务端口 io_context 线程数：默认 2（跨区吞吐随线程数提升）；1 = 单线程（M7 行为）；0 = 按 CPU 数（bench 档）；观测端口恒为独立单线程
 
 txn:
   cross_region_enabled: true  # 跨区事务协调器（M7 ⑦，已转正）。开=按 region 分组两阶段提交；关=跨区写入明确拒绝

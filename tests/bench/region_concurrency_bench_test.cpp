@@ -64,24 +64,36 @@ BenchResult run_bench(ServerApp& app, int threads, int ops, bool spread) {
                        .same_region_ops_per_sec = total / secs};
 }
 
-// 8 线程 × 40 条，两档分片 × 跨区/同区两组，输出全部数字供 evidence 归档
+// M8 ⑪ 扩展（SPEC-7 红线 2：收益必须对照证明）：M7 基线（shards=1 单线程）+ 分片 ×
+// http_threads {1,2,4} 四档。threads=1 与 M7 逐字节同配置（对照基线），2/4 是 ⑪ 开闸档——
+// 分片收益（⑨a）只有在 io 线程 >1 时才可能显形。
 TEST(RegionConcurrencyBench, ShardedGateThroughputVersusLegacy) {
     constexpr int kThreads = 8;
     constexpr int kOps = 40;
     struct Row {
         const char* label;
-        std::size_t shards;
         BenchResult result;
     };
     std::vector<Row> rows;
+    const struct {
+        std::size_t shards;
+        std::size_t http_threads;
+        const char* label;
+    } configs[] = {
+        {1, 1, "shards=1(legacy)"},
+        {16, 1, "shards=16 io=1"},
+        {16, 2, "shards=16 io=2"},
+        {16, 4, "shards=16 io=4"},
+    };
 
-    for (const std::size_t shards : {std::size_t{1}, std::size_t{16}}) {
+    for (const auto& cfg : configs) {
         TempDir tmp{"tinykv_region_bench"};
         ServerOptions opt;
         opt.data_dir = tmp.path() / "db";
         opt.status_port = 0;
         opt.worker_interval = std::chrono::milliseconds(2);
-        opt.lock_shards = shards;
+        opt.lock_shards = cfg.shards;
+        opt.http_threads = cfg.http_threads;
         ServerApp app(std::move(opt));
         ASSERT_TRUE(app.start().has_value());
         // 先切成两个 region（split 在 "m"），a* 落 region 1、z* 落 region 2
@@ -99,25 +111,25 @@ TEST(RegionConcurrencyBench, ShardedGateThroughputVersusLegacy) {
             std::this_thread::yield();
         }
 
-        Row row;
-        row.label = shards == 1 ? "shards=1(legacy)" : "shards=16(wired)";
-        row.shards = shards;
         const BenchResult cross = run_bench(app, kThreads, kOps, /*spread=*/true);
         const BenchResult same = run_bench(app, kThreads, kOps, /*spread=*/false);
-        row.result = BenchResult{.cross_region_ops_per_sec = cross.cross_region_ops_per_sec,
-                                 .same_region_ops_per_sec = same.same_region_ops_per_sec};
-        rows.push_back(row);
+        rows.push_back(Row{.label = cfg.label,
+                           .result = BenchResult{.cross_region_ops_per_sec =
+                                                     cross.cross_region_ops_per_sec,
+                                                 .same_region_ops_per_sec =
+                                                     same.same_region_ops_per_sec}});
         ASSERT_TRUE(app.stop().has_value());
     }
 
-    const double ratio = rows.back().result.cross_region_ops_per_sec /
-                         rows.front().result.cross_region_ops_per_sec;
-    std::printf("\n== M7-PERF-01 region 并发吞吐（8 线程 × 40 条） ==\n");
+    const double baseline = rows[0].result.cross_region_ops_per_sec;  // M7 基线
+    const double best = rows.back().result.cross_region_ops_per_sec;  // ⑪ 最高档
+    std::printf("\n== M8-PERF-01 region 并发吞吐（8 线程 × 40 条） ==\n");
     for (const auto& row : rows) {
         std::printf("%-18s 跨区并发 %8.1f ops/s | 同区并发 %8.1f ops/s\n", row.label,
                     row.result.cross_region_ops_per_sec, row.result.same_region_ops_per_sec);
     }
-    std::printf("跨区吞吐比值 sharded/legacy = %.2f（≥1 为达标，分片只应抬高不应压低）\n", ratio);
+    std::printf("跨区吞吐比值 io=4/M7基线 = %.2f（≥1 为达标，开闸只应抬高不应压低）\n",
+                best / baseline);
 }
 
 }  // namespace

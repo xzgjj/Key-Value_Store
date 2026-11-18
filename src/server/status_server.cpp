@@ -3,6 +3,7 @@
 
 #include "server/status_server.h"
 
+#include <algorithm>
 #include <array>
 #include <charconv>
 #include <string_view>
@@ -175,7 +176,7 @@ std::string not_found(bool keep_alive) {
 result<std::unique_ptr<StatusServer>> StatusServer::start(
     const std::string& host, std::uint16_t port, std::function<std::string()> provider,
     KvHandler kv_handler, KvWriteHandler kv_write, AdminHandler admin_handler,
-    std::string auth_token) {
+    std::string auth_token, std::size_t io_threads) {
     auto server = std::unique_ptr<StatusServer>(new StatusServer());  // NOLINT：构造私有
     server->provider_ = std::move(provider);
     server->kv_handler_ = std::move(kv_handler);
@@ -208,7 +209,14 @@ result<std::unique_ptr<StatusServer>> StatusServer::start(
     server->guard_ = std::make_unique<asio::executor_work_guard<asio::io_context::executor_type>>(
         server->ctx_.get_executor());
     server->accept_loop();
-    server->thread_ = std::thread([raw = server.get()] { raw->ctx_.run(); });
+    // ⑪：io_context 线程池——0/1 都归一为单线程（M7 行为）；async_accept 单点投递，
+    // 多线程只是并发消化 handler，accept 顺序性不受影响。
+    const auto thread_count =
+        io_threads == 0 ? std::max<std::size_t>(1, std::thread::hardware_concurrency())
+                        : io_threads;
+    for (std::size_t i = 0; i < thread_count; ++i) {
+        server->threads_.emplace_back([raw = server.get()] { raw->ctx_.run(); });
+    }
     return server;
 }
 
@@ -219,8 +227,10 @@ StatusServer::~StatusServer() {
     }
     guard_.reset();
     ctx_.stop();
-    if (thread_.joinable()) {
-        thread_.join();  // 绝不 detach
+    for (auto& t : threads_) {
+        if (t.joinable()) {
+            t.join();  // 绝不 detach
+        }
     }
 }
 

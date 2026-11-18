@@ -113,6 +113,12 @@ result<void> apply_server(ServerSection& cfg, const std::string& key, const std:
                    ? result<void>{}
                    : bad("server.lock_shards 必须是正整数");
     }
+    if (key == "http_threads") {
+        // ⑪：0 合法（= hardware_concurrency，bench 档），负数/非数字由 parse_size 拒绝
+        return parse_size(value, cfg.http_threads)
+                   ? result<void>{}
+                   : bad("server.http_threads 必须是非负整数（0 = 按 CPU 数）");
+    }
     return bad("server 段未知键 '" + key + "'");
 }
 

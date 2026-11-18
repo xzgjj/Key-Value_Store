@@ -162,8 +162,9 @@ auto got = (*engine)->get(Cf::Default, std::as_bytes(std::span{"k1", 2}));
   但 region 1 仍沿用 `data_dir` 根目录（子 region 在 `regions/<id>`），双布局未合并。
 - **GC 安全点**取活跃会话的最小 start\_ts，无会话时取当前 TSO；锁冲突解析后的版本裁剪语义见 SPEC-4。
 - **并发与安全边界**：锁已按 region 分片（`server.lock_shards`，默认 16，同区串行/跨区并行；
-  多副本模式强制一把大锁）——跨区吞吐与改前持平，下一个瓶颈是 HTTP 单 io_context 线程；
-  鉴权为 Bearer token，**未做 TLS**（已裁决移出 M7，见 CONTRACT-REVIEW D-2）；
+  多副本模式强制一把大锁）；M8 ⑪ 起 HTTP handler 并发执行（`server.http_threads`，默认 2；
+  显式 1 = 单线程回退档）——io=4 跨区吞吐达 M7 基线 1.36× 以上（`docs/落实/notes-m8.md` §2）；
+  鉴权为 Bearer token，**未做 TLS**（M8 ⑭ 规划中，见 CONTRACT-REVIEW D-2）；
   未配 token 时强制绑回环并在 `/status` 标 `"auth":false`。
 - **编译器/标准**：默认 C++23；C++20/17 走 `src/common/compat.h`，g++ 与 clang++ 均在 CI 矩阵内。
 - **非目标**：Region Merge、完整 PD 调度策略、Joint Consensus、悲观事务、RDMA/GPU 传输。
