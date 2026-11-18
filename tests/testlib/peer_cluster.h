@@ -14,6 +14,7 @@
 #include <vector>
 
 #include <algorithm>
+#include "common/error_format.h"
 #include "raft/raft.h"
 #include "raft_test_base.h"
 
@@ -267,6 +268,80 @@ private:
         n += c.peer(i).is_leader() ? 1 : 0;
     }
     return n;
+}
+
+// ---- 单 peer 规模基准共用装置（M8 ⑬：scale_split_bench 与 split_bench 消除复制粘贴，
+//      同 server_daemon.h 的提取先例——CI 的 dup_code 检查判复制即提取） ----
+
+// 定宽补零键：字典序 == 数值序（split_bench 首跑的真实踩坑："k125000" < "k62500"，
+// 字典序与数值序相反——不定宽补零，split 点的"落在左区间"判断会被字符串序打乱）
+[[nodiscard]] inline std::string make_padded_key(std::int64_t i, int width = 7) {
+    auto digits = std::to_string(i);
+    return "k" + std::string(static_cast<std::size_t>(width) - digits.size(), '0') + digits;
+}
+
+// 区间批量 put 提案（键 = make_padded_key(i)，值 = "v"；规模写入只考察体量与顺序）
+[[nodiscard]] inline tinykv::cmdpb::RaftCmdRequest make_put_batch(std::uint64_t client,
+                                                                  std::uint64_t seq,
+                                                                  std::int64_t begin,
+                                                                  std::int64_t end) {
+    tinykv::cmdpb::RaftCmdRequest req;
+    req.mutable_header()->set_client_id(client);
+    req.mutable_header()->set_sequence_id(seq);
+    for (std::int64_t i = begin; i < end; ++i) {
+        auto* one = req.add_requests();
+        one->mutable_put()->set_key(make_padded_key(i));
+        one->mutable_put()->set_value("v");
+    }
+    return req;
+}
+
+// 单 peer 组装配：region 1 注册进 meta → 打开 peer → 接线 → 有界 tick 推成 leader。
+// 返回 nullptr 表示装配失败（调用方 ASSERT 断言）。
+[[nodiscard]] inline std::unique_ptr<tinykv::raftstore::Peer> open_single_leader_peer(
+    tinykv::Engine& engine, tinykv::raftstore::StoreMeta& meta, std::int64_t keys_hint = 0) {
+    (void)keys_hint;
+    tinykv::raft::Config cfg{.id = PeerId{1}, .voters = {PeerId{1}},
+                             .election_timeout = 4, .heartbeat_interval = 2};
+    auto peer_result = tinykv::raftstore::Peer::open(cfg, engine);
+    if (!peer_result.has_value()) {
+        return nullptr;
+    }
+    auto peer = std::move(*peer_result);
+    tinykv::raftstore::Region region{.id = tinykv::RegionId{1}, .start_key = "", .end_key = "",
+                                     .peers = {}, .epoch = {1, 0}, .size_hint = 0};
+    if (!meta.add_region(region).has_value()) {
+        return nullptr;
+    }
+    peer->set_region(region);
+    peer->set_store_meta(&meta);
+    for (int i = 0; i < 20 && !peer->is_leader(); ++i) {
+        peer->tick();
+    }
+    if (!peer->is_leader()) {
+        return nullptr;
+    }
+    return peer;
+}
+
+// 有界轮询 on_ready 直到 client/seq 的回执出现（ENG-04：禁 sleep 对齐，轮询有界）。
+// apply 拒绝的原因记入 *apply_err（非空时），供失败断言定位。
+inline bool wait_reply(tinykv::raftstore::Peer& peer, std::uint64_t client, std::uint64_t seq,
+                       int max_rounds, std::string* apply_err = nullptr) {
+    for (int round = 0; round < max_rounds; ++round) {
+        auto r = peer.on_ready();
+        if (!r) {
+            if (apply_err != nullptr && apply_err->empty()) {
+                *apply_err = std::string(tinykv::describe(r.error()));
+            }
+            continue;
+        }
+        if (peer.take_reply(client, seq).has_value()) {
+            return true;
+        }
+        peer.tick();
+    }
+    return false;
 }
 
 }  // namespace tinykv::testlib

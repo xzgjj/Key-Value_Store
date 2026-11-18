@@ -1,14 +1,19 @@
 {
-  "task": "M8 ⑫ PERF 对照表（SPEC-7 §7.2.2）：scripts/perf_report.py 九项标准对照 + 首轮实测采数",
+  "task": "M8 ⑬ 规模档实测（SPEC-7 §7.2.3）：scale_recovery_test（1GB kill -9 恢复）+ scale_split_bench（1M key 单次 split）",
   "paths": [
-    "scripts/perf_report.py",
+    "tests/tools/scale_writer.cpp",
+    "tests/bench/scale_recovery_test.cpp",
+    "tests/bench/scale_split_bench.cpp",
+    "tests/bench/CMakeLists.txt",
+    "tests/bench/split_bench_test.cpp",
+    "tests/testlib/peer_cluster.h",
     "ci/task_scope.json"
   ],
-  "reason": "perf_report 读取 bench 产物与实测输入（perf_inputs.json）→ build/evidence/perf_report.{md,json}；只采数不立门禁（D7-4）。首轮采 8/9 项（PERF-06 留给 ⑬）；PERF-02 引擎级 3.74× 未达 S0 如实标注。登记表 scripts 行（E4 脚本路径可解析）已过 check_test_registry。",
+  "reason": "PERF-06/07 首次规模采数：scale_writer 工具（批量+8GB 内存表保证纯 WAL 重放）→ kill -9 计时；1M key 单次中点 split 计时。登记 nightly;serial;timeout:3600s（D7-5）。split_bench 与 scale_split_bench 的公共装置提取 testlib/peer_cluster.h（dup_code 门禁，server_daemon.h 先例），split_bench 同步重构、行为零变化。",
   "bugfix": false,
   "fixes": [],
   "overflow_approved": false,
   "behavior_change_approved": true,
   "behavior_change_note": "http_threads 默认 1→2（并发度变更，D7-1）；用户 2026-11-18 按 SPEC-7 §7.3.2 批准。显式配 1 即回 M7 单线程行为。",
-  "approver": "用户（2026-11-18：D7-1~D7-7 按建议执行，含 D7-4 bench 不进 CI 门禁）"
+  "approver": "用户（2026-11-18：D7-5 规模档预算与降档口径按建议执行）"
 }
