@@ -1,6 +1,6 @@
 # TinyKV-CPP
 
-> 用现代 C++23 从零实现的 mini-TiKV：单机 KV → Raft → Multi-Raft → Percolator 分布式事务，  服务端、命令行、嵌入 API 三件套齐备，正确性由 65 个 ctest 与 CI 门禁背书。
+> 用现代 C++23 从零实现的 mini-TiKV：单机 KV → Raft → Multi-Raft → Percolator 分布式事务，  服务端、命令行、嵌入 API 三件套齐备，正确性由 83 个 ctest 与 CI 门禁背书。
 
 ![TinyKV-CI](https://github.com/xzgjj/Key-Value_Store/actions/workflows/ci.yml/badge.svg?branch=main)
 
@@ -8,8 +8,13 @@
 
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 
-这是一个可以真正跑起来的系统级项目，不是跟着教程抄一遍的练习。它把 TiKV 的核心链路  ——自研存储引擎、Raft 共识、Multi-Raft 分片、Percolator 事务——压缩到一万行量级，  
-每个模块都能从入口文件读到末尾，每条设计取舍都写进了对应阶段的实现笔记。
+- 系统级项目，把 TiKV 的核心链路  ——自研存储引擎、Raft 共识、Multi-Raft 分片、Percolator 事务——压缩到一万行量级，  
+
+  每个模块都能从入口文件读到末尾，每条设计取舍都写进了对应阶段的实现笔记。
+
+
+
+- **工程成熟度在“demo项目”里是上限水平，接近小型开源基础设施项目的治理形态。** 这
 
 
 
@@ -19,7 +24,7 @@
 
 **以什么形态交付**：一个 `tinykv-server` 常驻进程、一个 `tinykv-cli` 命令行工具，以及一个可以嵌进别的程序的 C++ API——最小示例见 [examples/embed\_example.cpp](examples/embed_example.cpp)，编译进 CI，接口一改就红。
 
-**规模**：`src/` 约 9.1k 行 C++，`tests/` 约 8.6k 行，65 个测试可执行；`ctest` 一条命令跑全量，不需要手动拼编译参数。
+**规模**：`src/` 约 12.6k 行 C++（含头文件），`tests/` 约 12.7k 行，83 个测试；`ctest` 一条命令跑全量，不需要手动拼编译参数。
 
 **不追求什么**：不跟 TiKV/etcd 比生产成熟度。多租户、在线升级、安全鉴权、十万级 Region 调度都不在范围内；这个项目要回答的是"内核骨架到底怎么造"，而不是"怎么撑住一个云上的集群"。
 
@@ -83,6 +88,8 @@ ctest --test-dir build/win-debug -L fast --output-on-failure
 # 终端 1：启动 daemon（数据目录 + HTTP 端口，就绪后会打印实际监听地址）
 ./build/win-debug/src/server/tinykv-server ./data 3380
 ```
+
+
 
 ```bash
 # 终端 2：本地模式（不需要服务端，直接操作引擎文件）
