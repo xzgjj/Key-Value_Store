@@ -108,3 +108,13 @@
 - 「结论」只允许 PASS / FAIL；FAIL 轮次保留在台账里，作为修复依据，不删除。
 - 三轮全 PASS 后跑对齐检查（`python tools/ci/check_align.py`），两者都过才可进入推送环节。
 - 台账本身不替代证据：每轮「备注」应写清跑了什么命令、产物在哪。
+
+## 2026-11-18 · M7 波次三轮审查（分支 4→7）
+
+| 轮次 | 关注面 | 发现 | 处置 |
+|---|---|---|---|
+| 第 1 轮（正确性） | 四条 ARCH-1 P0、TSO 重启、判据是否真的可判定 | ①`Peer::applied_` 播种用例最初只覆盖"有挂起条目"，无法证明无缺口路径；②TSO 用例第一版把 `{true}` 与 `recover_ts_floor` 一起删掉才转红，说明它是端到端判据 | 两处都改成"先删修复重编确认转红"，并把红→绿写进 `diff.md` |
+| 第 2 轮（工程门禁） | CI 十三阶段、diff 预算、登记表 | ①`#include` 行被 dup_code 误判为重复代码（4 处假阳性）；②clang-format 22.1.8 下约 50 文件违规，格式化门禁长期假绿；③`kvpb::Mutation::DELETE` 与 Windows `DELETE` 宏冲突，只在部分 TU 报错 | ①检测器跳过 include 行（收紧误报，规则资产改动同批审批）；②全仓对齐格式；③改按数值引用枚举 |
+| 第 3 轮（契约与文档） | CLI/HTTP/配置/数据布局是否都有唯一事实源 | ①`/kv` 请求体编码只在源码里；②新增 `meta/`、`server.*` 配置、keep-alive、401 均未进文档；③CLI 三个悬空端点仍未收口 | ①②写进 `docs/http-protocol.md` 与 `docs/CONTRACT-REVIEW.md`；③列入待决项 D-3，未擅自动 |
+
+三轮结论：可提交（`ctest` 71/71、CI PASS×13、格式 0 违规）。未决项集中在 `docs/CONTRACT-REVIEW.md` §2。

@@ -178,6 +178,7 @@ CI 用 `ctest -L unit|simulation|integration|bench` 选择，无需解析本页�
 | tests/unit/txn/mvcc_test.cpp | unit | `mvcc_test` | - | fast |
 | tests/unit/txn/si_semantics_test.cpp | unit | `si_semantics_test` | - | fast |
 | tests/unit/txn/txn_resolve_test.cpp | unit | `txn_resolve_test` | - | fast |
+| tests/unit/txn/region_grouper_test.cpp | unit | `region_grouper_test` | - | fast |
 | tests/unit/txn/txn_peer_test.cpp | unit | `txn_peer_test` | - | fast |
 | tests/unit/server/lifecycle_test.cpp | unit | `lifecycle_test` | - | fast |
 | tests/unit/server/worker_test.cpp | unit | `worker_test` | - | fast |

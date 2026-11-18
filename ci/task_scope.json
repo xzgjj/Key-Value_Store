@@ -1,20 +1,18 @@
 {
-  "task": "SPEC-6 M7 落地（第一批）：⑧Region 元数据持久化 + ⑨a 锁分片原语 + ⑩ 鉴权与强制回环；并修三个已验证的运维问题（HTTP keep-alive、请求体格式未文档化、就绪行不落盘）",
+  "task": "M7 第二批：⑦ 分组内核（RegionGrouper）+ 接口契约核对单 + SPEC/README 进度对齐；不改任何运行时行为",
   "paths": [
-    "src/raftstore/",
-    "src/server/",
-    "src/config/",
+    "src/txn/",
     "tests/",
     "docs/",
-    "demo.yaml",
+    "README.md",
     "ci/task_scope.json"
   ],
-  "reason": "SPEC-6 §6.1 把 ⑧ 列为 M7 第一优先：路由不持久化就上 2PC，未决事务会被解析到错误分区。⑨a 与 ⑩ 按 ARCH-3 W4 可与主序列并行。三个运维问题是用户点出的验证发现：HTTP 每请求新建连接、/kv 的制表符请求体只有源码里有、stdout 全缓冲导致就绪行不落盘。⑨c（拆组合根）按 SPEC-6 §6.7 属持续项、不设完成判定，本批不动。",
+  "reason": "⑦ 按 SPEC-6 §6.1.2 必须拆步推进，本批只落第 2 步（纯函数分组内核 + 6 例），不碰组合根与协议状态机。同时把本批触及的对外契约集中到 docs/CONTRACT-REVIEW.md 供用户逐条确认，并把 SPEC-6 §6.9 与 README §5 的完成度改成事实。",
   "bugfix": false,
   "fixes": [],
   "overflow_approved": true,
   "behavior_change_approved": false,
   "rule_asset_approved": false,
-  "behavior_change_note": "①新增 data_dir/meta/regions.pb（+ .bak）保存路由真相，split 后重启不再回退单 region；②HTTP 默认 keep-alive（HTTP/1.1 且未声明 close 时不断开），支持流水线；③tinykv-server 新增 --config，可配 engine.*/server.host/server.auth_token；④未配 auth_token 时强制绑回环并在 /status 标 auth:false；⑤配 token 后所有请求校验 Authorization: Bearer，失败 401 且不回显凭据；⑥stdout 改行缓冲 + 就绪行立即 flush；⑦新增锁分片原语 LockRegistry（默认未接线，shards=1 等价改造前）。",
-  "approver": "用户（2026-11-18：落地最新 SPEC 的 M7 部分与验证发现的 P0，并处理三个问题：HTTP 单线程+无 keep-alive／请求体格式未文档化／stdout 全缓冲）"
+  "behavior_change_note": "无运行时行为变更：RegionGrouper 是未被调用的纯函数；其余为文档与进度对齐。",
+  "approver": "用户（2026-11-18：落地 SPEC-6 的 M7 部分；接口契约需与用户核对确定）"
 }

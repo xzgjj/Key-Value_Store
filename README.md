@@ -143,11 +143,15 @@ auto got = (*engine)->get(Cf::Default, std::as_bytes(std::span{"k1", 2}));
 
 如实记录，不伪装完成度。这些是当前实现的边界，也是后续工作的起点：
 
-- **跨 Region 事务**：单个事务的 primary 与写入键若落在不同 Region，会分别路由到不同 Peer，  
-  课程级未提供跨 Region 的 2PC 协调器；当前保证单 Region 事务正确。
-- **Split 元数据不持久化**：重启后按单 Region 重建路由，已 split 出的子目录数据不会被自动纳管。
+- **跨 Region 事务**：已做护栏（跨区 prewrite 直接 `InvalidArgument`，不再静默写错分区）与分组内核
+  （`txn/region_grouper.h`），协调器/状态机/恢复尚未完成，故 `txn.cross_region_enabled` 保持关闭。
+  当前承诺：**单 Region 事务正确**；跨 Region 事务明确报错而非静默错。
+- **Region 元数据**：已落盘（`meta/regions.pb` + `.bak`），split 后重启拓扑与数据都在；
+  但 region 1 仍沿用 `data_dir` 根目录（子 region 在 `regions/<id>`），双布局未合并。
 - **GC 安全点**取活跃会话的最小 start\_ts，无会话时取当前 TSO；锁冲突解析后的版本裁剪语义见 SPEC-4。
-- **并发与安全边界**：一把粗粒度串行闸，无鉴权、无 TLS，端口默认只绑 `127.0.0.1`，适合本机实验与学习。
+- **并发与安全边界**：一把粗粒度串行闸（分片锁原语已就绪、未接线）；鉴权为 Bearer token，
+  **未做 TLS**；未配 token 时强制绑回环并在 `/status` 标 `"auth":false`。
+- **编译器/标准**：默认 C++23；C++20/17 走 `src/common/compat.h`，g++ 与 clang++ 均在 CI 矩阵内。
 - **非目标**：Region Merge、完整 PD 调度策略、Joint Consensus、悲观事务、RDMA/GPU 传输。
 
 ## 6. 许可
