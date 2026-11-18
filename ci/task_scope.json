@@ -1,24 +1,14 @@
 {
-  "task": "M8 ⑪ HTTP 并发（SPEC-7 §7.1 ⑪）：io_context 线程池 + 审计 #15 split_error_ 补锁 + http_concurrency_test + 吞吐对照 bench",
+  "task": "M8 ⑫ PERF 对照表（SPEC-7 §7.2.2）：scripts/perf_report.py 九项标准对照 + 首轮实测采数",
   "paths": [
-    "src/config/config.h",
-    "src/config/config.cpp",
-    "src/server/status_server.h",
-    "src/server/status_server.cpp",
-    "src/server/server_app.h",
-    "src/server/main.cpp",
-    "tests/unit/server/http_concurrency_test.cpp",
-    "tests/unit/server/CMakeLists.txt",
-    "tests/bench/region_concurrency_bench_test.cpp",
-    "demo.yaml",
-    "README.md",
+    "scripts/perf_report.py",
     "ci/task_scope.json"
   ],
-  "reason": "⑪-0 并发安全审计（notes-m8.md §1）通过后开闸：StatusServer::start 尾部默认参数 io_threads（调用方零改动）、ServerOptions/config 新增 http_threads（默认 2，行为变更已批）、观测端点维持单线程。审计发现的 split_error_ 竞争（apply 可能发生在分区闸泵路径）补专用锁。吞吐对照（io=4/M7 基线 ≥1）随 bench 留 evidence。",
+  "reason": "perf_report 读取 bench 产物与实测输入（perf_inputs.json）→ build/evidence/perf_report.{md,json}；只采数不立门禁（D7-4）。首轮采 8/9 项（PERF-06 留给 ⑬）；PERF-02 引擎级 3.74× 未达 S0 如实标注。登记表 scripts 行（E4 脚本路径可解析）已过 check_test_registry。",
   "bugfix": false,
   "fixes": [],
   "overflow_approved": false,
   "behavior_change_approved": true,
   "behavior_change_note": "http_threads 默认 1→2（并发度变更，D7-1）；用户 2026-11-18 按 SPEC-7 §7.3.2 批准。显式配 1 即回 M7 单线程行为。",
-  "approver": "用户（2026-11-18：契约变更与 D7-1~D7-7 全部按建议执行）"
+  "approver": "用户（2026-11-18：D7-1~D7-7 按建议执行，含 D7-4 bench 不进 CI 门禁）"
 }
