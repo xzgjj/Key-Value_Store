@@ -99,6 +99,10 @@ public:
     // my_region：本 peer 所属 region 的当前元数据（split apply 时据此切分）
     void set_region(const Region& region) { my_region_ = region; }
     void set_store_meta(StoreMeta* meta) { store_meta_ = meta; }
+    // split apply 成功后的宿主回调（左/右 region）：宿主据此动态建右半 peer + 迁移数据。
+    // 在 apply 路径内调用，回调不得重入本 peer 的 pump/on_ready。
+    using SplitObserver = std::function<void(const Region& left, const Region& right)>;
+    void set_split_observer(SplitObserver cb) { split_observer_ = std::move(cb); }
 
     // ---- M4 第⑤层：快照分块大小（默认 4MB，SPEC-3 D3-3；测试调小以覆盖多块路径） ----
     void set_snapshot_chunk_bytes(std::size_t n) { snapshot_chunk_bytes_ = n == 0 ? 1 : n; }
@@ -199,6 +203,7 @@ private:
     // M4 第③层：Split 路由（可选注入；未注入时忽略 split admin）
     std::optional<Region> my_region_;
     StoreMeta* store_meta_{nullptr};
+    SplitObserver split_observer_;
     txn::LatchManager txn_latches_;                                   // M5 ⑤：key 粒度闩（红线4）
     std::map<std::uint64_t, KvError> txn_errors_;                  // apply 位点 → 错误描述
 };

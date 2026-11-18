@@ -470,6 +470,9 @@ result<void> Peer::apply_split_admin(const cmdpb::SplitRequest& split) {
     }
     // 红线2：apply 完成后立即更新本 peer 视图（左半仍由本 peer 负责）
     my_region_ = parts->first;
+    if (split_observer_) {
+        split_observer_(parts->first, parts->second);
+    }
     return {};
 }
 

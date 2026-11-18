@@ -42,7 +42,8 @@ bool spin_until(const std::function<bool()>& pred, int ms = 2000) {
 struct DaemonFixture {
     TempDir tmp{"tinykv_daemon"};
     ServerApp app{ServerOptions{.data_dir = tmp.path() / "db", .status_port = 0,
-                                .worker_interval = std::chrono::milliseconds(2)}};
+                                .worker_interval = std::chrono::milliseconds(2),
+                                .log_sink = {}}};
     std::string endpoint;
 
     DaemonFixture() {
@@ -166,10 +167,82 @@ TEST(ServerAppTest, GcEndpointRunsThroughRaft) {
     ASSERT_EQ(f.cli({"txn", "rollback", sid}), 0) << f.last_err;
 }
 
+TEST(ServerAppTest, InterceptorCountsRequestsAndLogSinkReceives) {
+    std::vector<std::string> lines;
+    TempDir tmp{"tinykv_daemon_intercept"};
+    ServerApp app(ServerOptions{.data_dir = tmp.path() / "db", .status_port = 0,
+                                .worker_interval = std::chrono::milliseconds(2),
+                                .log_sink = [&](const std::string& l) { lines.push_back(l); }});
+    ASSERT_TRUE(app.start().has_value());
+    const std::string endpoint = "127.0.0.1:" + std::to_string(app.status_port());
+    const std::vector<std::string> args{"--endpoint", endpoint, "put", "ik", "iv"};
+    std::ostringstream out;
+    std::ostringstream err;
+    ASSERT_EQ(tinykv::cli::run_cli(args, out, err), 0) << err.str();
+    EXPECT_FALSE(lines.empty()) << "log 插拔位未收到请求";
+    EXPECT_NE(lines.front().find("POST /kv"), std::string::npos) << lines.front();
+    std::ostringstream st;
+    std::ostringstream sterr;
+    const std::vector<std::string> status_args{"--endpoint", endpoint, "status"};
+    ASSERT_EQ(tinykv::cli::run_cli(status_args, st, sterr), 0);
+    EXPECT_NE(st.str().find("\"intercept_calls\":"), std::string::npos) << st.str();
+    EXPECT_TRUE(app.stop().has_value());
+}
+
+// 多 region（M6 挂账收口）：split 动态建 peer + 数据迁移 + 按 key 路由
+TEST(ServerAppTest, SplitCreatesPeerAndRoutesByKey) {
+    DaemonFixture f;
+    // 1) split 前写两侧数据（都在 region 1）
+    ASSERT_EQ(f.cli({"put", "a1", "left"}), 0) << f.last_err;
+    ASSERT_EQ(f.cli({"put", "z1", "right"}), 0) << f.last_err;
+    // 2) 在 "m" 切分 region 1 → 左 [ ,m) / 右 [m, )
+    std::string split_out;
+    ASSERT_EQ(f.cli({"region", "split", "1", "m"}, &split_out), 0)
+        << "split 失败: " << f.last_err << " / " << split_out;
+    // 3) 元数据与实例都增长：regions=2, peers=2, splits=1
+    std::string status;
+    ASSERT_EQ(f.cli({"status"}, &status), 0) << f.last_err;
+    EXPECT_NE(status.find("\"regions\":2"), std::string::npos) << status;
+    EXPECT_NE(status.find("\"peers\":2"), std::string::npos) << status;
+    EXPECT_NE(status.find("\"splits\":1"), std::string::npos) << status;
+    // 4) 迁移正确：左侧 key 仍可读，右侧 key 在新 peer 上可读
+    std::string left;
+    ASSERT_EQ(f.cli({"get", "a1"}, &left), 0) << f.last_err;
+    EXPECT_NE(left.find("left"), std::string::npos) << left;
+    std::string right;
+    ASSERT_EQ(f.cli({"get", "z1"}, &right), 0) << f.last_err;
+    EXPECT_NE(right.find("right"), std::string::npos) << right;
+    // 5) 新写入按 key 路由：右半新 key 落到 region 2
+    ASSERT_EQ(f.cli({"put", "n1", "new-right"}), 0) << f.last_err;
+    std::string got;
+    ASSERT_EQ(f.cli({"get", "n1"}, &got), 0) << f.last_err;
+    EXPECT_NE(got.find("new-right"), std::string::npos) << got;
+    // 6) region 列表可见两个 region
+    std::string regions;
+    ASSERT_EQ(f.cli({"regions"}, &regions), 0) << f.last_err;
+    EXPECT_NE(regions.find("\"id\":2"), std::string::npos) << regions;
+}
+
+// 多级 split：新 peer 也挂了 observer，右半可再切分
+TEST(ServerAppTest, RepeatedSplitCreatesThirdPeer) {
+    DaemonFixture f;
+    ASSERT_EQ(f.cli({"put", "b", "v"}), 0) << f.last_err;
+    ASSERT_EQ(f.cli({"region", "split", "1", "m"}), 0) << f.last_err;
+    ASSERT_EQ(f.cli({"region", "split", "2", "t"}), 0) << f.last_err;
+    std::string status;
+    ASSERT_EQ(f.cli({"status"}, &status), 0) << f.last_err;
+    EXPECT_NE(status.find("\"regions\":3"), std::string::npos) << status;
+    EXPECT_NE(status.find("\"peers\":3"), std::string::npos) << status;
+    std::string got;
+    ASSERT_EQ(f.cli({"get", "b"}, &got), 0) << f.last_err;
+    EXPECT_NE(got.find("v"), std::string::npos) << got;
+}
+
 TEST(ServerAppTest, StopIsIdempotentAndPortGoesDown) {
     TempDir tmp{"tinykv_daemon_stop"};
     ServerApp app(ServerOptions{.data_dir = tmp.path() / "db", .status_port = 0,
-                                .worker_interval = std::chrono::milliseconds(2)});
+                                .worker_interval = std::chrono::milliseconds(2),
+                                        .log_sink = {}});
     ASSERT_TRUE(app.start().has_value());
     const auto port = app.status_port();
     ASSERT_GT(port, 0);

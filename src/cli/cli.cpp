@@ -15,10 +15,10 @@
 #include "cli/http_client.h"
 #include "common/error_format.h"
 #include "config/config.h"
+#include <cstddef>
 #include "server/raw.h"
 #include "storage/engine.h"
 #include "storage/storage.h"
-
 namespace tinykv::cli {
 namespace {
 

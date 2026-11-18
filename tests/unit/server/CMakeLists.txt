@@ -4,3 +4,5 @@
 add_tinykv_test(lifecycle_test SRCS lifecycle_test.cpp LIBS tinykv_server LEVEL unit)
 add_tinykv_test(worker_test SRCS worker_test.cpp LIBS tinykv_server LEVEL unit)
 add_tinykv_test(server_app_test SRCS server_app_test.cpp LIBS tinykv_server tinykv_cli LEVEL unit)
+add_tinykv_test(interceptor_test SRCS interceptor_test.cpp LIBS tinykv_server LEVEL unit)
+add_tinykv_test(peer_registry_test SRCS peer_registry_test.cpp LIBS tinykv_server LEVEL unit)

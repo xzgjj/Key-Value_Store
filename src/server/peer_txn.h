@@ -24,20 +24,21 @@ namespace tinykv::server {
 
 class PeerTxnExecutor : public tinykv::txn::TxnExecutor {   // 非 final：测试适配器派生注入收敛策略
 public:
-    using PeerRef = std::function<tinykv::raftstore::Peer&()>;
-    using Pump = std::function<void()>;
-    using Applied = std::function<bool(std::uint64_t index)>;
+    using PeerRef = std::function<tinykv::raftstore::Peer&(std::string_view key)>;
+    using Pump = std::function<void(std::string_view key)>;
+    using Applied = std::function<bool(std::string_view key, std::uint64_t index)>;
+    using PeerList = std::function<std::vector<tinykv::raftstore::Peer*>()>;   // GC 广播用
 
     // gate：daemon 组合根注入的 Peer 串行闸（Worker 泵与 HTTP 共用；泵回调不得重复加锁）
     PeerTxnExecutor(PeerRef peer, Pump pump, Applied applied, std::mutex* gate,
-                    int max_rounds = 400)
+                    int max_rounds = 400, PeerList peers = {})
         : peer_(std::move(peer)), pump_(std::move(pump)), applied_(std::move(applied)),
-          gate_(gate), max_rounds_(max_rounds) {}
+          gate_(gate), max_rounds_(max_rounds), peers_(std::move(peers)) {}
 
     [[nodiscard]] tinykv::result<std::optional<std::string>> get(
         std::string_view key, tinykv::Ts start_ts) override {
         std::optional<std::unique_lock<std::mutex>> gate = hold_gate();
-        return peer_().mvcc().get(key, start_ts);
+        return peer_(key).mvcc().get(key, start_ts);
     }
 
     [[nodiscard]] tinykv::result<void> prewrite(std::span<const tinykv::txn::Mutation> mutations,
@@ -55,7 +56,7 @@ public:
             one->set_key(m.key);
             one->set_value(m.value);
         }
-        return call_through_raft([&](tinykv::raftstore::Peer& p) {
+        return call_through_raft(primary, [&](tinykv::raftstore::Peer& p) {
             return p.propose_txn_prewrite(req);
         });
     }
@@ -68,8 +69,8 @@ public:
         for (const auto& k : keys) {
             req.add_keys(k);
         }
-        return call_through_raft(
-            [&](tinykv::raftstore::Peer& p) { return p.propose_txn_commit(req); });
+        return call_through_raft(keys.empty() ? std::string_view{} : keys.front(),
+                                 [&](tinykv::raftstore::Peer& p) { return p.propose_txn_commit(req); });
     }
 
     [[nodiscard]] tinykv::result<void> rollback(std::span<const std::string> keys,
@@ -79,21 +80,21 @@ public:
         for (const auto& k : keys) {
             req.add_keys(k);
         }
-        return call_through_raft(
-            [&](tinykv::raftstore::Peer& p) { return p.propose_txn_rollback(req); });
+        return call_through_raft(keys.empty() ? std::string_view{} : keys.front(),
+                                 [&](tinykv::raftstore::Peer& p) { return p.propose_txn_rollback(req); });
     }
 
     [[nodiscard]] tinykv::result<tinykv::txn::TxnStatus> check_txn_status(
         std::string_view primary, tinykv::Ts lock_start_ts, std::uint64_t now_ms) override {
         auto gate = hold_gate();
-        return peer_().mvcc().check_txn_status(primary, lock_start_ts, now_ms);
+        return peer_(primary).mvcc().check_txn_status(primary, lock_start_ts, now_ms);
     }
 
     [[nodiscard]] tinykv::result<std::size_t> resolve_locks_of(
         std::string_view primary, tinykv::Ts lock_start_ts,
         std::optional<tinykv::Ts> commit_to) override {
         auto gate = hold_gate();
-        auto victims = peer_().mvcc().locks_of(primary, lock_start_ts);
+        auto victims = peer_(primary).mvcc().locks_of(primary, lock_start_ts);
         if (victims.empty()) {
             return std::size_t{0};
         }
@@ -107,7 +108,7 @@ public:
                 req.add_keys(k);
             }
             outcome = call_through_raft(
-                [&](tinykv::raftstore::Peer& p) { return p.propose_txn_commit(req); });
+                primary, [&](tinykv::raftstore::Peer& p) { return p.propose_txn_commit(req); });
         } else {
             kvpb::TxnBatchRollbackRequest req;
             req.set_start_ts(lock_start_ts.value);
@@ -115,7 +116,7 @@ public:
                 req.add_keys(k);
             }
             outcome = call_through_raft(
-                [&](tinykv::raftstore::Peer& p) { return p.propose_txn_rollback(req); });
+                primary, [&](tinykv::raftstore::Peer& p) { return p.propose_txn_rollback(req); });
         }
         if (!outcome.has_value()) {
             return std::unexpected(outcome.error());
@@ -127,8 +128,38 @@ public:
     [[nodiscard]] tinykv::result<void> gc(std::uint64_t safe_point) {
         kvpb::TxnGCRequest req;
         req.set_safe_point(safe_point);
-        return call_through_raft(
-            [&](tinykv::raftstore::Peer& p) { return p.propose_txn_gc(req); });
+        if (!peers_) {
+            return call_through_raft(
+                {}, [&](tinykv::raftstore::Peer& p) { return p.propose_txn_gc(req); });
+        }
+        // 多 region：Admin 显式广播到每个 peer（每个 region 各自走共识）
+        for (auto* p : peers_()) {
+            if (p == nullptr || !p->is_leader()) {
+                return std::unexpected(tinykv::NotLeader{
+                    .region_id = tinykv::RegionId{0}, .leader_hint = std::nullopt});
+            }
+            auto gate = hold_gate();
+            const auto expect = p->raft().last_index().value + 1;
+            if (!p->propose_txn_gc(req)) {
+                return std::unexpected(tinykv::NotLeader{
+                    .region_id = tinykv::RegionId{0}, .leader_hint = std::nullopt});
+            }
+            for (int round = 0; round < max_rounds_; ++round) {
+                p->tick();
+                (void)p->on_ready();
+                if (p->applied_at_least(expect)) {
+                    break;
+                }
+            }
+            if (!p->applied_at_least(expect)) {
+                return std::unexpected(tinykv::IoFailed{.path = "txn:gc",
+                                                        .reason = "apply 未收敛（泵超时）"});
+            }
+            if (auto err = p->take_txn_error(expect); err.has_value()) {
+                return std::unexpected(std::move(*err));
+            }
+        }
+        return {};
     }
 
 private:
@@ -140,21 +171,21 @@ private:
     }
 
     template <typename ProposeFn>
-    tinykv::result<void> call_through_raft(ProposeFn&& propose) {
+    tinykv::result<void> call_through_raft(std::string_view key, ProposeFn&& propose) {
         auto gate = hold_gate();
-        tinykv::raftstore::Peer& p = peer_();
+        tinykv::raftstore::Peer& p = peer_(key);
         const auto expect = p.raft().last_index().value + 1;
         if (!propose(p)) {
             return std::unexpected(tinykv::NotLeader{.region_id = tinykv::RegionId{0},
                                                      .leader_hint = std::nullopt});
         }
         for (int round = 0; round < max_rounds_; ++round) {
-            pump_();
-            if (applied_(expect)) {
+            pump_(key);
+            if (applied_(key, expect)) {
                 break;
             }
         }
-        if (!applied_(expect)) {
+        if (!applied_(key, expect)) {
             return std::unexpected(tinykv::IoFailed{.path = "txn:raft",
                                                     .reason = "apply 未收敛（泵超时）"});
         }
@@ -170,6 +201,7 @@ private:
     Applied applied_;
     std::mutex* gate_{nullptr};
     int max_rounds_;
+    PeerList peers_;
 };
 
 }  // namespace tinykv::server

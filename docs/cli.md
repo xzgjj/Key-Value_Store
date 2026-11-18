@@ -155,6 +155,9 @@ done < seed.tsv
 | `tinykv-cli --endpoint <host:port> region <id>` | 单个 region 详情（range/leader/term/commit/apply_lag/size_hint/epoch） | 第②层 |
 | `tinykv-cli --endpoint <host:port> region peers <id>` | 副本分布（每 peer：store_id / voter\|learner / 是否 leader） | 第④层 |
 | `tinykv-cli --endpoint <host:port> region split <id> <key>` | 手动触发 split（调试用，走 admin 提案） | 第③层 |
+
+> **M6 起**：`region split` 触发后由 daemon 动态创建右半 region 的独立 Engine + Peer 实例并迁移数据；
+> `/status` 的 `regions`/`peers`/`splits` 字段可观测实例增长（见 `docs/notes-m6.md` §2）。
 | `tinykv-cli --endpoint <host:port> scheduler status` | 调度器状态（节点数/region 数/待迁移队列/最近动作） | 第⑥层 |
 | `tinykv-cli trace region <id> on\|off` | region 级 trace 开关 | 第⑦层 |
 

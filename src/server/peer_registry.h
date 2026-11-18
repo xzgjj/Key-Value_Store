@@ -1,0 +1,277 @@
+// 文件用途：RegionPeerRegistry（M6 挂账收口）——region→peer 动态注册表（Storage×N / Peer×regions）。
+// 归属：TinyKV-CPP（M6 运行时）。
+//
+// 为什么每 region 独立 Engine：raft log 以固定前缀 "\0re"/"\0lm" 存于 Default CF，
+// 两个 Peer 共用一个 Engine 会串 log（都从 index=1 写同一把 key）。故每个 region 一份
+// 独立 Engine（子目录 data_dir/regions/<id>），对应"Storage×N"。
+//
+// 路由：StoreMeta 按 key 找 region → 本表按 region_id 找 Slot（Engine + Peer）。
+// split 动态建实例：Peer apply split 后通过 observer 回调 on_split(left,right)——
+// 本表建右半新 Slot（新 PeerId = region id，单节点组），把旧 Engine 中落在右区间
+// [split_key, old_end) 的 MVCC 条目迁到新 Engine，并从旧 Engine 删除（数据归属感）。
+// 回调在 Peer 的 apply 路径内触发，此处只操作存储/元数据，绝不重入 peer 的 pump。
+
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
+#include <functional>
+#include <map>
+#include <memory>
+#include <optional>
+#include <span>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "common/error.h"
+#include "common/error_format.h"
+#include "common/ids.h"
+#include "raftstore/peer.h"
+#include <type_traits>
+#include "raftstore/region.h"
+#include "storage/engine.h"
+#include "storage/storage.h"
+namespace tinykv::server {
+
+struct PeerSlot {
+    RegionId region_id;
+    raftstore::Region region;
+    std::unique_ptr<Engine> engine;
+    std::unique_ptr<raftstore::Peer> peer;
+};
+
+class RegionPeerRegistry {
+public:
+    using ObserverFactory = std::function<void(raftstore::Peer&)>;   // 宿主给每个新 peer 挂 split 钩子
+
+    explicit RegionPeerRegistry(std::filesystem::path data_dir, raftstore::StoreMeta& meta,
+                                std::uint64_t election_timeout = 8,
+                                std::uint64_t heartbeat = 3)
+        : data_dir_(std::move(data_dir)), meta_(meta), election_(election_timeout),
+          heartbeat_(heartbeat) {}
+
+    void set_observer_factory(ObserverFactory fn) { observer_factory_ = std::move(fn); }
+
+    // 建初始 slot：region 1 独占全空间（用 data_dir 根，兼容既有单 region 数据布局）
+    [[nodiscard]] result<void> bootstrap(const raftstore::Region& region) {
+        auto eng = Engine::open({.dir = data_dir_, .fsync_on_commit = false});
+        if (!eng.has_value()) {
+            return std::unexpected(eng.error());
+        }
+        auto peer = raftstore::Peer::open(raft::Config{
+                                              .id = PeerId{region.id.value},
+                                              .voters = {PeerId{region.id.value}},
+                                              .election_timeout = election_,
+                                              .heartbeat_interval = heartbeat_},
+                                          **eng);
+        if (!peer.has_value()) {
+            return std::unexpected(peer.error());
+        }
+        (*peer)->set_region(region);
+        (*peer)->set_store_meta(&meta_);
+        install(region, std::move(*eng), std::move(*peer));
+        return {};
+    }
+
+    // 按 key 找覆盖它的 region 对应的 Peer（route = StoreMeta 区间索引 + 本表 id 索引）
+    [[nodiscard]] raftstore::Peer* peer_for(std::string_view key) const {
+        auto region = meta_.find_region(key);
+        if (!region.has_value()) {
+            return nullptr;
+        }
+        return peer_by_id(region->id);
+    }
+
+    [[nodiscard]] raftstore::Peer* peer_by_id(RegionId id) const {
+        auto it = slots_.find(id);
+        return it == slots_.end() ? nullptr : it->second.peer.get();
+    }
+
+    [[nodiscard]] raftstore::Peer& require(std::string_view key) const {
+        auto* p = peer_for(key);
+        if (p == nullptr) {
+            // 理论不可达（REL-05：每个 key 恰属一个 region）；保底返回首个 peer 避免解引用空
+            return *slots_.begin()->second.peer;
+        }
+        return *p;
+    }
+
+    [[nodiscard]] std::size_t size() const { return slots_.size(); }
+
+    // 遍历所有 peer（GC 广播、Worker 泵、stop 逆序收尾）
+    [[nodiscard]] std::vector<raftstore::Peer*> all_peers() const {
+        std::vector<raftstore::Peer*> out;
+        out.reserve(slots_.size());
+        for (const auto& [id, slot] : slots_) {
+            (void)id;
+            out.push_back(slot.peer.get());
+        }
+        return out;
+    }
+
+    // split 回调：动态建右半 peer + 迁移数据。left 是本 peer 保留的左区间。
+    [[nodiscard]] result<void> on_split(const raftstore::Region& left,
+                                        const raftstore::Region& right) {
+        if (slots_.find(right.id) != slots_.end()) {
+            return {};   // 幂等：已建过
+        }
+        auto* old_slot = find_slot(left.id);
+        if (old_slot == nullptr) {
+            return std::unexpected(InvalidArgument{"split 宿主 slot 不存在"});
+        }
+        auto eng = Engine::open({.dir = data_dir_ / "regions" / std::to_string(right.id.value),
+                                 .fsync_on_commit = false});
+        if (!eng.has_value()) {
+            return std::unexpected(eng.error());
+        }
+        if (auto r = migrate_range(*old_slot->engine, **eng, right); !r.has_value()) {
+            return std::unexpected(r.error());
+        }
+        auto peer = raftstore::Peer::open(raft::Config{
+                                              .id = PeerId{right.id.value},
+                                              .voters = {PeerId{right.id.value}},
+                                              .election_timeout = election_,
+                                              .heartbeat_interval = heartbeat_},
+                                          **eng);
+        if (!peer.has_value()) {
+            return std::unexpected(peer.error());
+        }
+        (*peer)->set_region(right);
+        (*peer)->set_store_meta(&meta_);
+        // 新单节点组立即选举成 leader：split 后客户端可马上写右半（不等后台 worker）
+        for (int i = 0; i < 20 && !(*peer)->is_leader(); ++i) {
+            (*peer)->tick();
+        }
+        (void)(*peer)->on_ready();
+        install(right, std::move(*eng), std::move(*peer));
+        return {};
+    }
+
+    // 关闭全部引擎（逆序：peer 先析构，engine 后 close）
+    [[nodiscard]] result<void> close_all() {
+        std::string first_err;
+        for (auto it = slots_.rbegin(); it != slots_.rend(); ++it) {
+            it->second.peer.reset();
+            if (auto r = it->second.engine->close(); !r.has_value() && first_err.empty()) {
+                first_err = std::string(tinykv::describe_kind(r.error()));
+            }
+            it->second.engine.reset();
+        }
+        slots_.clear();
+        if (!first_err.empty()) {
+            return std::unexpected(IoFailed{.path = "peer-registry", .reason = first_err});
+        }
+        return {};
+    }
+
+    // 选举所有 peer（单节点组：若干 tick 即 leader）；启动/新 peer 建好后调用
+    void campaign_all() {
+        for (auto& [id, slot] : slots_) {
+            (void)id;
+            for (int i = 0; i < 20 && !slot.peer->is_leader(); ++i) {
+                slot.peer->tick();
+            }
+            (void)slot.peer->on_ready();
+        }
+    }
+
+    // 泵一轮：每个 peer tick + on_ready（Worker 与 executor 共用外部闸）
+    void pump_all() {
+        for (auto& [id, slot] : slots_) {
+            (void)id;
+            slot.peer->tick();
+            (void)slot.peer->on_ready();
+        }
+    }
+
+private:
+    PeerSlot* find_slot(RegionId id) {
+        auto it = slots_.find(id);
+        return it == slots_.end() ? nullptr : &it->second;
+    }
+
+    void install(const raftstore::Region& region, std::unique_ptr<Engine> eng,
+                 std::unique_ptr<raftstore::Peer> peer) {
+        PeerSlot slot;
+        slot.region_id = region.id;
+        slot.region = region;
+        slot.engine = std::move(eng);
+        slot.peer = std::move(peer);
+        if (observer_factory_) {
+            observer_factory_(*slot.peer);
+        }
+        slots_.emplace(region.id, std::move(slot));
+    }
+
+    // 把 src 中落在 region 区间的 MVCC 条目搬到 dst：三列族各自扫描，
+    // 跳过 raft log 内部键（\0 前缀），user key = 存储键去掉 8 字节 ts 后缀
+    // （Lock CF 无后缀，直接是 user key）。
+    [[nodiscard]] result<void> migrate_range(Storage& src, Storage& dst,
+                                             const raftstore::Region& region) {
+        std::vector<Modify> copies;
+        std::vector<Modify> removes;
+        for (const Cf cf : {Cf::Default, Cf::Write, Cf::Lock}) {
+            if (auto r = scan_cf(src, cf, region, copies, removes); !r.has_value()) {
+                return std::unexpected(r.error());
+            }
+        }
+        if (!copies.empty()) {
+            if (auto r = dst.write(copies); !r.has_value()) {
+                return std::unexpected(r.error());
+            }
+        }
+        if (!removes.empty()) {
+            if (auto r = src.write(removes); !r.has_value()) {
+                return std::unexpected(r.error());
+            }
+        }
+        return {};
+    }
+
+    [[nodiscard]] result<void> scan_cf(Storage& src, Cf cf, const raftstore::Region& region,
+                                       std::vector<Modify>& copies,
+                                       std::vector<Modify>& removes) const {
+        auto reader = src.create_reader();
+        if (!reader.has_value()) {
+            return std::unexpected(reader.error());
+        }
+        auto it = (*reader)->scan(cf, std::span<const std::byte>{}, kScanLimit);
+        if (!it.has_value()) {
+            return std::unexpected(it.error());
+        }
+        for (; (*it)->valid(); (*it)->next()) {
+            const std::string stored((*it)->key());
+            if (stored.empty() || stored[0] == '\0') {
+                continue;   // raft log 内部键（\0re / \0lm）不迁移
+            }
+            const auto user = user_key_of(cf, stored);
+            if (!region.contains(user)) {
+                continue;
+            }
+            copies.push_back(Modify{Put{.cf = cf, .key = stored,
+                                         .value = std::string((*it)->value())}});
+            removes.push_back(Modify{Delete{.cf = cf, .key = stored}});
+        }
+        return {};
+    }
+
+    [[nodiscard]] static std::string user_key_of(Cf cf, const std::string& stored) {
+        if (cf == Cf::Lock || stored.size() < 8) {
+            return stored;
+        }
+        return stored.substr(0, stored.size() - 8);   // Default/Write：末尾 8B 大端 ts
+    }
+
+    static constexpr std::size_t kScanLimit = 1U << 20U;   // Admin 低频，全量有界
+
+    std::filesystem::path data_dir_;
+    raftstore::StoreMeta& meta_;
+    std::uint64_t election_;
+    std::uint64_t heartbeat_;
+    ObserverFactory observer_factory_;
+    std::map<RegionId, PeerSlot> slots_;
+};
+
+}  // namespace tinykv::server

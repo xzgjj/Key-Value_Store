@@ -1,5 +1,5 @@
 {
-  "task": "M6 daemon 化与运行时（用户 2026-11-17 指令四条）：①Service 抽象+生命周期 ②组合根 tinykv-server+Worker 泵循环+信号优雅关闭 ③会话作用域（连接级 TxnClient，解锁 CLI 交互式事务）④Interceptor/Metrics + GC（FUNC-17）。region→peer 动态注册表挂账（需 raft 日志 region 隔离）。",
+  "task": "M6 最终交付：组合根+Service+会话+Interceptor+GC+region→peer 动态注册表（Storage×N/Peer×regions，split 动态建实例+数据迁移）",
   "paths": [
     "proto/raft_cmdpb.proto",
     "src/common/error.h",
@@ -63,7 +63,11 @@
     "src/raftstore/CMakeLists.txt",
     "src/CMakeLists.txt",
     "proto/kv.proto",
-    "README.md"
+    "README.md",
+    "src/server/interceptor.h",
+    "src/server/peer_registry.h",
+    "tests/unit/server/interceptor_test.cpp",
+    "tests/unit/server/peer_registry_test.cpp"
   ],
   "reason": "用户 2026-11-16 指令『三个 bench补充并 推送；之后M5（事务层）新分支 4 开始 各种方案按要求你走最终交付』——授权按 SPEC-4 全部默认值（D4-1~D4-5）自主落地 M5。每层 TDD、CI 绿、三轮 review、本地 commit（分支 4）。",
   "bugfix": false,

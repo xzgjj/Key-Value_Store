@@ -20,7 +20,7 @@ class PeerTxnExecutor final : public tinykv::server::PeerTxnExecutor {
 public:
     explicit PeerTxnExecutor(PeerCluster& cluster)
         : tinykv::server::PeerTxnExecutor(
-              [&cluster]() -> tinykv::raftstore::Peer& {
+              [&cluster](std::string_view) -> tinykv::raftstore::Peer& {
                   const int idx = cluster.leader();
                   if (idx < 0) {
                       ADD_FAILURE() << "事务执行需要 leader";
@@ -28,7 +28,7 @@ public:
                   }
                   return cluster.peer(idx);
               },
-              [&cluster] {
+              [&cluster](std::string_view) {
                   // 测试主动驱动：双泵 + 全组 tick（生产由 Worker 后台驱动）
                   cluster.pump();
                   for (int n = 0; n < cluster.size(); ++n) {
@@ -36,7 +36,7 @@ public:
                   }
                   cluster.pump();
               },
-              [&cluster](std::uint64_t index) {
+              [&cluster](std::string_view, std::uint64_t index) {
                   // 收敛判据：全部副本 apply 到位（不只 leader）
                   for (int n = 0; n < cluster.size(); ++n) {
                       if (!cluster.peer(n).applied_at_least(index)) {
