@@ -29,10 +29,6 @@ std::string not_found(bool keep_alive) {
                         "Connection: close\r\n\r\n";
 }
 
-constexpr std::string_view kNotFound =
-    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n"
-    "Connection: close\r\n\r\n";
-
 [[nodiscard]] char lower_ascii(char ch) {
     return ch >= 'A' && ch <= 'Z' ? static_cast<char>(ch - 'A' + 'a') : ch;
 }

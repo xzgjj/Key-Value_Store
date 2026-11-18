@@ -60,6 +60,9 @@ struct ServerOptions {
     // ⑩ 安全边界（M7-SEC-01/02）：非空 = 所有 HTTP 请求必须带 Authorization: Bearer <token>；
     // 为空 = 不鉴权，此时强制绑回环（D6-3：默认关 + 启动告警 + 强制回环）。
     std::string auth_token;
+    // ⑦ 跨区事务开关（SPEC-6 §6.6 `txn.cross_region_enabled`，默认关）：
+    // 打开后会话里的 TxnClient 会按 region 分组走两阶段提交；关闭时跨区 prewrite 仍被拒绝。
+    bool cross_region_enabled{false};
 
     // ---- Raft 传输层（M7 ⑤：单机 KV → 分布式 store 的分水岭） ----
     // voters 为空 = 单节点模式（不创建 Transport，保持既有行为）；非空 = 多副本组。
@@ -271,6 +274,14 @@ private:
             return tinykv::unexpected(baseline.error());
         }
         sessions_ = std::make_unique<TxnSessionManager>(*exec_, checked_tso_);
+        if (opt_.cross_region_enabled) {
+            // 协调在 client 侧（SPEC-6 §6.2.2）：TxnClient 拿到路由就能自己分组，
+            // 不需要新增一个并行类——两套编排只会分叉。
+            sessions_->set_region_router([this](std::string_view key) -> std::optional<RegionId> {
+                auto r = meta_.find_region(key);
+                return r.has_value() ? std::optional<RegionId>{r->id} : std::nullopt;
+            });
+        }
         return {};
     }
 
@@ -538,9 +549,7 @@ private:
     [[nodiscard]] std::string admin_post(const std::string& path, const std::string& body) {
         const auto parts = http::split_frame(body);
         if (path == "/txn/begin") {
-            auto sid = sessions_->begin(now_ms_.load());
-            return sid.has_value() ? "OK session=" + *sid
-                                   : "ERR " + std::string(tinykv::describe_kind(sid.error()));
+            return admin_txn_begin();
         }
         if (path == "/txn/set" || path == "/txn/del") {
             return admin_txn_buffered(path == "/txn/set", parts);
@@ -549,19 +558,57 @@ private:
             return admin_txn_finish(path == "/txn/commit", parts);
         }
         if (path == "/txn/gc") {
-            const auto safe = parts.size() == 2 ? http::parse_u64(parts[1]) : std::nullopt;
-            if (parts.size() > 1 && !safe.has_value()) {
-                return "ERR bad-request";
-            }
-            const Ts point{safe.value_or(sessions_safe_point())};
-            auto r = exec_->gc(point.value);
-            return r.has_value() ? "OK gc"  // 计数在 apply 侧日志
-                                 : "ERR " + std::string(tinykv::describe_kind(r.error()));
+            return admin_txn_gc(parts);
+        }
+        if (path == "/trace") {
+            return admin_trace(parts);
         }
         if (path == "/region/split") {
             return admin_split(parts);
         }
         return {};
+    }
+
+    [[nodiscard]] std::string admin_txn_begin() {
+        auto sid = sessions_->begin(now_ms_.load());
+        return sid.has_value() ? "OK session=" + *sid
+                               : "ERR " + std::string(tinykv::describe_kind(sid.error()));
+    }
+
+    // GC：body 形如 `gc` 或 `gc\t<safe_point>`；安全点缺省取当前 TSO / 最小活跃 start_ts
+    [[nodiscard]] std::string admin_txn_gc(const std::vector<std::string>& parts) {
+        const auto safe = parts.size() == 2 ? http::parse_u64(parts[1]) : std::nullopt;
+        if (parts.size() > 1 && !safe.has_value()) {
+            return "ERR bad-request";
+        }
+        const Ts point{safe.value_or(sessions_safe_point())};
+        auto r = exec_->gc(point.value);
+        if (!r.has_value()) {
+            return write_error(r.error());
+        }
+        return "OK gc";  // 计数在 apply 侧日志
+    }
+
+    // 采样开关：body 形如 `trace\t<region_id>\ton|off`（region 必须存在，否则 ERR no-region）
+    [[nodiscard]] std::string admin_trace(const std::vector<std::string>& parts) {
+        if (parts.size() != 3) {
+            return "ERR bad-request";
+        }
+        const bool on = parts[2] == "on";
+        if (!on && parts[2] != "off") {
+            return "ERR bad-request";
+        }
+        const auto id = http::parse_u64(parts[1]);
+        if (!id.has_value()) {
+            return "ERR bad-request";
+        }
+        if (!meta_.find_region_by_id(RegionId{*id}).has_value()) {
+            return "ERR no-region";
+        }
+        if (trace_ != nullptr) {
+            trace_->set_enabled(on);
+        }
+        return on ? "OK trace on" : "OK trace off";
     }
 
     // region split（M4 功能在 M6 多 region 下重新接通）：propose → apply → observer 动态建 peer
@@ -595,27 +642,41 @@ private:
         if (multi_voter()) {
             return "ERR split-unsupported-in-multi-voter";
         }
-        for (int round = 0; round < 400; ++round) {
-            pump_locked();
-            if (peer->applied_at_least(expect)) {
-                peer->drop_reply(kSplitClient, expect);  // 同上，admin 回执也不消费
-                next_region_id_.fetch_add(1);
-                return split_error_.empty() ? "OK split" : "ERR " + split_error_;
-            }
+        if (!wait_applied_locked(*peer, expect)) {
+            return "ERR apply-timeout";
         }
-        return "ERR apply-timeout";
+        peer->drop_reply(kSplitClient, expect);  // admin 回执不消费，必须显式回收
+        next_region_id_.fetch_add(1);
+        return split_error_.empty() ? "OK split" : "ERR " + split_error_;
     }
 
-    // 会话写缓冲（set/del）
+    // 会话写缓冲（set/del）：显式分支而非嵌套三元——三元链在这里既难读也会把
+    // 函数的圈复杂度推过门禁（每个 ? 都算一个分支）。
     [[nodiscard]] std::string admin_txn_buffered(bool is_set,
                                                  const std::vector<std::string>& parts) {
-        auto r = is_set ? (parts.size() == 4
-                               ? sessions_->set(parts[1], parts[2], parts[3])
-                               : tinykv::unexpected(InvalidArgument{"set 需 session/key/value"}))
-                        : (parts.size() == 3
-                               ? sessions_->del(parts[1], parts[2])
-                               : tinykv::unexpected(InvalidArgument{"del 需 session/key"}));
-        return r.has_value() ? "OK" : "ERR " + std::string(tinykv::describe_kind(r.error()));
+        if (is_set) {
+            if (parts.size() != 4) {
+                return "ERR bad-request";
+            }
+            const auto r = sessions_->set(parts[1], parts[2], parts[3]);
+            if (!r.has_value()) {
+                return write_error(r.error());
+            }
+            return "OK";
+        }
+        if (parts.size() != 3) {
+            return "ERR bad-request";
+        }
+        const auto r = sessions_->del(parts[1], parts[2]);
+        if (!r.has_value()) {
+            return write_error(r.error());
+        }
+        return "OK";
+    }
+
+    // 写路径失败回执：只回错误种类（细节在日志；读路径才需要字段级 JSON）
+    [[nodiscard]] static std::string write_error(const KvError& error) {
+        return "ERR " + std::string(tinykv::describe_kind(error));
     }
 
     // 会话终结（commit/rollback）
@@ -625,12 +686,17 @@ private:
             return "ERR bad-request";
         }
         if (!is_commit) {
-            auto r = sessions_->rollback(parts[1]);
-            return r.has_value() ? "OK" : "ERR " + std::string(tinykv::describe_kind(r.error()));
+            const auto rb = sessions_->rollback(parts[1]);
+            if (!rb.has_value()) {
+                return write_error(rb.error());
+            }
+            return "OK";
         }
         auto r = sessions_->commit(parts[1], now_ms_);
+        // 错误带上结构化细节：跨区拒绝、锁冲突、IO 失败的原因都在字段里，
+        // 只回 kind 的话调用方（和人）都无法定位（M7 跨区上线时踩到这点）。
         return r.has_value() ? "OK commit_ts=" + std::to_string(r->value)
-                             : "ERR " + std::string(tinykv::describe_kind(r.error()));
+                             : "ERR " + tinykv::describe(r.error());
     }
 
     // GET 族：会话读 + 观测
@@ -661,6 +727,12 @@ private:
         if (path == "/region") {
             return region_detail(http::http_query_param(query, "id"));
         }
+        if (path == "/region/peers") {
+            return region_peers(http::http_query_param(query, "id"));
+        }
+        if (path == "/scheduler/status") {
+            return scheduler_status();
+        }
         if (path == "/trace") {
             return intercept_events();
         }
@@ -686,6 +758,45 @@ private:
         const auto commit = peer == nullptr ? 0U : peer->raft().committed().value;
         return base + ",\"term\":" + std::to_string(term) +
                ",\"commit\":" + std::to_string(commit) + "}";
+    }
+
+    // 副本分布（CLI `region peers <id>` 的落点）。单 store 单 peer/region 是当前事实，
+    // 如实报告而不是编造多副本表：store_id 留 0 = 本机未配置多 store。
+    [[nodiscard]] std::string region_peers(const std::string& id_text) {
+        const auto id = http::parse_u64(id_text);
+        if (!id.has_value()) {
+            return {};
+        }
+        auto region = meta_.find_region_by_id(RegionId{*id});
+        if (!region.has_value()) {
+            return {};
+        }
+        std::string out = "[";
+        if (registry_ != nullptr) {
+            auto* peer = registry_->peer_by_id(region->id);
+            if (peer != nullptr) {
+                out += "{\"peer_id\":" + std::to_string(peer->id().value) +
+                       ",\"store_id\":0,\"leader\":" + (peer->is_leader() ? "true" : "false") + "}";
+            }
+        }
+        return out + "]";
+    }
+
+    // 调度器视图（CLI `scheduler status` 的落点）。单 store 没有真正需要调度的对象，
+    // 因此报告"事实 + 为什么没有调度器"，避免让调用方以为有 PD 在背后工作。
+    [[nodiscard]] std::string scheduler_status() {
+        std::size_t leaders = 0;
+        if (registry_ != nullptr) {
+            for (auto* peer : registry_->all_peers()) {
+                if (peer->is_leader()) {
+                    ++leaders;
+                }
+            }
+        }
+        return "{\"mode\":\"pd-lite-embedded\",\"regions\":" +
+               std::to_string(meta_.region_count()) + ",\"leaders\":" + std::to_string(leaders) +
+               ",\"voters\":" + std::to_string(opt_.voters.size()) +
+               ",\"note\":\"单 store 无跨节点调度对象，调度器以库形态存在\"}";
     }
 
     // 同步快照：业务线程可等闸；观测端点用 status_snapshot() 永不等待业务闸

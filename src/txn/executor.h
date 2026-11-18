@@ -26,6 +26,17 @@ public:
     [[nodiscard]] virtual result<void> prewrite(tinykv::span<const Mutation> mutations,
                                                 std::string_view primary, Ts start_ts,
                                                 std::uint64_t ttl_ms, std::uint64_t now_ms) = 0;
+    // 跨区分组用：本批 mutations 全部落在 route_key 所属 region，primary 可能在别组。
+    // 默认拒绝——只有"经 raft 且知道路由"的执行端才配支持分组（单机基线不需要）。
+    [[nodiscard]] virtual result<void> prewrite_routed(std::string_view /*route_key*/,
+                                                       tinykv::span<const Mutation> /*mutations*/,
+                                                       std::string_view /*primary*/,
+                                                       Ts /*start_ts*/, std::uint64_t /*ttl_ms*/,
+                                                       std::uint64_t /*now_ms*/,
+                                                       bool /*cross_region*/) {
+        return tinykv::unexpected(
+            InvalidArgument{"当前执行端不支持跨区分组提交（需经 raft + 路由注入）"});
+    }
     [[nodiscard]] virtual result<void> commit(tinykv::span<const std::string> keys, Ts start_ts,
                                               Ts commit_ts) = 0;
     [[nodiscard]] virtual result<void> rollback(tinykv::span<const std::string> keys,
@@ -51,6 +62,14 @@ public:
                                         std::string_view primary, Ts start_ts, std::uint64_t ttl_ms,
                                         std::uint64_t now_ms) override {
         return mvcc_.prewrite(mutations, primary, start_ts, ttl_ms, now_ms);
+    }
+    [[nodiscard]] result<void> prewrite_routed(std::string_view /*route_key*/,
+                                               tinykv::span<const Mutation> mutations,
+                                               std::string_view primary, Ts start_ts,
+                                               std::uint64_t ttl_ms, std::uint64_t now_ms,
+                                               bool cross_region) override {
+        // 单机基线没有 region 概念：分组退化为"整批一次"，语义与 prewrite 相同
+        return mvcc_.prewrite(mutations, primary, start_ts, ttl_ms, now_ms, !cross_region);
     }
     [[nodiscard]] result<void> commit(tinykv::span<const std::string> keys, Ts start_ts,
                                       Ts commit_ts) override {

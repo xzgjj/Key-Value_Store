@@ -93,6 +93,7 @@ tinykv-cli --endpoint 127.0.0.1:3380 status
 | 环境变量 | 无。所有行为由命令行与配置文件决定，便于复现 |
 | 文件权限 | 依赖操作系统对数据目录的权限；CLI 内部不做鉴权 |
 | 网络暴露 | 集群模式经 HTTP 访问服务端；**线协议见 [http-protocol.md](http-protocol.md)**（含请求体编码、keep-alive、401 语义） |
+| 观测/管理命令 | `region peers <id>`、`scheduler status`、`trace region <id> on\|off` 已由服务端实现（此前恒 404），响应形状见 http-protocol.md §2 |
 | 鉴权 | 服务端配 `server.auth_token` 后，请求须带 `Authorization: Bearer <token>`；CLI 暂无 token 参数（规划中），脚本用 curl |
 
 服务端新增 `--config <file>`（与 CLI 同格式），可配 `server.host` / `server.auth_token`；

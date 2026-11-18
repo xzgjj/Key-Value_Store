@@ -189,9 +189,12 @@ CI 用 `ctest -L unit|simulation|integration|bench` 选择，无需解析本页�
 | tests/unit/server/multi_replica_test.cpp | unit | `multi_replica_test` | - | fast |
 | tests/unit/server/lock_registry_test.cpp | unit | `lock_registry_test` | - | fast |
 | tests/unit/server/auth_test.cpp | unit | `auth_test` | - | fast |
+| tests/unit/server/admin_endpoints_test.cpp | unit | `admin_endpoints_test` | - | fast |
 | tests/unit/txn/gc_test.cpp | unit | `gc_test` | - | fast |
 | tests/integration/snapshot_test.cpp | integration | `snapshot_test` | - | nightly |
 | tests/integration/split_meta_persistence_test.cpp | integration | `split_meta_persistence_test` | - | nightly |
+| tests/integration/txn_cross_region_test.cpp | integration | `txn_cross_region_test` | - | nightly |
+| tests/integration/txn_cross_region_chaos_test.cpp | integration | `txn_cross_region_chaos` | - | nightly;serial |
 | tests/integration/crash_recovery_test.cpp | integration | `crash_recovery_test` | - | nightly |
 | tests/bench/cluster_bench_test.cpp | bench | `cluster_bench` | - | nightly |
 | tests/bench/tcp_perf_bench_test.cpp | bench | `tcp_perf_bench` | - | nightly |
@@ -342,6 +345,14 @@ FAIL: 登记表与仓库不一致 (docs/testing.md §4)
    开着它等于把"能编译"改成"不能编译"。这是有意的、写进根 `CMakeLists.txt` 的取舍。
 3. **新增代码不得引入 23/20 独有设施而不走 compat**：CI 的兼容矩阵会在 17 档直接编译失败。
 4. **不允许"只在某个标准下跳过测试"**：三档跑同一份 `ctest`（含 `-L fast` 与 nightly）。
+
+矩阵验证一条命令（建 → 测 → 删，只留 C++23 默认树；每棵矩阵树 1.3~2.5GB，不删会累积）：
+
+```bash
+python scripts/verify_matrix.py              # g++/clang++ × 17/23，测完删非默认树
+python scripts/verify_matrix.py --keep       # 兼容问题排查时保留树
+python scripts/verify_matrix.py --clean-only # 只清历史遗留树
+```
 
 本地三条命令（等价于 CI 的 compat job）：
 

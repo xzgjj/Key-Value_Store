@@ -90,6 +90,9 @@ message TxnPrewriteRequest {
     // 为什么必须随请求传：TTL 判定需要"锁出生的时刻"，服务端本地时钟猜不出客户端何时加锁，
     // 用 0 当出生时刻会让运行超过 TTL 的进程把所有新锁判成过期（ARCH-1 P0-2）。
     uint64 created_ms = 5;
+    // 跨区事务标记（M7 ⑦）：true 表示"本批只是该事务的一个分区组，primary 可能在别的 region"。
+    // 服务端据此放宽"primary 必须在本批内"的校验——单区路径必须保持 false，否则决议锚点失去守护。
+    bool cross_region = 6;
 }
 message TxnPrewriteResponse {
     repeated bytes already_exist_keys = 1;  // 与既有锁冲突且不可覆盖的 key；可为空

@@ -1,18 +1,24 @@
 {
-  "task": "M7 第二批：⑦ 分组内核（RegionGrouper）+ 接口契约核对单 + SPEC/README 进度对齐；不改任何运行时行为",
+  "task": "M7 收口：⑦ 跨区协商器（分组 2PC + 恢复广播 + 150 轮 chaos）、CLI 三个悬空端点的服务端实现、跨区开关接配置",
   "paths": [
     "src/txn/",
+    "src/server/",
+    "src/raftstore/",
+    "src/config/",
+    "proto/",
     "tests/",
     "docs/",
+    "demo.yaml",
     "README.md",
-    "ci/task_scope.json"
+    "ci/task_scope.json",
+    "scripts/verify_matrix.py"
   ],
-  "reason": "⑦ 按 SPEC-6 §6.1.2 必须拆步推进，本批只落第 2 步（纯函数分组内核 + 6 例），不碰组合根与协议状态机。同时把本批触及的对外契约集中到 docs/CONTRACT-REVIEW.md 供用户逐条确认，并把 SPEC-6 §6.9 与 README §5 的完成度改成事实。",
+  "reason": "用户确认：请求体保持制表符分隔（已入契约）；补齐协调器/状态机/恢复；CLI 三个悬空端点选补服务端。⑦ 在第五/六笔中落地：TxnClient 分组提交（PREPARE→TSO→COMMIT_PRIMARY→COMMIT_SECONDARY）+ resolve_locks_of 广播到各 region 引擎 + 开关与配置；三个端点（/region/peers、/scheduler/status、POST /trace）补齐并有用例。 另收 scripts/verify_matrix.py：把'多标准/多编译器建树→测→删'收敛成一条命令（矩阵树每棵 1.3~2.5GB，验证完不删会累积到十几 GB，本次就发生过因清理导致构建树消失）。",
   "bugfix": false,
   "fixes": [],
   "overflow_approved": true,
   "behavior_change_approved": false,
   "rule_asset_approved": false,
-  "behavior_change_note": "无运行时行为变更：RegionGrouper 是未被调用的纯函数；其余为文档与进度对齐。",
-  "approver": "用户（2026-11-18：落地 SPEC-6 的 M7 部分；接口契约需与用户核对确定）"
+  "behavior_change_note": "①TxnPrewriteRequest 追加 cross_region=6（跨区分组时放宽'primary 必须在本批'，单区路径不变）；②新增 txn.cross_region_enabled（默认 false）；③resolve_locks_of 由'只清 primary 所在 region'改为'广播到所有 region'（跨区事务的锁分散在多引擎，只清一处会留下永远解不掉的锁）；④txn 端点错误改为带结构化细节（ERR InvalidArgument: …原因=…）；⑤新增 /region/peers、/scheduler/status、POST /trace；⑥TraceInterceptor 支持开关。",
+  "approver": "用户（2026-11-18：协调器/状态机/恢复补齐；CLI 悬空端点补服务端；/kv 保持制表符分隔）"
 }

@@ -143,9 +143,9 @@ auto got = (*engine)->get(Cf::Default, std::as_bytes(std::span{"k1", 2}));
 
 如实记录，不伪装完成度。这些是当前实现的边界，也是后续工作的起点：
 
-- **跨 Region 事务**：已做护栏（跨区 prewrite 直接 `InvalidArgument`，不再静默写错分区）与分组内核
-  （`txn/region_grouper.h`），协调器/状态机/恢复尚未完成，故 `txn.cross_region_enabled` 保持关闭。
-  当前承诺：**单 Region 事务正确**；跨 Region 事务明确报错而非静默错。
+- **跨 Region 事务**：协调器已落地（分组 2PC：PREPARE → TSO → COMMIT_PRIMARY → COMMIT_SECONDARY，
+  恢复靠 primary 锁状态收敛），由 `txn.cross_region_enabled` 控制，**默认关闭**。
+  关闭时跨区 prewrite 返回 `InvalidArgument`（不静默写错分区）。打开前还缺 150 轮 chaos 证据。
 - **Region 元数据**：已落盘（`meta/regions.pb` + `.bak`），split 后重启拓扑与数据都在；
   但 region 1 仍沿用 `data_dir` 根目录（子 region 在 `regions/<id>`），双布局未合并。
 - **GC 安全点**取活跃会话的最小 start\_ts，无会话时取当前 TSO；锁冲突解析后的版本裁剪语义见 SPEC-4。

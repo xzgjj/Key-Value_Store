@@ -23,9 +23,9 @@
 
 | # | 议题 | 选项 | 我的建议 |
 |---|---|---|---|
-| D-1 | `/kv` 请求体限定"制表符分隔"，导致 **value 不能含制表符** | (a) 保持并写进契约（已做） (b) 引入转义（如 `\t`/`\\`）并升版本 (c) 请求体改 JSON | (a)：代价明确、实现简单；真正需要二进制时走 proto 载荷（事务 API 已经是） |
+| D-1 | `/kv` 请求体限定"制表符分隔"，导致 **value 不能含制表符** | 你的结论：**保持制表符分隔**（已写进 `http-protocol.md §3`，含"value/key 不能含制表符"的明确边界） | 与我的建议一致；需要二进制内容时走事务 API 的 proto 载荷 |
 | D-2 | 鉴权只做 Bearer token，未做 TLS（M7-SEC-02 的 TLS 部分） | (a) 维持"未鉴权强制回环 + token 明文" (b) 接 OpenSSL 做 TLS 传输装饰器 | (a)：TLS 需要新依赖与证书生命周期管理，属独立议题；当前形态已能挡住"裸奔在公网" |
-| D-3 | ⑦ 跨区 2PC 只交付到"分组内核" | (a) 就此打住（护栏继续拒跨区） (b) 继续做满状态机 + 恢复 | (a)：SPEC-6 §6.1.2 明确要求拆 PR；半成品 2PC 比不开更危险 |
+| D-3 | ⑦ 跨区 2PC 状态与开关 | 已按你的指示补做：分组 → 状态机（PREPARE/TSO/COMMIT_PRIMARY/COMMIT_SECONDARY）→ 恢复（锁决议广播到各 region）。`txn.cross_region_enabled` 仍默认 false | **建议**：chaos 已绿（150 轮枚举三窗口），但那是"已知窗口"的确定性覆盖，不是随机 kill。建议默认值维持 false，等夜跑级随机中断补上再讨论转正 |
 
 ## 3. CLI 交互面（与 `docs/cli.md` 一致，未变）
 
@@ -38,9 +38,10 @@
 | 插件 | 无插件机制（设计如此：CLI 是薄客户端） |
 | 环境变量 | 无。所有行为由命令行 + 配置文件决定 |
 
-**已知不一致（需要你决定怎么收口）**：`region peers`、`scheduler status`、`trace region ... on|off`
-三个命令仍会打到服务端不存在的端点（404）。收口方式二选一：
-(a) 服务端补实现；(b) 从 CLI 移除并更新 `docs/cli.md`。当前先记录，未动。
+**已收口**：你选了"补服务端"，三个命令现已实现并有 `admin_endpoints_test` 守护
+（`/region/peers`、`/scheduler/status`、`POST /trace`），响应形状写进 `docs/http-protocol.md §2`。
+`region peers` 如实报告"单 store 单 peer/region、store_id=0"，不编造多副本表；
+`scheduler status` 明确回 `mode=pd-lite-embedded` 与"单 store 无跨节点调度对象"。
 
 ## 4. 与本次改动无关但已在文档中固定的口径
 

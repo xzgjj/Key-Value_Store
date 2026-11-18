@@ -22,6 +22,7 @@
 #include "scheduler/tso.h"
 #include "txn/executor.h"
 #include "txn/mvcc.h"
+#include "txn/region_grouper.h"
 
 namespace tinykv::txn {
 
@@ -39,6 +40,13 @@ public:
 
     // D4-1：lock TTL 可配（默认 3000ms）
     void set_lock_ttl(std::uint64_t ttl_ms) { lock_ttl_ms_ = ttl_ms; }
+
+    // M7 ⑦：注入 key→region 路由后，commit 会先按 region 分组：
+    //   * 单组 → 走原单区路径（零额外开销）；
+    //   * 多组 → PREPARE(每组一次) → TSO → COMMIT_PRIMARY → COMMIT_SECONDARY 的阶段机。
+    // 不注入 = 关闭跨区（跨区 prewrite 仍被执行端护栏拒绝），行为与改造前一致。
+    void set_region_router(txn::RegionOfFn router) { region_of_ = std::move(router); }
+    [[nodiscard]] std::size_t last_region_count() const { return last_region_count_; }
 
     [[nodiscard]] result<Ts> begin() {
         auto r = tso_.get_timestamps(1);
@@ -105,22 +113,21 @@ public:
         for (const auto& m : writes_) {
             primary_ = std::min(primary_, m.key);
         }
-        auto pre = exec_.prewrite(writes_, primary_, start_ts_, lock_ttl_ms_, now_ms);
-        if (!pre.has_value()) {
-            // 冲突字段必须原样上抛：伪造 {primary="", lock_start_ts=0} 会让调用方无法决议
-            // （error.h 明确要求"未知时为 nullopt，禁止伪造"）
-            const KvError conflict = pre.error();
-            auto locked = resolve_blocking(std::move(pre.error()), now_ms);
-            if (!locked.has_value()) {
-                return tinykv::unexpected(locked.error());
+        // 阶段机第一步：PREPARE。分组只在注入了路由且确实跨区时生效。
+        if (region_of_) {
+            auto grouped = txn::group_by_region(writes_, primary_, region_of_);
+            if (!grouped.has_value()) {
+                return tinykv::unexpected(grouped.error());
             }
-            if (*locked) {
-                return tinykv::unexpected(conflict);  // 未过期锁：原样返回，调用方稍后重试
+            last_region_count_ = grouped->region_count();
+            if (!grouped->single_region()) {
+                return commit_grouped(*grouped, now_ms);
             }
-            pre = exec_.prewrite(writes_, primary_, start_ts_, lock_ttl_ms_, now_ms);
-            if (!pre.has_value()) {
-                return tinykv::unexpected(pre.error());
-            }
+        } else {
+            last_region_count_ = 1;
+        }
+        if (auto pre = prewrite_with_resolution(now_ms); !pre.has_value()) {
+            return tinykv::unexpected(pre.error());
         }
         auto ts = tso_.get_timestamps(1);
         if (!ts.has_value() || ts->empty()) {
@@ -164,6 +171,105 @@ public:
     [[nodiscard]] Ts start_ts() const { return start_ts_; }
 
 private:
+    // 单区 prewrite + 一次冲突决议重试。抽出来是因为 commit/commit_grouped 都要这段，
+    // 且它自身包含"决议后重试"的分支（留在 commit 里会把主流程压成不可读的长函数）。
+    [[nodiscard]] result<void> prewrite_with_resolution(std::uint64_t now_ms) {
+        auto pre = exec_.prewrite(writes_, primary_, start_ts_, lock_ttl_ms_, now_ms);
+        if (pre.has_value()) {
+            return {};
+        }
+        // 冲突字段必须原样上抛：伪造 {primary="", lock_start_ts=0} 会让调用方无法决议
+        // （error.h 明确要求"未知时为 nullopt，禁止伪造"）
+        const KvError conflict = pre.error();
+        auto locked = resolve_blocking(std::move(pre.error()), now_ms);
+        if (!locked.has_value()) {
+            return tinykv::unexpected(locked.error());
+        }
+        if (*locked) {
+            return tinykv::unexpected(conflict);  // 未过期锁：原样返回，调用方稍后重试
+        }
+        return exec_.prewrite(writes_, primary_, start_ts_, lock_ttl_ms_, now_ms);
+    }
+
+    // 跨区分组提交（M7 ⑦ 的核心）。顺序即协议：
+    //   ① 每组各一次 prewrite（cross_region=true，主组也走这条路，保证 primary 落对分区）
+    //   ② 取 commit_ts（TSO）——拿到之后，primary 的 Write 记录就是"已提交"的唯一凭证
+    //   ③ COMMIT_PRIMARY：先提交主组（原子锚点落定）
+    //   ④ COMMIT_SECONDARY：逐组提交；失败不回滚（也删不掉已提交的 primary），
+    //      由读者遇锁 → check_txn_status(primary) 正向推进（恢复路径，红线 3）
+    // 任一步 PREPARE 失败 → 回滚已成功的组（幂等），保持"要么全不可见、要么全可见"。
+    [[nodiscard]] result<Ts> commit_grouped(const RegionGroups& grouped, std::uint64_t now_ms) {
+        std::vector<std::size_t> prepared;
+        for (std::size_t i = 0; i < grouped.groups.size(); ++i) {
+            const auto& group = grouped.groups[i];
+            auto pre = exec_.prewrite_routed(group.mutations.front().key, group.mutations, primary_,
+                                             start_ts_, lock_ttl_ms_, now_ms, true);
+            if (!pre.has_value()) {
+                rollback_groups(grouped, prepared);
+                const KvError conflict = pre.error();
+                auto locked = resolve_blocking(std::move(pre.error()), now_ms);
+                if (!locked.has_value()) {
+                    return tinykv::unexpected(locked.error());
+                }
+                return tinykv::unexpected(conflict);  // 未过期锁：上抛让调用方稍后重试
+            }
+            prepared.push_back(i);
+        }
+        auto ts = tso_.get_timestamps(1);
+        if (!ts.has_value() || ts->empty()) {
+            rollback_groups(grouped, prepared);
+            return tinykv::unexpected(
+                NotLeader{.region_id = RegionId{0}, .leader_hint = std::nullopt});
+        }
+        const Ts commit_ts = ts->front();
+        // ③ 主组先提交：整个事务的原子锚点
+        if (auto r = commit_one_group(grouped.groups[grouped.primary_index], commit_ts);
+            !r.has_value()) {
+            std::vector<std::size_t> others;
+            for (std::size_t i = 0; i < grouped.groups.size(); ++i) {
+                if (i != grouped.primary_index) {
+                    others.push_back(i);
+                }
+            }
+            rollback_groups(grouped, others);  // 未决事务：其余组回滚，锁决议给最终结论
+            return tinykv::unexpected(r.error());
+        }
+        // ④ 其余组：失败不回滚，交给恢复路径
+        for (std::size_t i = 0; i < grouped.groups.size(); ++i) {
+            if (i == grouped.primary_index) {
+                continue;
+            }
+            if (auto r = commit_one_group(grouped.groups[i], commit_ts); !r.has_value()) {
+                return tinykv::unexpected(r.error());
+            }
+        }
+        writes_.clear();
+        return commit_ts;
+    }
+
+    [[nodiscard]] result<void> commit_one_group(const RegionGroup& group, Ts commit_ts) {
+        std::vector<std::string> keys;
+        keys.reserve(group.mutations.size());
+        for (const auto& m : group.mutations) {
+            keys.push_back(m.key);
+        }
+        return exec_.commit(keys, start_ts_, commit_ts);
+    }
+
+    // 回滚已 PREPARE 的组（幂等；单个失败不阻断——锁决议会兜底）
+    void rollback_groups(const RegionGroups& grouped, const std::vector<std::size_t>& which) {
+        for (const auto idx : which) {
+            if (idx >= grouped.groups.size()) {
+                continue;
+            }
+            std::vector<std::string> keys;
+            for (const auto& m : grouped.groups[idx].mutations) {
+                keys.push_back(m.key);
+            }
+            (void)exec_.rollback(keys, start_ts_);
+        }
+    }
+
     // 锁冲突决议编排：committed → 正向推进；过期/回滚 → 清锁；未过期 → blocked=true。
     // 返回值：true=仍被未过期锁阻塞（调用方稍后重试）；false=已决议，可重试本操作。
     [[nodiscard]] result<bool> resolve_blocking(KvError&& err, std::uint64_t now_ms) {
@@ -200,6 +306,8 @@ private:
     std::vector<Mutation> writes_;
     std::string primary_;
     std::uint64_t lock_ttl_ms_;
+    txn::RegionOfFn region_of_;         // 空 = 未启用跨区（单区路径）
+    std::size_t last_region_count_{1};  // 观测：上次提交跨了几个 region
 };
 
 }  // namespace tinykv::txn

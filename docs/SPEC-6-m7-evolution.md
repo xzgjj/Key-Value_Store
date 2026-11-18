@@ -264,10 +264,11 @@ tinykv-cli ... regions                 # 仍是两个 region（M6 行为是回�
 **M7 完成判定**：⑦⑧ 的 P0 行证据齐备 + ⑦ 的 chaos 夜跑 150 轮无 FAIL + `docs/notes-m7.md`。
 ⑨c 不设完成判定（持续项，随改动评估）。
 
-**当前进度（2026-11-18）**：⑧ 完成（`m7-rel-02` 三条断言）；⑨a 原语完成、接线待 ⑦；
-⑩ 完成鉴权、TLS 待决；⑦ 完成"护栏 + 分组"两步，协调器/状态机/恢复未做——
-⑦ 未完成前 `txn.cross_region_enabled` 保持 false，跨区事务继续被护栏拒绝（这是安全侧）。
-`docs/notes-m7.md` 尚未建立：等 ⑦ 收口时一次性写（避免"半成品笔记"变成第二份事实源）。
+**当前进度（2026-11-18）**：⑧ 完成；⑦ 完成（护栏 → 分组 → 状态机 → 恢复四步齐备，
+`txn_cross_region_test` 3 例 + `txn_cross_region_chaos` 150 轮），但**默认开关仍关**——
+chaos 是"枚举三个已知窗口"而非随机 kill，按 §6.7 精神还差夜跑级的随机中断；
+⑨a 原语完成、接线待开关转正；⑩ 鉴权完成、TLS 待决（见 `docs/CONTRACT-REVIEW.md` D-2）。
+`docs/notes-m7.md` 尚未建立：等 ⑦ 开关转正时一次性写（避免半成品笔记变成第二份事实源）。
 
 ## 6.8 开放决策点
 
@@ -290,4 +291,7 @@ tinykv-cli ... regions                 # 仍是两个 region（M6 行为是回�
 | 2026-11-18 | ⑧ 落地：`StoreMetaStore`（`meta/regions.pb` + `.bak` + CRC）、启动按 meta 重建 peer、split 后落盘；`split_meta_persistence_test` 三断言通过 | M7-REL-02 的证据链齐备；`next_region_id` 取盘上最大值 +1 |
 | 2026-11-18 | ⑨a 原语落地：`LockRegistry`（分桶 + 同区串行/跨区并行用例），**默认未接线** | 按 ARCH-3 §2 的并行约束，等 ⑦ 收口后再改组合根 |
 | 2026-11-18 | ⑩ 部分落地：Bearer token 鉴权（常量时间比较、401 不回显）+ 未鉴权强制回环 + `/status` 可见；**TLS 未做** | M7-SEC-01 达成；M7-SEC-02 只剩 TLS 一项，见 D-2 |
-| 2026-11-18 | ⑦ 第二步（分组）落地：`txn/region_grouper.h` 纯函数 + 6 例 | 协调器与状态机未做——按 §6.1.2 "不允许一次性提交完整 2PC"分步推进 |
+| 2026-11-18 | ⑦ 第二步（分组）落地：`txn/region_grouper.h` 纯函数 + 6 例 | 分组正确性可与协议正确性分开验证 |
+| 2026-11-18 | ⑦ 第三/四步落地：`TxnClient` 分组提交（PREPARE → TSO → COMMIT_PRIMARY → COMMIT_SECONDARY）+ 恢复路径（`resolve_locks_of` 广播到各 region 引擎）；`txn.cross_region_enabled` 开关 + `txn_cross_region_test` 3 例 | M7-REL-01 的三条路径（全可见/全不可见/中断收敛）各有一条用例；默认仍关 |
+| 2026-11-18 | ⑦ chaos 证据：`txn_cross_region_chaos` 150 轮枚举三个中断窗口（只 PREPARE 主组 / 全 PREPARE 未取 ts / 主组已提交），断言半提交不出现 | §6.7 的 chaos 行达成；默认开关是否打开仍待你拍板 |
+| 2026-11-18 | ARCH-1 P1-1 收口：`/region/peers`、`/scheduler/status`、`POST /trace` 服务端实现 + `admin_endpoints_test` | CLI 三个悬空命令不再 404 |

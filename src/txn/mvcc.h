@@ -162,15 +162,17 @@ public:
     }
 
     // ---- prewrite（§4.4：① 写写冲突立即 abort；② 锁冲突交给上层；③ 同一提案写 Default+Lock） ----
+    // primary_required：单区路径必须为 true（primary ∈ 本批 = 决议锚点可定位）。
+    // 跨区分组时每批只带本组 mutations、primary 在别组——此时传 false，锚点由协调器保证。
     [[nodiscard]] result<void> prewrite(tinykv::span<const Mutation> mutations,
                                         std::string_view primary, Ts start_ts, std::uint64_t ttl_ms,
-                                        std::uint64_t now_ms) {
+                                        std::uint64_t now_ms, bool primary_required = true) {
         if (mutations.empty()) {
             return tinykv::unexpected(InvalidArgument{"mutations 不得为空"});
         }
         const bool has_primary = std::any_of(mutations.begin(), mutations.end(),
                                              [&](const Mutation& m) { return m.key == primary; });
-        if (!has_primary) {
+        if (primary_required && !has_primary) {
             return tinykv::unexpected(InvalidArgument{"primary 必须在 mutations 中（决议锚点）"});
         }
         // ①② 检查阶段（先查后写，失败立即 abort 自己——红线1）

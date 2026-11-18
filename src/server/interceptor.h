@@ -44,9 +44,7 @@ public:
 
 class InterceptorChain {
 public:
-    void add(std::unique_ptr<Interceptor> interceptor) {
-        chain_.push_back(std::move(interceptor));
-    }
+    void add(std::unique_ptr<Interceptor> interceptor) { chain_.push_back(std::move(interceptor)); }
 
     [[nodiscard]] RequestEvent begin(std::string method, std::string path, std::string key) {
         RequestEvent ev;
@@ -61,10 +59,10 @@ public:
     }
 
     void finish(RequestEvent& ev, bool ok, std::string outcome) {
-        ev.elapsed_us = static_cast<std::uint64_t>(
-            std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::steady_clock::now() - ev.started)
-                .count());
+        ev.elapsed_us =
+            static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                           std::chrono::steady_clock::now() - ev.started)
+                                           .count());
         ev.ok = ok;
         ev.outcome = std::move(outcome);
         for (auto it = chain_.rbegin(); it != chain_.rend(); ++it) {
@@ -88,8 +86,8 @@ public:
 
     void after(const RequestEvent& ev) override {
         if (sink_) {
-            sink_(ev.method + " " + ev.path + (ev.ok ? " OK " : " ERR ") + ev.outcome +
-                  " " + std::to_string(ev.elapsed_us) + "us");
+            sink_(ev.method + " " + ev.path + (ev.ok ? " OK " : " ERR ") + ev.outcome + " " +
+                  std::to_string(ev.elapsed_us) + "us");
         }
     }
 
@@ -153,10 +151,14 @@ private:
 
 class TraceInterceptor final : public Interceptor {
 public:
-    explicit TraceInterceptor(std::size_t capacity = 16) : capacity_(capacity == 0 ? 1 : capacity) {}
+    explicit TraceInterceptor(std::size_t capacity = 16)
+        : capacity_(capacity == 0 ? 1 : capacity) {}
 
     void after(const RequestEvent& ev) override {
         std::lock_guard lock(mu_);
+        if (!enabled_) {
+            return;
+        }
         events_.push_back(ev);
         while (events_.size() > capacity_) {
             events_.pop_front();
@@ -168,19 +170,31 @@ public:
         return events_.size();
     }
 
+    // 采样开关（M7：`trace region <id> on|off` 的落点）。关闭时不记录但仍计数，
+    // 这样"关掉之后 count 还在涨"本身就是可观测事实（不是悄悄不工作）。
+    void set_enabled(bool on) {
+        std::lock_guard lock(mu_);
+        enabled_ = on;
+    }
+    [[nodiscard]] bool enabled() const {
+        std::lock_guard lock(mu_);
+        return enabled_;
+    }
+
     [[nodiscard]] std::string snapshot() const {
         std::lock_guard lock(mu_);
         std::string out;
         for (const auto& ev : events_) {
             out += (out.empty() ? "" : ",");
             out += "{\"method\":\"" + ev.method + "\",\"path\":\"" + ev.path +
-                   "\",\"ok\":" + (ev.ok ? "true" : "false") +
-                   ",\"outcome\":\"" + ev.outcome + "\"}";
+                   "\",\"ok\":" + (ev.ok ? "true" : "false") + ",\"outcome\":\"" + ev.outcome +
+                   "\"}";
         }
         return "[" + out + "]";
     }
 
 private:
+    bool enabled_{true};
     std::size_t capacity_;
     mutable std::mutex mu_;
     std::deque<RequestEvent> events_;

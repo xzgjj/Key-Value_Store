@@ -18,6 +18,7 @@
 #include "common/error.h"
 #include "txn/client.h"
 #include "txn/executor.h"
+#include "txn/region_grouper.h"
 
 namespace tinykv::server {
 
@@ -26,9 +27,15 @@ public:
     TxnSessionManager(txn::TxnExecutor& executor, tinykv::tso::TsProvider& tso)
         : executor_(executor), tso_(tso) {}
 
+    // ⑦：把路由注入给每个新会话的 client（已存在的会话不受影响——协议参数在 begin 时固定）
+    void set_region_router(tinykv::txn::RegionOfFn router) { router_ = std::move(router); }
+
     [[nodiscard]] tinykv::result<std::string> begin(std::uint64_t now_ms = 0) {
         std::lock_guard lock(mu_);
         auto client = std::make_unique<tinykv::txn::TxnClient>(executor_, tso_);
+        if (router_) {
+            client->set_region_router(router_);  // 跨区开关打开时每个会话都可跨区
+        }
         auto r = client->begin();
         if (!r.has_value()) {
             return tinykv::unexpected(r.error());
@@ -207,6 +214,7 @@ private:
     mutable std::mutex mu_;
     std::map<std::string, std::unique_ptr<tinykv::txn::TxnClient>> clients_;
     std::map<std::string, std::uint64_t> created_ms_;  // sid → 创建时刻（空闲回收用）
+    tinykv::txn::RegionOfFn router_;                   // 空 = 不启用跨区分组
     std::uint64_t next_id_{0};
 };
 

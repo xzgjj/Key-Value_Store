@@ -15,3 +15,6 @@ log:
 server:
   host: 127.0.0.1             # 监听地址；未配置 auth_token 时服务端强制改回环（M7-SEC-02）
   auth_token: ""              # 空 = 不鉴权（启动即在 /status 标 "auth":false）；非空 = 必须带 Authorization: Bearer <token>
+
+txn:
+  cross_region_enabled: false  # 跨区事务协调器（M7 ⑦）。开=按 region 分组两阶段提交；关=跨区写入明确拒绝

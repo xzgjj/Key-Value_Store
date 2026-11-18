@@ -27,8 +27,7 @@ namespace tinykv::server {
 // 在宏处于展开状态时写 `kvpb::Mutation::DELETE` 会被换成 `kvpb::Mutation::0x00010000L`，
 // 报错信息还离现场很远。这里按数值引用一次，彻底绕开宏——proto/kv.proto 已把 Op 固定为
 // PUT=0 / DELETE=1，数值是契约的一部分（改枚举值等于改线上格式，本就在禁改清单里）。
-inline constexpr kvpb::Mutation::Op kMutationDelete =
-    static_cast<kvpb::Mutation::Op>(1);
+inline constexpr kvpb::Mutation::Op kMutationDelete = static_cast<kvpb::Mutation::Op>(1);
 
 class PeerTxnExecutor : public tinykv::txn::TxnExecutor {  // 非 final：测试适配器派生注入收敛策略
 public:
@@ -88,6 +87,33 @@ public:
             primary, [&](tinykv::raftstore::Peer& p) { return p.propose_txn_prewrite(req); });
     }
 
+    // 跨区分组 prewrite：本批 mutations 必须同属 route_key 的 region（跨组越界当场拦下，
+    // 否则又会退化成"写进别的分区"）。primary 允许在别组（cross_region=true）。
+    [[nodiscard]] tinykv::result<void> prewrite_routed(
+        std::string_view route_key, tinykv::span<const tinykv::txn::Mutation> mutations,
+        std::string_view primary, tinykv::Ts start_ts, std::uint64_t ttl_ms, std::uint64_t now_ms,
+        bool cross_region) override {
+        if (auto guard = guard_batch_region(route_key, mutations, cross_region);
+            !guard.has_value()) {
+            return tinykv::unexpected(guard.error());
+        }
+        kvpb::TxnPrewriteRequest req;
+        req.set_primary_lock(std::string(primary));
+        req.set_start_ts(start_ts.value);
+        req.set_lock_ttl(ttl_ms);
+        req.set_created_ms(now_ms);
+        req.set_cross_region(cross_region);
+        for (const auto& m : mutations) {
+            auto* one = req.add_mutations();
+            one->set_op(m.op == tinykv::txn::Mutation::Op::kPut ? kvpb::Mutation::PUT
+                                                                : kMutationDelete);
+            one->set_key(m.key);
+            one->set_value(m.value);
+        }
+        return call_through_raft(
+            route_key, [&](tinykv::raftstore::Peer& p) { return p.propose_txn_prewrite(req); });
+    }
+
     [[nodiscard]] tinykv::result<void> commit(tinykv::span<const std::string> keys,
                                               tinykv::Ts start_ts, tinykv::Ts commit_ts) override {
         kvpb::TxnCommitRequest req;
@@ -124,48 +150,74 @@ public:
         return p.mvcc().check_txn_status(primary, lock_start_ts, now_ms);
     }
 
+    // 锁决议（红线 3）：该事务的锁可能分散在多个 region 的引擎里（跨区事务），
+    // 因此按 peer 广播——只清 primary 所在 region 会留下"永远解不掉的锁"，
+    // 读者每次读都撞 LockConflict，直到 TTL 过期。单区装配下 peers_ 只有一个，
+    // 行为与改造前一致。
     [[nodiscard]] tinykv::result<std::size_t> resolve_locks_of(
         std::string_view primary, tinykv::Ts lock_start_ts,
         std::optional<tinykv::Ts> commit_to) override {
         auto gate = hold_gate();
-        auto& p = peer_(primary);
-        const auto ri = p.wait_read_index([&] { pump_(primary); });
+        auto& primary_peer = peer_(primary);
+        const auto ri = primary_peer.wait_read_index([&] { pump_(primary); });
         if (!ri.has_value()) {
             return tinykv::unexpected(ri.error());
         }
-        auto found = p.mvcc().locks_of(primary, lock_start_ts);
-        if (!found.has_value()) {
-            return tinykv::unexpected(found.error());  // 扫描失败/超上限：不静默遗留锁
+        std::vector<tinykv::raftstore::Peer*> targets;
+        if (peers_) {
+            targets = peers_();
+        } else {
+            targets.push_back(&primary_peer);
         }
-        std::vector<std::string> victims = std::move(*found);
+        // 先收集各 region 的 victim，再统一放开闸提案——收集期间不持写锁，避免自我死锁
+        std::vector<std::pair<tinykv::raftstore::Peer*, std::vector<std::string>>> victims;
+        for (auto* p : targets) {
+            if (p == nullptr) {
+                continue;
+            }
+            auto found = p->mvcc().locks_of(primary, lock_start_ts);
+            if (!found.has_value()) {
+                return tinykv::unexpected(found.error());  // 扫描失败/超上限：不静默遗留
+            }
+            if (!found->empty()) {
+                victims.emplace_back(p, std::move(*found));
+            }
+        }
         if (victims.empty()) {
             return std::size_t{0};
         }
         gate.reset();  // 写路径自己再加闸：同一线程不可对同一 mutex 重复 lock
-        tinykv::result<void> outcome =
-            tinykv::unexpected(tinykv::InvalidArgument{"决议分支未执行"});
-        if (commit_to.has_value()) {
-            kvpb::TxnCommitRequest req;
-            req.set_start_ts(lock_start_ts.value);
-            req.set_commit_ts(commit_to->value);
-            for (const auto& k : victims) {
-                req.add_keys(k);
+        std::size_t total = 0;
+        for (auto& [peer, keys] : victims) {
+            (void)peer;
+            tinykv::result<void> outcome =
+                tinykv::unexpected(tinykv::InvalidArgument{"决议分支未执行"});
+            if (commit_to.has_value()) {
+                kvpb::TxnCommitRequest req;
+                req.set_start_ts(lock_start_ts.value);
+                req.set_commit_ts(commit_to->value);
+                for (const auto& k : keys) {
+                    req.add_keys(k);
+                }
+                outcome = call_through_raft(keys.front(), [&](tinykv::raftstore::Peer& p) {
+                    return p.propose_txn_commit(req);
+                });
+            } else {
+                kvpb::TxnBatchRollbackRequest req;
+                req.set_start_ts(lock_start_ts.value);
+                for (const auto& k : keys) {
+                    req.add_keys(k);
+                }
+                outcome = call_through_raft(keys.front(), [&](tinykv::raftstore::Peer& p) {
+                    return p.propose_txn_rollback(req);
+                });
             }
-            outcome = call_through_raft(
-                primary, [&](tinykv::raftstore::Peer& p) { return p.propose_txn_commit(req); });
-        } else {
-            kvpb::TxnBatchRollbackRequest req;
-            req.set_start_ts(lock_start_ts.value);
-            for (const auto& k : victims) {
-                req.add_keys(k);
+            if (!outcome.has_value()) {
+                return tinykv::unexpected(outcome.error());
             }
-            outcome = call_through_raft(
-                primary, [&](tinykv::raftstore::Peer& p) { return p.propose_txn_rollback(req); });
+            total += keys.size();
         }
-        if (!outcome.has_value()) {
-            return tinykv::unexpected(outcome.error());
-        }
-        return victims.size();
+        return total;
     }
 
     // GC（FUNC-17）：Admin 命令走共识（红线：写走共识不豁免）
@@ -210,6 +262,30 @@ private:
     // ARCH-1 P0-1 / SPEC-6 §6.2.1：跨 region 事务护栏（⑦-0）。
     // 判据：primary 与每个 mutation 必须落在同一 region；任一不成立即结构化拒绝，
     // 绝不允许退回"全写 primary"的旧行为（SPEC-6 §6.5 红线 1）。
+    // 分组守卫：本批必须全部落在 route_key 的 region；primary 的归属由调用方（协调器）保证。
+    [[nodiscard]] tinykv::result<void> guard_batch_region(
+        std::string_view route_key, tinykv::span<const tinykv::txn::Mutation> mutations,
+        bool cross_region) const {
+        if (!region_of_) {
+            return {};  // 未注入路由：单 region 装配，无跨区可能
+        }
+        const auto batch_region = region_of_(route_key);
+        if (!batch_region.has_value()) {
+            return tinykv::unexpected(tinykv::KeyNotInRegion{.key = std::string(route_key),
+                                                             .region_id = tinykv::RegionId{0}});
+        }
+        for (const auto& m : mutations) {
+            const auto region = region_of_(m.key);
+            if (!region.has_value() || *region != *batch_region) {
+                return tinykv::unexpected(tinykv::InvalidArgument{
+                    "分组 prewrite 的 key 必须同属一个 region（key=" + m.key +
+                    "，route=" + std::string(route_key) + "）"});
+            }
+        }
+        (void)cross_region;  // 只影响 apply 侧的 primary 校验，分组侧恒要求同区
+        return {};
+    }
+
     [[nodiscard]] tinykv::result<void> guard_single_region(
         tinykv::span<const tinykv::txn::Mutation> mutations, std::string_view primary) const {
         if (!region_of_) {

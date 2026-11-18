@@ -35,10 +35,16 @@ struct ServerSection {
     std::string auth_token;         // 空 = 不鉴权（启动告警 + 强制绑回环）
 };
 
+// txn.* 段（M7 ⑦：跨区事务开关）
+struct TxnSection {
+    bool cross_region_enabled{false};  // 关 = 跨区 prewrite 明确拒绝（安全侧默认）
+};
+
 struct Config {
     EngineSection engine;
     LogSection log;
     ServerSection server;
+    TxnSection txn;
 };
 
 // 加载配置；文件不存在或语法不支持均返回 InvalidArgument/IoFailed，不使用默认值掩盖错误

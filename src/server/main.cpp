@@ -107,6 +107,7 @@ ParsedArgs parse_args(int argc, char** argv) {
     if (!cfg->server.host.empty() && cfg->server.host != "127.0.0.1") {
         opt.host = cfg->server.host;
     }
+    opt.cross_region_enabled = cfg->txn.cross_region_enabled;
     return true;
 }
 

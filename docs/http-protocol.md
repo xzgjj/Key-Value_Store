@@ -32,6 +32,9 @@
 | GET | `/txn/status?session=<sid>` | 会话 start_ts | — |
 | GET | `/regions` | 全部 region 列表 JSON | — |
 | GET | `/region?id=<n>` | 单个 region 详情（含 term/commit） | — |
+| GET | `/region/peers?id=<n>` | 该 region 的副本分布 | — |
+| GET | `/scheduler/status` | 调度器视图（单 store 事实 + 为什么没有 PD） | — |
+| POST | `/trace` | 采样开关 | `trace\t<region_id>\ton` 或 `…\toff` |
 | POST | `/region/split` | 手动 split | `split\t<region_id>\t<split_key>` |
 | GET | `/metrics` | 拦截器计数 | — |
 | GET | `/trace` | 请求轨迹（最近 N 条） | — |
@@ -53,6 +56,7 @@
 | `POST /txn/rollback` | `rollback\t<sid>` | 同上 |
 | `POST /txn/gc` | `gc` 或 `gc\t<safe_point>` | safe_point 必须是十进制 u64 |
 | `POST /region/split` | `split\t<region_id>\t<split_key>` | region_id 必须是十进制 u64 |
+| `POST /trace` | `trace\t<region_id>\ton|off` | region 必须存在（否则 `ERR no-region`）；开关值只能是 on/off |
 
 **已知边界（不是 bug，是协议约束）**：
 
@@ -65,7 +69,7 @@
 
 | 形态 | 含义 |
 |---|---|
-| `OK` / `OK session=<sid>` / `OK commit_ts=<n>` / `OK split` / `OK gc` | 成功；形状随端点不同，以端点表为准 |
+| `OK` / `OK session=<sid>` / `OK commit_ts=<n>` / `OK split` / `OK gc` / `OK trace on|off` | 成功；形状随端点不同，以端点表为准 |
 | `{"found":true,"value":"..."}` | 读命中（value 已做 JSON 转义：`"`、`\`、`\n`、`\r`、`\t`、其余控制字符转 `\u00XX`） |
 | `{"found":false}` | 读未命中（**不是错误**） |
 | `{"error":"<kind>[:<detail>]"}` | 读路径失败（如 `IoFailed:applied 未追上确认位点`） |
@@ -101,6 +105,17 @@ curl -s http://127.0.0.1:3401/status | head -c 200
 # 6) 开了鉴权时
 curl -s -H 'Authorization: Bearer <token>' http://127.0.0.1:3401/status
 ```
+
+## 5a. 跨区事务开关的线上表现
+
+`tinykv-server` 的 `txn.cross_region_enabled` 决定同一个事务能否写多个 region：
+
+| 开关 | 线上表现 |
+|---|---|
+| `false`（默认） | `POST /txn/commit` 返回 `ERR InvalidArgument: 跨区事务未启用（key=… 属 region N，primary=… 属 region M）`；**不会有任何写入落地** |
+| `true` | 按 region 分组两阶段提交：每组一次 prewrite → 取 commit_ts → 先提交 primary 组 → 再提交其余组；中途崩溃由"读者遇锁 → 查 primary 状态"收敛 |
+
+单 region 事务在两种开关下走同一条路径（无额外开销）。
 
 ## 6. 与 CLI 的关系
 

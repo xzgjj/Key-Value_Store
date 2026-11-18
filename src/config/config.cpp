@@ -4,6 +4,7 @@
 #include "config/config.h"
 
 #include <fstream>
+#include <functional>
 #include <string_view>
 #include <vector>
 
@@ -59,55 +60,84 @@ bool parse_size(const std::string& v, std::size_t& out) {
     return true;
 }
 
-// 未知键一律报错：配置写错了必须当场看见，而不是启动后行为诡异
+// 每段一个解析函数：段内键做穷尽匹配，未知键一律报错（写错了必须当场看见，
+// 而不是启动后行为诡异）。拆函数也顺带把圈复杂度压在每个段自己的量级里。
+using Bad = std::function<result<void>(const std::string&)>;
+
+result<void> apply_engine(EngineSection& cfg, const std::string& key, const std::string& value,
+                          const Bad& bad) {
+    if (key == "dir") {
+        cfg.dir = unquote(value);
+        return {};
+    }
+    if (key == "fsync_on_commit") {
+        return parse_bool(value, cfg.fsync_on_commit) ? result<void>{}
+                                                      : bad("fsync_on_commit 只能是 true/false");
+    }
+    if (key == "memtable_limit_mb") {
+        return parse_size(value, cfg.memtable_limit_mb) ? result<void>{}
+                                                        : bad("memtable_limit_mb 必须是整数");
+    }
+    if (key == "wal_segment_mb") {
+        return parse_size(value, cfg.wal_segment_mb) ? result<void>{}
+                                                     : bad("wal_segment_mb 必须是整数");
+    }
+    return bad("engine 段未知键 '" + key + "'");
+}
+
+result<void> apply_log(LogSection& cfg, const std::string& key, const std::string& value,
+                       const Bad& bad) {
+    if (key == "level") {
+        cfg.level = unquote(value);
+        return {};
+    }
+    if (key == "dir") {
+        cfg.dir = unquote(value);
+        return {};
+    }
+    return bad("log 段未知键 '" + key + "'");
+}
+
+result<void> apply_server(ServerSection& cfg, const std::string& key, const std::string& value,
+                          const Bad& bad) {
+    if (key == "host") {
+        cfg.host = unquote(value);
+        return {};
+    }
+    if (key == "auth_token") {
+        cfg.auth_token = unquote(value);
+        return {};
+    }
+    return bad("server 段未知键 '" + key + "'");
+}
+
+result<void> apply_txn(TxnSection& cfg, const std::string& key, const std::string& value,
+                       const Bad& bad) {
+    if (key == "cross_region_enabled") {
+        return parse_bool(value, cfg.cross_region_enabled)
+                   ? result<void>{}
+                   : bad("txn.cross_region_enabled 需要 true/false");
+    }
+    return bad("txn 段未知键 '" + key + "'");
+}
+
 result<void> apply_key(Config& cfg, const std::string& section, const std::string& key,
                        const std::string& value, int line_no) {
-    const auto bad = [&](const std::string& why) {
+    const Bad bad = [line_no](const std::string& why) {
         return result<void>(tinykv::unexpected(
             InvalidArgument{"配置第 " + std::to_string(line_no) + " 行：" + why}));
     };
     if (section == "engine") {
-        if (key == "dir") {
-            cfg.engine.dir = unquote(value);
-            return {};
-        }
-        if (key == "fsync_on_commit") {
-            return parse_bool(value, cfg.engine.fsync_on_commit)
-                       ? result<void>{}
-                       : bad("fsync_on_commit 只能是 true/false");
-        }
-        if (key == "memtable_limit_mb") {
-            return parse_size(value, cfg.engine.memtable_limit_mb)
-                       ? result<void>{}
-                       : bad("memtable_limit_mb 必须是整数");
-        }
-        if (key == "wal_segment_mb") {
-            return parse_size(value, cfg.engine.wal_segment_mb) ? result<void>{}
-                                                                : bad("wal_segment_mb 必须是整数");
-        }
-        return bad("engine 段未知键 '" + key + "'");
-    }
-    if (section == "server") {
-        if (key == "host") {
-            cfg.server.host = unquote(value);
-            return result<void>{};
-        }
-        if (key == "auth_token") {
-            cfg.server.auth_token = unquote(value);
-            return result<void>{};
-        }
-        return bad("server 段未知键 '" + key + "'");
+        return apply_engine(cfg.engine, key, value, bad);
     }
     if (section == "log") {
-        if (key == "level") {
-            cfg.log.level = unquote(value);
-            return {};
-        }
-        if (key == "dir") {
-            cfg.log.dir = unquote(value);
-            return {};
-        }
-        return bad("log 段未知键 '" + key + "'");
+        return apply_log(cfg.log, key, value, bad);
+    }
+    if (section == "server") {
+        return apply_server(cfg.server, key, value, bad);
+    }
+    if (section == "txn") {
+        return apply_txn(cfg.txn, key, value, bad);
     }
     return bad("未知配置段 '" + section + "'");
 }

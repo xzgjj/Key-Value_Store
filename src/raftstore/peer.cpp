@@ -495,8 +495,9 @@ std::optional<KvError> run_txn_prewrite(Storage& storage, txn::LatchManager& lat
     auto guard = latches.acquire(keys);  // 红线4：latch 持有至 apply 完成
     txn::MvccTxn mvcc(storage);
     // ARCH-1 P0-2：created_ms 随请求到达（旧客户端缺省 0，退化为"出生即过期"的旧行为）
+    // 跨区分组（M7 ⑦）：本批只是该事务的一个分区组时，primary 不在本批内是合法的
     if (auto r = mvcc.prewrite(muts, req.primary_lock(), Ts{req.start_ts()}, req.lock_ttl(),
-                               req.created_ms());
+                               req.created_ms(), !req.cross_region());
         !r.has_value()) {
         return std::move(r.error());
     }
