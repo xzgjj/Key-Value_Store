@@ -1,5 +1,5 @@
 {
-  "task": "M6 最终交付：组合根+Service+会话+Interceptor+GC+region→peer 动态注册表（Storage×N/Peer×regions，split 动态建实例+数据迁移）",
+  "task": "文档交付：重写 README（定位/能力清单/快速开始/架构与取舍/质量体系/文档导航/里程碑/已知限制/参与约定）",
   "paths": [
     "proto/raft_cmdpb.proto",
     "src/common/error.h",
@@ -69,7 +69,7 @@
     "tests/unit/server/interceptor_test.cpp",
     "tests/unit/server/peer_registry_test.cpp"
   ],
-  "reason": "用户 2026-11-16 指令『三个 bench补充并 推送；之后M5（事务层）新分支 4 开始 各种方案按要求你走最终交付』——授权按 SPEC-4 全部默认值（D4-1~D4-5）自主落地 M5。每层 TDD、CI 绿、三轮 review、本地 commit（分支 4）。",
+  "reason": "用户 2026-11-18 指令『重写 README，达到审核后描述清晰直白、与同类项目文档同水准；写完推送最新分支，同步 main 后切回本分支』。改动仅 README.md 与本人任务声明，不触碰规则资产与代码。",
   "bugfix": false,
   "fixes": [],
   "overflow_approved": true,
