@@ -39,6 +39,12 @@ planning_files = [
 # 在非冻结文档间出现 > max_para_occurrences 次即报。
 analysis_min_para_chars = 40
 analysis_max_para_occurrences = 1
+# M8 ⑯ 根文档存在性防护（DS-G3 / M8-OPS-01）：以下文件必须在仓库根，
+# 被外部会话移走 = DOC-ROOT-MISSING 明确报错（只检测留痕，不自动移动）。
+root_required_docs = [
+    "SPEC.md",
+    "TinyKV-CPP-设计思路与需求.md",
+]
 # 上游参考材料冻结：仅作重复检测的来源之一，自身不被预算/重复/一致性检查报错。
 reference_freeze = [
     "docs/README.md",

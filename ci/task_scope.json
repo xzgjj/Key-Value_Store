@@ -1,17 +1,16 @@
 {
-  "task": "M8 ⑮ 结构还债（SPEC-7 §7.2.5）：server_app.h 纯移动拆三头（app/gate/http）",
+  "task": "M8 ⑯ 设计标准成册 + 仓库防护（SPEC-7 §7.2.6）：DESIGN-STANDARDS.md 17 条 + DOC-ROOT-MISSING",
   "paths": [
-    "src/server/server_app.h",
-    "src/server/server_gate.h",
-    "src/server/server_http.h",
-    "scripts/split_server_app.py",
+    "tools/ci/check_docs.py",
+    "ci/rules.toml",
     "ci/task_scope.json"
   ],
-  "reason": "998 行四合一拆为三头：server_app.h（装配+生命周期+声明面 557 行）、server_gate.h（闸/泵辅助 9 成员 138 行）、server_http.h（handler 面 24 成员 462 行）。纯移动：函数体逐字搬运，类内签名改声明，类外定义加 inline+ServerApp:: 限定（ODR 必需，非语义修改）；模板成员 intercepted 连模板头整体移动。编译时间对比留 evidence（无显著差异，如实记录）。",
+  "reason": "M8-ENG-02：四类规范升格成册（docs/DESIGN-STANDARDS.md，本地维护不入库）。M8-OPS-01：check_docs 扩展 root_required_docs（SPEC.md + 设计思路文档在根 = 约定布局），被移走 = DOC-ROOT-MISSING 明确报错；干扰演练红→绿通过；只检测留痕不移动（红线 8）。",
   "bugfix": false,
   "fixes": [],
   "overflow_approved": true,
   "behavior_change_approved": true,
   "behavior_change_note": "http_threads 默认 1→2（并发度变更，D7-1）；用户 2026-11-18 按 SPEC-7 §7.3.2 批准。显式配 1 即回 M7 单线程行为。",
-  "approver": "用户（2026-11-18：D7-6 M8 内只拆 server_app.h 按建议执行）"
+  "approver": "用户（2026-11-18：⑯ 防护扩展 = rules.toml root_required_docs + check_docs DOC-ROOT-MISSING，开工确认时已批 ⑯ 全部内容；M8-OPS-01 即本改动）",
+  "rule_asset_approved": true
 }

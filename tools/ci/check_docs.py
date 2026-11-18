@@ -107,11 +107,18 @@ def check_dup_para(root: Path, rules: dict) -> L.CheckResult:
     return res
 
 
-# ---- consistency：链接 + tools 引用 ------------------------------------------
+# ---- consistency：链接 + tools 引用 + 根文档存在性（M8 ⑯ 防护） --------------
 def check_consistency(root: Path, rules: dict) -> L.CheckResult:
     cfg = rules["doc_budget"]
     res = L.CheckResult("consistency", L.PASS)
     n_links = n_tools = 0
+    # ⑯ M8-OPS-01 / DS-G3：根目录文档位置是约定布局——被外部会话移走时明确报错留痕
+    # （只检测，绝不自动删除/移动用户文件，红线 8）。M7 期间实证发生过（42 链接全断）。
+    for required in cfg.get("root_required_docs", []):
+        if not (root / required).is_file():
+            res.status = L.FAIL
+            res.add("DOC-ROOT-MISSING",
+                    f"约定根文档被移走：{required}（应在仓库根；只检测不移动）")
     for p, rel in L.iter_md_files(root, cfg.get("reference_freeze", [])):
         text = L.read_text(p)
         for target in L.relative_md_links(text):
