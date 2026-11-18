@@ -118,6 +118,15 @@ result<std::vector<Region>> StoreMetaStore::parse_file(const std::filesystem::pa
         return tinykv::unexpected(Corrupted{.where = file.string(), .reason = "meta magic 不符"});
     }
     const auto count = read_u32(raw, kMagic.size());
+    // BUG-0021（code-review r2 N-2）：reserve 前先做容量上界校验（与 P1-4 snapshot
+    // total_chunks 同款修复模式）——每条记录至少 40 字节，count 超过物理可能即损坏文件。
+    // 校验必须在 reserve 之前：否则 CRC 碰撞/构造文件的 count=4×10⁹ 会触发巨量分配，
+    // bad_alloc/length_error 穿出 load() 未捕获 → 进程终止。
+    const std::size_t payload = body_len - (kMagic.size() + 4);
+    if (count > payload / 40) {
+        return tinykv::unexpected(
+            Corrupted{.where = file.string(), .reason = "meta count 超出文件容量"});
+    }
     std::size_t pos = kMagic.size() + 4;
     std::vector<Region> regions;
     regions.reserve(count);

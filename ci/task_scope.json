@@ -1,16 +1,42 @@
 {
-  "task": "M8 ⑯ 设计标准成册 + 仓库防护（SPEC-7 §7.2.6）：DESIGN-STANDARDS.md 17 条 + DOC-ROOT-MISSING",
+  "task": "code-review r2 还债批（N-1/N-2/N-4/N-5 + CI 挂死根因修复 + BUG-0024）：歧义提交协议 + meta 校验 + split 泵窗口 + keep-alive 空闲超时（独立清道夫）+ HTTP 客户端有界等待",
   "paths": [
-    "tools/ci/check_docs.py",
-    "ci/rules.toml",
-    "ci/task_scope.json"
+    "src/txn/client.h",
+    "src/raftstore/meta_store.cpp",
+    "src/server/peer_registry.h",
+    "src/server/server_http.h",
+    "src/server/status_server.h",
+    "src/server/status_server.cpp",
+    "tests/unit/cli/CMakeLists.txt",
+    "tests/unit/cli/http_client_timeout_test.cpp",
+    "src/cli/http_client.h",
+    "tests/unit/txn/txn_ambiguity_test.cpp",
+    "tests/unit/txn/CMakeLists.txt",
+    "tests/unit/raftstore/meta_store_test.cpp",
+    "tests/unit/server/peer_registry_test.cpp",
+    "tests/unit/server/http_keepalive_test.cpp",
+    "tests/unit/server/CMakeLists.txt",
+    "docs/testing.md",
+    ".gitignore",
+    "CI.md",
+    "README.md",
+    "ci/task_scope.json",
+    "tests/unit/server/http_frame_test.cpp",
+    "tests/testlib/bounded_io.h"
   ],
-  "reason": "M8-ENG-02：四类规范升格成册（docs/DESIGN-STANDARDS.md，本地维护不入库）。M8-OPS-01：check_docs 扩展 root_required_docs（SPEC.md + 设计思路文档在根 = 约定布局），被移走 = DOC-ROOT-MISSING 明确报错；干扰演练红→绿通过；只检测留痕不移动（红线 8）。",
-  "bugfix": false,
-  "fixes": [],
+  "reason": "评审报告 docs/code-review-2026-11-18-r2 §5 处理顺序 1/2/3 + N-5（用户 2026-11-18 指定批次，分支 7）。BUG-0020：commit_grouped 主组提交失败先 check_txn_status(primary) 判生死（committed→正向推进/确认未提交→回滚 others/未决→保持现状）；BUG-0021：meta_store reserve 前置 count 容量上界校验（对齐 P1-4 模式）；BUG-0022：on_split 只注册不泵 + admin_split 成功路径持全局闸补泵（保住 split 后右半立即可写契约）；BUG-0023：keep-alive 空闲读超时 30s（start 可注入）+ Connection:close 判定去空格假设。四个修复均先红后绿（stash src 验证红，恢复验证绿）。CI 全量挂死根因（gdb 栈实锤：asio io_context 内部 timer 线程析构 join 挂死）后追加两项：N-5 服务端废弃 steady_timer 改独立清道夫线程 + native shutdown（BUG-0023 终版）；http_client.h 原生 socket 重写带真超时（connect 非阻塞+select 5s、SO_RCVTIMEO/SO_SNDTIMEO 10s，BUG-0024）。三处测试面同步封口（http_frame keep-alive 轮询读、http_keepalive read_one_response 有界、新增 http_client_timeout_test）。.gitignore/CI.md/README.md 为外部会话的 docs 治理改动（docs 只跟踪 testing.md + 修链接），本批代为声明收编，非本批产物。",
+  "bugfix": true,
+  "fixes": [
+    "BUG-0020",
+    "BUG-0021",
+    "BUG-0022",
+    "BUG-0023",
+    "BUG-0024"
+  ],
   "overflow_approved": true,
+  "overflow_note": "22 文件 > 15（4 个 bugfix + 根因修复重写 2 文件 + 新测试 2 文件 + 测试封口 1 文件 + 3 个外部会话遗留文件收编）；diff 行数含三个新测试文件 + 共享有界等待头整文件计数。",
   "behavior_change_approved": true,
-  "behavior_change_note": "http_threads 默认 1→2（并发度变更，D7-1）；用户 2026-11-18 按 SPEC-7 §7.3.2 批准。显式配 1 即回 M7 单线程行为。",
-  "approver": "用户（2026-11-18：⑯ 防护扩展 = rules.toml root_required_docs + check_docs DOC-ROOT-MISSING，开工确认时已批 ⑯ 全部内容；M8-OPS-01 即本改动）",
-  "rule_asset_approved": true
+  "behavior_change_note": "三处语义变更均来自评审建议且用户 2026-11-18 指定批次：① N-1 未决 primary 不再回滚 secondary（宁挂勿错，Percolator 通行协议）；② N-4 on_split 不再立即推举新 peer（推举转移到持全局闸的 admin_split 成功路径/Worker/分区闸首泵）；③ N-5 keep-alive 默认 30s 空闲断连（新增传输健壮性行为）。；④ N-5 终版：空闲断连由独立清道夫线程执行（native shutdown 跨线程关断），HTTP 客户端默认 connect 5s / 收发 10s 上限（超时返回 IoFailed，CLI 退出码契约不变）。",
+  "approver": "用户（2026-11-18：按 docs/code-review-2026-11-18-r2 指定 N-1/N-2/N-4 + N-5 修复点，'依据之前一样的标准和要求完成'）",
+  "rule_asset_approved": false
 }

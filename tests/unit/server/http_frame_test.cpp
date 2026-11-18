@@ -9,12 +9,14 @@
 // 若 asio（Windows SDK）先入场会把 DELETE 宏展开，故顺序不可颠倒。
 #include "cli/http_client.h"
 #include "server/server_app.h"
+#include "bounded_io.h"
 
 #include <gtest/gtest.h>
 
 #include <array>
 #include <chrono>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "raft_test_base.h"
@@ -206,9 +208,13 @@ TEST(HttpFrameTest, KeepsConnectionAliveAcrossMultipleRequests) {
     asio::write(sock, asio::buffer(request + request), ec);  // 两条一起发：pipeline
     ASSERT_FALSE(ec) << ec.message();
 
+    // BUG-0024 配套（r2 N-5 测试面）：读必须有界——旧写法阻塞在 read_some 里时
+    // deadline 永远检查不到，服务端不应答就把测试挂死。改非阻塞 + 轮询。
     std::string raw;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
     std::array<char, 4096> buf{};
+    sock.non_blocking(true, ec);
+    ASSERT_FALSE(ec) << ec.message();
     auto count_responses = [](const std::string& text) {
         std::size_t n = 0;
         for (std::size_t at = text.find("HTTP/1.1 200"); at != std::string::npos;
@@ -218,8 +224,13 @@ TEST(HttpFrameTest, KeepsConnectionAliveAcrossMultipleRequests) {
         return n;
     };
     while (count_responses(raw) < 2 && std::chrono::steady_clock::now() < deadline) {
-        const std::size_t n = sock.read_some(asio::buffer(buf), ec);
-        if (ec) {
+        if (!tinykv::testlib::wait_readable(sock, std::chrono::milliseconds(500))) {
+            break;  // 分片无数据：由外层 deadline 收口（ENG-04 无 sleep_for）
+        }
+        asio::error_code poll_ec;
+        const std::size_t n = sock.read_some(asio::buffer(buf), poll_ec);
+        if (poll_ec && poll_ec != asio::error::would_block) {
+            ec = poll_ec;
             break;
         }
         raw.append(buf.data(), n);

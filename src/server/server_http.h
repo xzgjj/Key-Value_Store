@@ -279,6 +279,13 @@
         }
         peer->drop_reply(kSplitClient, expect);  // admin 回执不消费，必须显式回收
         next_region_id_.fetch_add(1);
+        // BUG-0022 配套：on_split 改为"只注册不泵"后，成功路径在这里（仍持全局闸）补泵
+        // 新 peer——保住"split 返回后右半立即可写"的既有契约。apply 超时路径不补泵：
+        // 残留 apply 由后续分区闸内泵/Worker 完成，新 peer 在其桶内被推举，同样无竞态。
+        if (auto* fresh = registry_->peer_by_id(RegionId{next_region_id_.load()});
+            fresh != nullptr && !fresh->is_leader()) {
+            pump_peer_only(*fresh);
+        }
         std::string err;
         {
             const std::lock_guard lock(split_error_mu_);  // ⑪ 审计 #15：与 apply 路径的写入互斥

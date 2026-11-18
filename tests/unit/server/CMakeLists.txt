@@ -15,3 +15,4 @@ add_tinykv_test(admin_endpoints_test SRCS admin_endpoints_test.cpp LIBS tinykv_s
 add_tinykv_test(http_concurrency_test SRCS http_concurrency_test.cpp LIBS tinykv_server tinykv_cli LEVEL unit)
 add_tinykv_test(tls_transport_test SRCS tls_transport_test.cpp LIBS tinykv_server tinykv_cli LEVEL unit)
 add_tinykv_test(tls_config_test SRCS tls_config_test.cpp LIBS tinykv_server tinykv_cli LEVEL unit)
+add_tinykv_test(http_keepalive_test SRCS http_keepalive_test.cpp LIBS tinykv_server tinykv_cli LEVEL unit)

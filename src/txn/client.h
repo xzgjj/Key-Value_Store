@@ -10,6 +10,8 @@
 //   过期/回滚   → resolve_locks_of 反向清锁 → 本地重试。
 // client 冲突重试上限 3 次、退避 10/50/200ms（D4-5）——本进程内版本退避由调用方控制，
 // 这里只做"决议后自动重试"的语义收口。
+// 提交歧义（BUG-0020/N-1）：跨区 COMMIT_PRIMARY 调用失败 ≠ 未提交——先
+// check_txn_status(primary) 判生死，committed → 正向推进；确认未提交才回滚 secondary。
 
 #pragma once
 
@@ -221,18 +223,33 @@ private:
             return tinykv::unexpected(
                 NotLeader{.region_id = RegionId{0}, .leader_hint = std::nullopt});
         }
-        const Ts commit_ts = ts->front();
+        Ts commit_ts = ts->front();
         // ③ 主组先提交：整个事务的原子锚点
         if (auto r = commit_one_group(grouped.groups[grouped.primary_index], commit_ts);
             !r.has_value()) {
-            std::vector<std::size_t> others;
-            for (std::size_t i = 0; i < grouped.groups.size(); ++i) {
-                if (i != grouped.primary_index) {
-                    others.push_back(i);
-                }
+            // BUG-0020（code-review r2 N-1）：primary 提交歧义——"调用失败"≠"未提交"。
+            // call_through_raft 泵超时但 apply 实际成功（BUG-0009 同款窗口）时，无条件
+            // 回滚 secondary 会造出"primary 已提交 + secondary 墓碑"的部分提交（SI 被破
+            // 坏），且不可自愈：secondary 的锁已成 rollback 墓碑，正向决议永远失败。
+            // 协议（Percolator 通行做法）：先判 primary 生死——
+            //   committed    → 正向推进（secondary 用判定的 commit_ts 继续 ④）；
+            //   确认未提交   → 才允许回滚 others；
+            //   未决/判定失败 → 保持现状（宁挂勿错：动 secondary 才是制造部分提交）。
+            const auto verdict = judge_primary_ambiguity(now_ms);
+            if (!verdict.has_value() || verdict->pending) {
+                return tinykv::unexpected(r.error());  // 保持现状：锁决议/重试给出最终结论
             }
-            rollback_groups(grouped, others);  // 未决事务：其余组回滚，锁决议给最终结论
-            return tinykv::unexpected(r.error());
+            if (!verdict->committed) {
+                std::vector<std::size_t> others;
+                for (std::size_t i = 0; i < grouped.groups.size(); ++i) {
+                    if (i != grouped.primary_index) {
+                        others.push_back(i);
+                    }
+                }
+                rollback_groups(grouped, others);  // 确认未提交：回滚其余组是安全的
+                return tinykv::unexpected(r.error());
+            }
+            commit_ts = verdict->commit_ts;  // 已提交：以判定凭证（真实 commit_ts）继续 ④
         }
         // ④ 其余组：失败不回滚，交给恢复路径
         for (std::size_t i = 0; i < grouped.groups.size(); ++i) {
@@ -245,6 +262,28 @@ private:
         }
         writes_.clear();
         return commit_ts;
+    }
+
+    // BUG-0020（N-1）：primary 提交失败后的生死判定。check_txn_status(primary) 三分支：
+    //   committed    → committed=true（commit_ts 为判定出的真实提交时刻，作正向推进凭证）；
+    //   无锁/已回滚/已过期 → committed=false, pending=false（确认未提交，回滚 others 安全）；
+    //   TTL 未过期   → pending=true（生死未卜，保持现状——回滚可能踩掉已提交的事务）。
+    struct PrimaryVerdict {
+        bool committed{false};
+        bool pending{true};
+        Ts commit_ts{Ts{0}};
+    };
+    [[nodiscard]] result<PrimaryVerdict> judge_primary_ambiguity(std::uint64_t now_ms) {
+        auto st = exec_.check_txn_status(primary_, start_ts_, now_ms);
+        if (!st.has_value()) {
+            return tinykv::unexpected(st.error());
+        }
+        if (st->committed) {
+            return PrimaryVerdict{.committed = true, .pending = false,
+                                  .commit_ts = st->commit_ts};
+        }
+        return PrimaryVerdict{.committed = false, .pending = st->lock_ttl_remaining_ms > 0,
+                              .commit_ts = Ts{0}};
     }
 
     [[nodiscard]] result<void> commit_one_group(const RegionGroup& group, Ts commit_ts) {

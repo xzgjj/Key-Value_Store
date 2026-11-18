@@ -76,6 +76,22 @@ std::string not_found(bool keep_alive) {
     return 0;
 }
 
+// BUG-0023/N-5：清道夫用的单调时钟毫秒值（连接活跃时间戳基准）
+[[nodiscard]] std::int64_t steady_now_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+// Connection 头值是否要求关闭（裁掉前导空白/tab 再比较——HTTP 允许 `Connection:close`
+// 无空格写法，BUG-0023/N-5；独立成函数是为了 wants_close 的圈复杂度门禁）
+[[nodiscard]] bool header_value_requests_close(std::string_view value) {
+    while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) {
+        value.remove_prefix(1);
+    }
+    return starts_with_ci(value, "close");
+}
+
 // 客户端是否要求关闭（HTTP/1.0 默认关；显式 Connection: close 也关）
 [[nodiscard]] bool wants_close(const std::string& request) {
     const auto header_end = request.find("\r\n\r\n");
@@ -102,7 +118,10 @@ std::string not_found(bool keep_alive) {
         while (!line.empty() && line.front() == ' ') {
             line.remove_prefix(1);
         }
-        if (starts_with_ci(line, "connection:") && starts_with_ci(line.substr(11), " close")) {
+        // BUG-0023（N-5）：判定不得假设冒号后必有空格——HTTP 允许 `Connection:close`。
+        // 旧实现要求值前有空格（" close"），无空格头被误判为 keep-alive，客户端关不掉。
+        if (starts_with_ci(line, "connection:") &&
+            header_value_requests_close(line.substr(11))) {
             return true;
         }
         pos = next;
@@ -176,7 +195,8 @@ std::string not_found(bool keep_alive) {
 result<std::unique_ptr<StatusServer>> StatusServer::start(
     const std::string& host, std::uint16_t port, std::function<std::string()> provider,
     KvHandler kv_handler, KvWriteHandler kv_write, AdminHandler admin_handler,
-    std::string auth_token, std::size_t io_threads, TlsOptions tls) {
+    std::string auth_token, std::size_t io_threads, TlsOptions tls,
+    std::chrono::milliseconds idle_timeout) {
     auto server = std::unique_ptr<StatusServer>(new StatusServer());  // NOLINT：构造私有
     server->provider_ = std::move(provider);
     server->kv_handler_ = std::move(kv_handler);
@@ -184,6 +204,7 @@ result<std::unique_ptr<StatusServer>> StatusServer::start(
     server->admin_handler_ = std::move(admin_handler);
     server->auth_token_ = std::move(auth_token);
     server->tls_opt_ = std::move(tls);
+    server->idle_timeout_ = idle_timeout;  // BUG-0023/N-5：空闲读超时（默认 30s）
     // ⑭：证书/私钥在启动时装载——文件缺失/格式错 = 启动失败（错误优于静默明文）
     if (server->tls_opt_.enabled()) {
         server->tls_ctx_ = std::make_unique<asio::ssl::context>(
@@ -235,10 +256,21 @@ result<std::unique_ptr<StatusServer>> StatusServer::start(
     for (std::size_t i = 0; i < thread_count; ++i) {
         server->threads_.emplace_back([raw = server.get()] { raw->ctx_.run(); });
     }
+    // BUG-0023（N-5）：空闲连接清道夫——独立 OS 线程，0 = 不限时（显式禁用不启动）
+    if (server->idle_timeout_.count() > 0) {
+        server->reaper_ = std::thread([raw = server.get()] { raw->reap_idle(); });
+    }
     return server;
 }
 
 StatusServer::~StatusServer() {
+    // 先停清道夫：它只碰 native shutdown 与 weak_ptr，与 io 线程无共享 asio 状态，
+    // 但必须先于 io_context 析构收尾（join 延迟 ≤ 一个扫描粒度）。
+    reaper_stop_.store(true, std::memory_order_release);
+    reaper_cv_.notify_all();
+    if (reaper_.joinable()) {
+        reaper_.join();
+    }
     if (acceptor_ != nullptr) {
         asio::error_code ec;
         acceptor_->close(ec);
@@ -261,7 +293,7 @@ void StatusServer::accept_loop() {
     auto sock = std::make_shared<asio::ip::tcp::socket>(ctx_);
     acceptor_->async_accept(*sock, [this, sock](const asio::error_code& ec) {
         if (!ec) {
-            serve_loop(sock, std::make_shared<FrameReader>());
+            serve_loop(sock, std::make_shared<FrameReader>(), register_conn(sock));
         }
         if (acceptor_ != nullptr && acceptor_->is_open()) {
             accept_loop();
@@ -279,7 +311,8 @@ void StatusServer::accept_tls() {
             stream->async_handshake(
                 asio::ssl::stream_base::server, [this, stream](const asio::error_code& hec) {
                     if (!hec) {
-                        serve_loop(stream, std::make_shared<FrameReader>());
+                        serve_loop(stream, std::make_shared<FrameReader>(),
+                                   register_conn(stream));
                     }
                     // 握手失败 = Corrupted{where="tls-handshake"} 语义：直接断连，不回应
                 });
@@ -385,7 +418,8 @@ std::string StatusServer::dispatch(const std::string& request) {
 // 非 keep-alive 写完即 shutdown/close（明文）；TLS 流由 ssl 层 shutdown 处理（close 只关底层）。
 template <typename Stream>
 void StatusServer::respond(std::shared_ptr<Stream> sock, const std::string& text,
-                           bool keep_alive, std::shared_ptr<FrameReader> reader) {
+                           bool keep_alive, std::shared_ptr<FrameReader> reader,
+                           std::shared_ptr<ConnState> conn) {
     if (!keep_alive) {
         asio::async_write(*sock, asio::buffer(text), [sock](const asio::error_code&, std::size_t) {
             asio::error_code ig;
@@ -398,53 +432,62 @@ void StatusServer::respond(std::shared_ptr<Stream> sock, const std::string& text
     // keep-alive：写完继续用同一个 reader——残余字节（客户端连发）不能丢。
     // 写失败说明对端已断，直接关连接（对端先走是常态，不记错误）。
     asio::async_write(*sock, asio::buffer(text),
-                      [this, sock, reader](const asio::error_code& ec, std::size_t) {
+                      [this, sock, reader, conn](const asio::error_code& ec, std::size_t) {
                           if (ec) {
                               asio::error_code ig;
                               sock->lowest_layer().close(ig);
                               return;
                           }
-                          serve_loop(sock, reader);
+                          serve_loop(sock, reader, conn);
                       });
 }
 
 // 连接级循环：一次只推进一帧。缓冲区里已有完整帧（keep-alive 下客户端可能连发）就直接处理，
 // 否则去读。只有 EOF / 写失败 / Rejected 才退出——一条 TCP 上可跑任意多个请求。
 template <typename Stream>
-void StatusServer::serve_loop(std::shared_ptr<Stream> sock, std::shared_ptr<FrameReader> reader) {
+void StatusServer::serve_loop(std::shared_ptr<Stream> sock, std::shared_ptr<FrameReader> reader,
+                              std::shared_ptr<ConnState> conn) {
     if (reader->pending_bytes()) {
         const auto state = reader->consume("");
         if (state == FrameReader::State::Rejected) {
-            respond(sock, http_response("ERR bad-request"), false, reader);
+            respond(sock, http_response("ERR bad-request"), false, reader, conn);
             return;
         }
         if (state == FrameReader::State::Done) {
             const std::string frame = reader->take_frame();
             if (!frame.empty()) {
                 const bool keep_alive = !wants_close(frame);
-                respond(sock, dispatch(frame), keep_alive, reader);
+                respond(sock, dispatch(frame), keep_alive, reader, conn);
                 return;
             }
         }
     }
-    read_frame(std::move(sock), std::move(reader));
+    read_frame(std::move(sock), std::move(reader), std::move(conn));
 }
 
 template <typename Stream>
-void StatusServer::read_frame(std::shared_ptr<Stream> sock, std::shared_ptr<FrameReader> reader) {
+void StatusServer::read_frame(std::shared_ptr<Stream> sock, std::shared_ptr<FrameReader> reader,
+                              std::shared_ptr<ConnState> conn) {
     auto buf = std::make_shared<std::array<char, 4096>>();
+    // BUG-0023（N-5）：空闲超时不在读路径上实现——由独立清道夫线程 reap_idle() 扫描
+    // conn->last_activity_ms，超阈值的连接被 native shutdown 关断，挂起的 read 以
+    // EOF/错误收尾。读到任何字节即更新活跃时间戳（空闲判定随到达字节重置）。
     sock->async_read_some(asio::buffer(*buf),
-                          [this, sock, reader, buf](const asio::error_code& ec, std::size_t n) {
+                          [this, sock, reader, buf, conn](const asio::error_code& ec,
+                                                          std::size_t n) {
                               if (ec) {
-                                  return;  // 对端关闭/超时：连接结束（keep-alive 的正常收尾路径）
+                                  return;  // 对端关闭/被清道夫关断：连接结束（keep-alive 的正常收尾路径）
                               }
+                              conn->last_activity_ms.store(steady_now_ms(),
+                                                           std::memory_order_relaxed);
                               const auto state = reader->consume(std::string_view(buf->data(), n));
                               if (state == FrameReader::State::More) {
-                                  read_frame(sock, reader);  // 帧未齐：继续读，不再丢尾部
+                                  read_frame(sock, reader, conn);  // 帧未齐：继续读，不再丢尾部
                                   return;
                               }
                               if (state == FrameReader::State::Rejected) {
-                                  respond(sock, http_response("ERR bad-request"), false, reader);
+                                  respond(sock, http_response("ERR bad-request"), false, reader,
+                                          conn);
                                   return;
                               }
                               const std::string frame = reader->take_frame();
@@ -452,24 +495,98 @@ void StatusServer::read_frame(std::shared_ptr<Stream> sock, std::shared_ptr<Fram
                                   return;  // 理论不可达（Done 必有完整帧）；防御性返回
                               }
                               const bool keep_alive = !wants_close(frame);
-                              respond(sock, dispatch(frame), keep_alive, reader);
+                              respond(sock, dispatch(frame), keep_alive, reader, conn);
                           });
+}
+
+// BUG-0023（N-5）：登记一条连接的活跃状态（accept 分支调用）。
+// shutdown_native 跨线程执行 native shutdown(SD_BOTH)——刻意不用 close()：句柄可能被
+// 复用，native shutdown 只改 socket 状态、不动句柄，挂起的 async_read_some 以 EOF/错误
+// 收尾，连接对象随 handler 结束自然释放。native shutdown 与挂起 IO 并发是该模式的标准
+// 用法（Windows/Linux 下挂起读都会被唤醒），风险远低于异步 close。
+template <typename Stream>
+std::shared_ptr<StatusServer::ConnState> StatusServer::register_conn(
+    const std::shared_ptr<Stream>& sock) {
+    auto conn = std::make_shared<ConnState>();
+    conn->last_activity_ms.store(steady_now_ms(), std::memory_order_relaxed);
+    conn->shutdown_native = [weak = std::weak_ptr<Stream>(sock)] {
+        auto s = weak.lock();
+        if (s == nullptr) {
+            return false;
+        }
+        asio::error_code ig;
+        s->lowest_layer().shutdown(asio::ip::tcp::socket::shutdown_both, ig);
+        return true;
+    };
+    {
+        std::lock_guard lock(conns_mu_);
+        conns_.push_back(conn);
+    }
+    return conn;
+}
+
+// BUG-0023（N-5）：独立 OS 线程的清道夫循环——1s 粒度扫描，超阈值连接 native 关断。
+// 不依赖 io 线程空闲（handler 阻塞 io 线程也照常执行），不引入 asio timer 机制
+// （io_context 内部 timer 线程在 MinGW/IOCP 析构 join 会挂死——M8 后还债批实测根因）。
+void StatusServer::reap_idle() {
+    for (;;) {
+        // 停止信号用条件变量等待（ENG-04 禁 sleep_for；析构 join 延迟 ≤ 一个扫描粒度）
+        std::unique_lock idle_lock(reaper_mu_);
+        const bool stopped = reaper_cv_.wait_for(idle_lock, std::chrono::seconds(1),
+                                                 [this] {
+                                                     return reaper_stop_.load(
+                                                         std::memory_order_acquire);
+                                                 });
+        if (stopped) {
+            return;
+        }
+        idle_lock.unlock();
+        if (idle_timeout_.count() <= 0) {
+            continue;  // 0 = 不限时（显式禁用）
+        }
+        const auto now = steady_now_ms();
+        std::lock_guard lock(conns_mu_);
+        std::vector<std::weak_ptr<ConnState>> alive;
+        alive.reserve(conns_.size());
+        for (auto& wp : conns_) {
+            auto conn = wp.lock();
+            if (conn == nullptr) {
+                continue;  // 连接已结束：条目自然消亡
+            }
+            const auto idle = now - conn->last_activity_ms.load(std::memory_order_relaxed);
+            if (idle > idle_timeout_.count() && !conn->reaped.exchange(true)) {
+                (void)conn->shutdown_native();  // 处置一次即从表内移除
+                continue;
+            }
+            alive.push_back(std::move(wp));
+        }
+        conns_.swap(alive);
+    }
 }
 
 // 模板只在 .cpp 内实例化（明文 socket 与 ssl::stream 两个 TU 内点），避免头文件膨胀
 template void StatusServer::respond<asio::ip::tcp::socket>(
     std::shared_ptr<asio::ip::tcp::socket>, const std::string&, bool,
-    std::shared_ptr<FrameReader>);
+    std::shared_ptr<FrameReader>, std::shared_ptr<ConnState>);
 template void StatusServer::serve_loop<asio::ip::tcp::socket>(
-    std::shared_ptr<asio::ip::tcp::socket>, std::shared_ptr<FrameReader>);
+    std::shared_ptr<asio::ip::tcp::socket>, std::shared_ptr<FrameReader>,
+    std::shared_ptr<ConnState>);
 template void StatusServer::read_frame<asio::ip::tcp::socket>(
-    std::shared_ptr<asio::ip::tcp::socket>, std::shared_ptr<FrameReader>);
+    std::shared_ptr<asio::ip::tcp::socket>, std::shared_ptr<FrameReader>,
+    std::shared_ptr<ConnState>);
 template void StatusServer::respond<asio::ssl::stream<asio::ip::tcp::socket>>(
     std::shared_ptr<asio::ssl::stream<asio::ip::tcp::socket>>, const std::string&, bool,
-    std::shared_ptr<FrameReader>);
+    std::shared_ptr<FrameReader>, std::shared_ptr<ConnState>);
 template void StatusServer::serve_loop<asio::ssl::stream<asio::ip::tcp::socket>>(
-    std::shared_ptr<asio::ssl::stream<asio::ip::tcp::socket>>, std::shared_ptr<FrameReader>);
+    std::shared_ptr<asio::ssl::stream<asio::ip::tcp::socket>>, std::shared_ptr<FrameReader>,
+    std::shared_ptr<ConnState>);
 template void StatusServer::read_frame<asio::ssl::stream<asio::ip::tcp::socket>>(
-    std::shared_ptr<asio::ssl::stream<asio::ip::tcp::socket>>, std::shared_ptr<FrameReader>);
+    std::shared_ptr<asio::ssl::stream<asio::ip::tcp::socket>>, std::shared_ptr<FrameReader>,
+    std::shared_ptr<ConnState>);
+template std::shared_ptr<StatusServer::ConnState> StatusServer::register_conn<
+    asio::ip::tcp::socket>(const std::shared_ptr<asio::ip::tcp::socket>&);
+template std::shared_ptr<StatusServer::ConnState> StatusServer::register_conn<
+    asio::ssl::stream<asio::ip::tcp::socket>>(
+    const std::shared_ptr<asio::ssl::stream<asio::ip::tcp::socket>>&);
 
 }  // namespace tinykv::server

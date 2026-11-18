@@ -189,11 +189,13 @@ public:
         }
         (*peer)->set_region(right);
         (*peer)->set_store_meta(&meta_);
-        // 新单节点组立即选举成 leader：split 后客户端可马上写右半（不等后台 worker）
-        for (int i = 0; i < 20 && !(*peer)->is_leader(); ++i) {
-            (*peer)->tick();
-        }
-        (void)(*peer)->on_ready();
+        // BUG-0022（code-review r2 N-4）：这里绝不能再泵（tick 推举/on_ready）。
+        // observer 回调可能发生在分区闸泵路径（admin_split 超时后残留 split 在
+        // pump_peer_only 里 apply），此时只持旧 region 的桶；若在此推举新 peer，
+        // 另一 HTTP 线程可同时持新 region 桶触碰同一个新 Peer 对象——registry 的
+        // mu_ 只保护 slots_ 表结构，不保护 Peer 本体。只注册：选举交给持全局闸的
+        // Worker，或新 region 首次分区闸内泵（pump_peer_only），或 admin_split
+        // 成功路径在全局闸下的补泵——三者都保证"触碰新 peer 时持其桶或全局闸"。
         install(right, std::move(*eng), std::move(*peer));
         return {};
     }

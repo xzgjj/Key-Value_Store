@@ -9,9 +9,13 @@
 
 #pragma once
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -62,10 +66,13 @@ public:
     // io_threads = io_context 并发线程数（M8 ⑪，SPEC-7 §7.2.1）：默认 1 = M7 行为逐字节；
     // >1 时 handler 并发执行——并发安全由组合根的审计清单保证（docs/落实/notes-m8.md §1）。
     // tls 非空 = accept 层 ssl::stream 握手后进同一套 HTTP 解析（⑭，证书加载失败启动即报错）。
+    // idle_timeout（BUG-0023/N-5）：keep-alive 连接的空闲读超时，默认 30s——客户端连上
+    // 不发请求即断开，防 slowloris 式挂连接占住 socket 与读缓冲；测试可注入更小值。
     [[nodiscard]] static result<std::unique_ptr<StatusServer>> start(
         const std::string& host, std::uint16_t port, std::function<std::string()> provider,
         KvHandler kv_handler = {}, KvWriteHandler kv_write = {}, AdminHandler admin_handler = {},
-        std::string auth_token = {}, std::size_t io_threads = 1, TlsOptions tls = {});
+        std::string auth_token = {}, std::size_t io_threads = 1, TlsOptions tls = {},
+        std::chrono::milliseconds idle_timeout = std::chrono::milliseconds{30000});
 
     [[nodiscard]] std::uint16_t port() const { return bound_port_; }
 
@@ -95,21 +102,43 @@ private:
         }
         [[nodiscard]] bool pending_bytes() const { return !raw.empty(); }
     };
+
+    // ---- BUG-0023/N-5：空闲连接清道夫的状态 ----
+    // 每连接一份活跃状态；shutdown_native 跨线程执行 native shutdown(SD_BOTH)——
+    // 刻意不用 close()：句柄可能被复用，native shutdown 只改 socket 状态、不动句柄，
+    // 挂起的 async_read_some 以 EOF/错误收尾，连接对象随 handler 结束自然释放。
+    struct ConnState {
+        std::atomic<std::int64_t> last_activity_ms{0};
+        std::atomic<bool> reaped{false};   // 已关断：清道夫不再重复处理
+        std::function<bool()> shutdown_native;
+    };
+
     void accept_loop();
     // TLS accept 分支（⑭）：握手成功才进 serve_loop，失败断连（对端问题不记业务错误计数）
     void accept_tls();
+    // BUG-0023（N-5）：空闲连接清道夫——独立 OS 线程（不依赖 io 线程空闲），扫描活跃
+    // 时间戳超阈值的连接并跨线程 native shutdown。刻意不用 asio steady_timer：
+    // io_context 内部 timer 线程在 MinGW/IOCP 上的析构 join 会挂死（M8 后还债批实测），
+    // 且 io 线程被阻塞 handler 占满时 asio 定时器回调同样饿死——两条路都不走。
+    void reap_idle();
     // BUG-0002: 请求分派的唯一异常屏障——业务处理器抛出的异常到此为止
     [[nodiscard]] std::string dispatch(const std::string& request);
     // ⑦b：GET 分派（status/kv/admin 三路）；nullopt = 404
     [[nodiscard]] std::optional<std::string> handle_get(const RequestLine& line) const;
-    // 连接级处理对传输类型模板化（⑭）：同一套帧解析跑在明文 socket 与 ssl::stream 上
+    // 连接级处理对传输类型模板化（⑭）：同一套帧解析跑在明文 socket 与 ssl::stream 上。
+    // conn = 连接级活跃状态（清道夫扫描的输入），由 accept 分支创建并登记。
     template <typename Stream>
-    void serve_loop(std::shared_ptr<Stream> sock, std::shared_ptr<FrameReader> reader);
+    void serve_loop(std::shared_ptr<Stream> sock, std::shared_ptr<FrameReader> reader,
+                    std::shared_ptr<ConnState> conn);
     template <typename Stream>
-    void read_frame(std::shared_ptr<Stream> sock, std::shared_ptr<FrameReader> reader);
+    void read_frame(std::shared_ptr<Stream> sock, std::shared_ptr<FrameReader> reader,
+                    std::shared_ptr<ConnState> conn);
     template <typename Stream>
     void respond(std::shared_ptr<Stream> sock, const std::string& text, bool keep_alive,
-                 std::shared_ptr<FrameReader> reader);
+                 std::shared_ptr<FrameReader> reader, std::shared_ptr<ConnState> conn);
+    // accept 分支登记连接活跃状态（清道夫扫描输入）；Stream = 明文 socket 或 ssl::stream
+    template <typename Stream>
+    [[nodiscard]] std::shared_ptr<ConnState> register_conn(const std::shared_ptr<Stream>& sock);
 
     asio::io_context ctx_{1};
     std::unique_ptr<asio::ip::tcp::acceptor> acceptor_;
@@ -124,6 +153,14 @@ private:
     KvWriteHandler kv_write_;
     AdminHandler admin_handler_;
     std::string auth_token_;  // 空 = 鉴权关闭
+    std::chrono::milliseconds idle_timeout_{30000};  // BUG-0023/N-5：空闲读超时（0 = 不限时）
+
+    std::mutex conns_mu_;                                  // 保护 conns_（登记/清道夫扫描）
+    std::vector<std::weak_ptr<ConnState>> conns_;          // 仅弱引用：连接随 handler 释放
+    std::thread reaper_;                                   // 独立 OS 线程（1s 扫描粒度）
+    std::mutex reaper_mu_;                                 // 配合 cv 的停止信号（ENG-04 无 sleep）
+    std::condition_variable reaper_cv_;
+    std::atomic<bool> reaper_stop_{false};
 };
 
 }  // namespace tinykv::server

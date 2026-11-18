@@ -11,8 +11,11 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <variant>
 #include <vector>
 
+#include "common/crc32c.h"
+#include "common/compat.h"
 #include "raftstore/meta_store.h"
 #include "temp_dir.h"
 
@@ -124,6 +127,40 @@ TEST(MetaStoreTest, BackupIsUsedWhenPrimaryIsMissing) {
     ASSERT_TRUE(loaded.has_value());
     EXPECT_TRUE(*loaded);
     EXPECT_EQ(restored.region_count(), 1U) << "回退的是上一版（一个 region），不是凭空造两个";
+}
+
+// BUG-0021（code-review r2 N-2）：count 字段损坏（构造文件/CRC 碰撞）不得触发巨量
+// reserve——校验前置后必须走 Corrupted 错误路径，而不是 bad_alloc 穿出 load() 终止进程。
+// 构造"合法 CRC + 巨量 count"的文件：magic(4) + count=0xFFFFFFFF + 填充 + crc32c(body)。
+TEST(MetaStoreTest, CorruptedCountIsRejectedBeforeReserve) {
+    TempDir tmp{"tinykv_meta_count"};
+    const auto dir = tmp.path() / "db";
+    std::filesystem::create_directories(dir / "meta");
+    const auto file = dir / "meta" / StoreMetaStore::kFileName;
+    std::string body = "TKM1";  // meta_store.cpp 的文件格式契约：magic + count(u32 LE)
+    for (int i = 0; i < 4; ++i) {
+        body.push_back(static_cast<char>(0xFFU));  // count = 0xFFFFFFFF（物理不可能）
+    }
+    body.append(4, '\0');  // 凑过最短长度检查（≥ 12 字节）
+    const auto crc =
+        tinykv::crc32c(tinykv::as_bytes(tinykv::span{body}));
+    std::string raw = body;
+    for (int i = 0; i < 4; ++i) {  // 尾部 crc32c，小端（与 encode 同款）
+        raw.push_back(static_cast<char>((crc >> (8 * i)) & 0xFFU));
+    }
+    {
+        std::ofstream io(file, std::ios::binary | std::ios::trunc);
+        ASSERT_TRUE(io.is_open());
+        io.write(raw.data(), static_cast<std::streamsize>(raw.size()));
+    }
+    StoreMeta restored;
+    StoreMetaStore store(dir, restored);
+    auto loaded = store.load();
+    ASSERT_FALSE(loaded.has_value()) << "count 超出文件容量必须报错，不得巨量 reserve";
+    const auto* corrupted = std::get_if<Corrupted>(&loaded.error());
+    ASSERT_NE(corrupted, nullptr);
+    EXPECT_NE(corrupted->reason.find("count"), std::string::npos)
+        << "失败原因应指向 count 校验（而非 CRC/magic），证明校验在 reserve 前生效";
 }
 
 }  // namespace
