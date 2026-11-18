@@ -1,16 +1,15 @@
 {
-  "task": "M7 收口第三批：文档收口——notes-m7.md 里程碑笔记 + 三轮审查台账 + cli.md 跨区事务节（M7 增量契约落档）",
+  "task": "M7 后构建收口：CMakePresets 移除 17/20/clang23 专用档（只留默认 23 档 + vcpkg 两档）+ clean.py build 预算 2500→2800MB",
   "paths": [
-    "docs/notes-m7.md",
-    "docs/review-log.md",
-    "docs/cli.md",
+    "CMakePresets.json",
+    "scripts/clean.py",
     "ci/task_scope.json"
   ],
-  "reason": "M7 完成判定的最后一项：docs/notes-m7.md（⑦⑧⑨a⑩ 交付全景、关键决策、踩坑、完成判定对照、移交项）；review-log.md 追加本批三轮审查（正确性/工程门禁/契约文档，含工作区外部干扰的发现与处置）；cli.md §11.3 补跨区事务（⑦ 转正后的 CLI 契约）与 server.lock_shards 说明。SPEC-6 完成判定要求 notes-m7.md 与 ⑦ 转正一起落档。",
+  "reason": "另一构建会话的实测教训落地：多档 preset 长期不跑会漂移，矩阵构建树累积曾把 build 推到 13GB（clean.py 口径注明）。兼容验证收敛到 verify_matrix.py 按需触发、测完即删（docs/testing.md §9a 同步更新，docs 本地维护不入库）。用户 2026-11-18 拍板：最终只留 23 档和必要部分。",
   "bugfix": false,
   "fixes": [],
   "overflow_approved": false,
   "behavior_change_approved": false,
   "behavior_change_note": "",
-  "approver": "用户（2026-11-18：M7 收口文档随批次落档）"
+  "approver": "用户（2026-11-18：预设收口与预算调整随 M7 收口提交分支 6）"
 }

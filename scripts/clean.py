@@ -31,9 +31,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 BUILD_DIR = REPO_ROOT / "build"
 
 # 体积预算（MB）：超限即提示 / --check 返回 1
-# 口径依据：单棵 -g 构建树（73 个 exe、完整调试信息）实测约 2.0GB；
-# 再加上第二棵树才是异常（曾出现 4.0GB），故预算卡在"单树 + 余量"。
-BUDGET_BUILD_MB = 2500
+# 口径依据：单棵 -g 构建树（完整调试信息）实测 2.0~2.5GB（随测试目标数量增长）；
+# 预算卡在"单树 + 余量"——再出现第二棵树（曾累积到 13GB）就必然超限报警。
+BUDGET_BUILD_MB = 2800
 BUDGET_LOGS_MB = 200
 
 PROTECTED = ("build/evidence",)
