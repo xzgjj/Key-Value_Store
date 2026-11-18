@@ -89,8 +89,34 @@ TEST(RaftKv, DuplicateSequenceIsNotReapplied) {
     EXPECT_EQ(*got->value, "v1");
 }
 
-TEST(RaftKv, DeleteAppliesAndLeavesNoValue) {
+// BUG-0009: ARCH-1 P0-3——去重命中必须让调用方知道"无需等待"。
+// 使用场景：客户端重试同一 (client_id, seq)。旧实现 dedup 命中只 return {}，
+// 调用方仍按 "applied >= last_index+1" 等待，而那个位点永远不会出现 → 空转到超时；
+// 按回执取结果的调用方也拿不到任何东西（合成回执缺失）。
+TEST(RaftKv, DuplicateProposalReportsNoNewEntryAndLeavesReply) {
     SinglePeer f;
+    ASSERT_TRUE(f.peer->propose(make_put_request(7, 1, "dk", "v1")).has_value());
+    ASSERT_TRUE(f.peer->on_ready().has_value());
+
+    auto dup = f.peer->propose(make_put_request(7, 1, "dk", "v2"));
+    ASSERT_TRUE(dup.has_value()) << "去重命中不是错误（语义上已成功）";
+    EXPECT_FALSE(*dup) << "去重命中必须报告'没有新提案'，否则调用方会白等";
+
+    // 合成回执：按 (client,seq) 取结果的调用方也能收敛
+    EXPECT_GT(f.peer->reply_count(), 0U);
+    auto reply = f.peer->take_reply(7, 1);
+    ASSERT_TRUE(reply.has_value());
+    EXPECT_EQ(reply->cmd_responses_size(), 0) << "合成回执应为空成功";
+    f.peer->drop_reply(7, 1);
+    EXPECT_EQ(f.peer->reply_count(), 0U);
+
+    // 新 seq 仍然照常入队（去重不得误伤正常路径）
+    auto fresh = f.peer->propose(make_put_request(7, 2, "dk", "v3"));
+    ASSERT_TRUE(fresh.has_value());
+    EXPECT_TRUE(*fresh);
+}
+
+TEST(RaftKv, DeleteAppliesAndLeavesNoValue) {    SinglePeer f;
     ASSERT_TRUE(f.peer->propose(make_put_request(9, 1, "k2", "v2")).has_value());
     ASSERT_TRUE(f.peer->on_ready().has_value());
     ASSERT_TRUE(f.peer->propose(make_delete(9, 2, "k2")).has_value());

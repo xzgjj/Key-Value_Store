@@ -29,12 +29,15 @@ public:
     using Pump = std::function<void(std::string_view key)>;
     using Applied = std::function<bool(std::string_view key, std::uint64_t index)>;
     using PeerList = std::function<std::vector<tinykv::raftstore::Peer*>()>;   // GC 广播用
+    // key → 所属 region（ARCH-1 P0-1 护栏用）。不注入 = 关闭护栏（单 region / 测试装置）。
+    using RegionOf = std::function<std::optional<tinykv::RegionId>(std::string_view key)>;
 
     // gate：daemon 组合根注入的 Peer 串行闸（Worker 泵与 HTTP 共用；泵回调不得重复加锁）
     PeerTxnExecutor(PeerRef peer, Pump pump, Applied applied, std::mutex* gate,
-                    int max_rounds = 400, PeerList peers = {})
+                    int max_rounds = 400, PeerList peers = {}, RegionOf region_of = {})
         : peer_(std::move(peer)), pump_(std::move(pump)), applied_(std::move(applied)),
-          gate_(gate), max_rounds_(max_rounds), peers_(std::move(peers)) {}
+          gate_(gate), max_rounds_(max_rounds), peers_(std::move(peers)),
+          region_of_(std::move(region_of)) {}
 
     [[nodiscard]] tinykv::result<std::optional<std::string>> get(
         std::string_view key, tinykv::Ts start_ts) override {
@@ -50,11 +53,18 @@ public:
     [[nodiscard]] tinykv::result<void> prewrite(std::span<const tinykv::txn::Mutation> mutations,
                                                 std::string_view primary, tinykv::Ts start_ts,
                                                 std::uint64_t ttl_ms,
-                                                std::uint64_t /*now_ms*/) override {
-        kvpb::TxnPrewriteRequest req;
-        req.set_primary_lock(std::string(primary));
+                                                std::uint64_t now_ms) override {
+        // ARCH-1 P0-1：护栏必须先于协调器。整批 mutations 会经 primary 所在 peer 一次提案，
+        // 而读路径按 key 路由——跨区写入会静默落进 primary 的分区，对外表现"提交成功但数据不见了"。
+        if (auto guard = guard_single_region(mutations, primary); !guard.has_value()) {
+            return std::unexpected(guard.error());
+        }
+        // ARCH-1 P0-2：加锁时刻必须随请求走完链路。丢掉它，apply 侧只能写 0，
+        // check_txn_status 就会把任何运行超过 TTL 的进程新加的锁判成"已过期"。
+        kvpb::TxnPrewriteRequest req;        req.set_primary_lock(std::string(primary));
         req.set_start_ts(start_ts.value);
         req.set_lock_ttl(ttl_ms);
+        req.set_created_ms(now_ms);
         for (const auto& m : mutations) {
             auto* one = req.add_mutations();
             one->set_op(m.op == tinykv::txn::Mutation::Op::kPut ? kvpb::Mutation::PUT
@@ -180,6 +190,32 @@ public:
     }
 
 private:
+    // ARCH-1 P0-1 / SPEC-6 §6.2.1：跨 region 事务护栏（⑦-0）。
+    // 判据：primary 与每个 mutation 必须落在同一 region；任一不成立即结构化拒绝，
+    // 绝不允许退回"全写 primary"的旧行为（SPEC-6 §6.5 红线 1）。
+    [[nodiscard]] tinykv::result<void> guard_single_region(
+        std::span<const tinykv::txn::Mutation> mutations, std::string_view primary) const {
+        if (!region_of_) {
+            return {};   // 未注入路由：单 region 装配或测试装置，无跨区可能
+        }
+        const auto primary_region = region_of_(primary);
+        if (!primary_region.has_value()) {
+            return std::unexpected(tinykv::KeyNotInRegion{.key = std::string(primary),
+                                                          .region_id = tinykv::RegionId{0}});
+        }
+        for (const auto& m : mutations) {
+            const auto region = region_of_(m.key);
+            if (!region.has_value() || *region != *primary_region) {
+                return std::unexpected(tinykv::InvalidArgument{
+                    "跨区事务未启用（key=" + m.key + " 属 region " +
+                    std::to_string(region.has_value() ? region->value : 0) + "，primary=" +
+                    std::string(primary) + " 属 region " +
+                    std::to_string(primary_region->value) + "）"});
+            }
+        }
+        return {};
+    }
+
     [[nodiscard]] std::optional<std::unique_lock<std::mutex>> hold_gate() const {
         if (gate_ != nullptr) {
             return std::unique_lock<std::mutex>(*gate_);
@@ -219,6 +255,7 @@ private:
     std::mutex* gate_{nullptr};
     int max_rounds_;
     PeerList peers_;
+    RegionOf region_of_;   // 空 = 单 region 装配（护栏不生效）
 };
 
 }  // namespace tinykv::server

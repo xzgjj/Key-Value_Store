@@ -18,7 +18,8 @@ namespace tinykv::testlib {
 
 class PeerTxnExecutor final : public tinykv::server::PeerTxnExecutor {
 public:
-    explicit PeerTxnExecutor(PeerCluster& cluster)
+    // region_of 可选：注入 key→region 路由后启用跨区护栏（ARCH-1 P0-1 的用例入口）
+    explicit PeerTxnExecutor(PeerCluster& cluster, RegionOf region_of = {})
         : tinykv::server::PeerTxnExecutor(
               [&cluster](std::string_view) -> tinykv::raftstore::Peer& {
                   const int idx = cluster.leader();
@@ -45,7 +46,8 @@ public:
                   }
                   return true;
               },
-              nullptr) {}   // 测试装置单线程泵，无需共享闸
+              nullptr,   // 测试装置单线程泵，无需共享闸
+              400, {}, std::move(region_of)) {}
 };
 
 }  // namespace tinykv::testlib

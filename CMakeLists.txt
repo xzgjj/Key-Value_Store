@@ -28,6 +28,17 @@ find_package(protobuf CONFIG QUIET)
 set(FETCHCONTENT_BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build/.deps" CACHE PATH
     "FetchContent 产物目录（build/.deps：gitignored + 文档检查跳过点目录）")
 
+# 本地已落地的三方源码优先复用：两棵构建树（win-debug / ci）共享同一份 build/.deps，
+# 但 FetchContent 的"已填充"状态是按构建目录记账的——删掉某棵树后它会重跑 git clone。
+# 本机 git 的 HTTPS 后端可能不可用（"Unsupported SSL backend 'schannel'"），届时 configure 直接失败。
+# 因此只要源码目录已在，就把它固定为源目录（版本仍由 tests/CMakeLists.txt 的 GIT_TAG 表达；
+# 要升级 gtest 请先删掉 build/.deps/googletest-src 再配置）。
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/build/.deps/googletest-src/CMakeLists.txt")
+    set(FETCHCONTENT_SOURCE_DIR_GOOGLETEST
+        "${CMAKE_CURRENT_SOURCE_DIR}/build/.deps/googletest-src" CACHE PATH
+        "本地 googletest 源码（存在即跳过网络拉取）")
+endif()
+
 # 警告即失败（SPEC.md §3 阈值总表 / check_code.py 同口径 -Wall -Wextra -Werror）
 if(MSVC)
     add_compile_options(/W4 /WX)
@@ -39,6 +50,48 @@ endif()
 # 抢占解析（如 Git for Windows 自带旧 libstdc++-6.dll 导致 0xc0000139）；Linux/MSVC 不受影响。
 if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     add_link_options(-static)
+endif()
+
+# ---------------------------------------------------------------------------
+# 产物体积 / 编译并发上限（2026-11-18 实测后收口）
+#   实测：71 个测试可执行，单个 47MB 中 32MB(89%) 是 DWARF 调试段，代码数据仅 3.6MB；
+#         build/win-debug 与 build/ci 各存一份 → build/ 合计 4.0GB。
+#   默认保持工具链的 -g（=gcc -g2：类型/变量齐全，无宏信息），不牺牲调试能力；
+#   体积靠"不留重复构建树 + 按需清理"控制，而不是降调试信息。
+#   开关（均可 -D 覆盖）：
+#     TINYKV_MIN_DEBUG=ON    改 -g1（仅行号，产物约减半，但 info locals 不可用）
+#     TINYKV_COMPILE_JOBS=N  并发编译上限（0=不限制）；实测单个 cc1plus 峰值约 1.4GB
+# ---------------------------------------------------------------------------
+option(TINYKV_MIN_DEBUG "Debug 用 -g1（仅保留文件/行号，丢局部变量；省约一半体积）" OFF)
+
+set(TINYKV_COMPILE_JOBS "8" CACHE STRING
+    "并发编译上限（0=不限制，跟随 ninja -j）；实测单个 cc1plus 峰值约 1.4GB")
+set(TINYKV_LINK_JOBS "2" CACHE STRING "并发链接上限（0=不限制）；静态链接峰值约 1.5~2GB")
+
+# 只做"附加"，不覆盖 CMAKE_CXX_FLAGS_DEBUG：保留工具链默认值与用户自定义入口
+if(NOT MSVC AND TINYKV_MIN_DEBUG)
+    add_compile_options($<$<CONFIG:Debug>:-g1>)
+endif()
+
+# Ninja job pool：先于任何 add_subdirectory 设置，目标创建时才继承 CMAKE_JOB_POOL_*
+# 语法口径：CMAKE_JOB_POOLS 是 "名称=深度" 的分号列表（不是 ninja 原生的 "名称:深度"）
+if(CMAKE_GENERATOR MATCHES "Ninja")
+    set(_TINYKV_POOLS "")
+    if(NOT TINYKV_COMPILE_JOBS STREQUAL "0")
+        list(APPEND _TINYKV_POOLS "compile=${TINYKV_COMPILE_JOBS}")
+    endif()
+    if(NOT TINYKV_LINK_JOBS STREQUAL "0")
+        list(APPEND _TINYKV_POOLS "link=${TINYKV_LINK_JOBS}")
+    endif()
+    if(_TINYKV_POOLS)
+        set(CMAKE_JOB_POOLS "${_TINYKV_POOLS}" CACHE STRING "Ninja 并发池" FORCE)
+        if(NOT TINYKV_COMPILE_JOBS STREQUAL "0")
+            set(CMAKE_JOB_POOL_COMPILE compile)
+        endif()
+        if(NOT TINYKV_LINK_JOBS STREQUAL "0")
+            set(CMAKE_JOB_POOL_LINK link)
+        endif()
+    endif()
 endif()
 
 enable_testing()

@@ -121,7 +121,12 @@ public:
                 return registry_->require(key).applied_at_least(idx);
             },
             &peer_mu_, 400,
-            [this] { return registry_->all_peers(); });   // GC 广播到每个 region
+            [this] { return registry_->all_peers(); },   // GC 广播到每个 region
+            // ARCH-1 P0-1：注入 key→region 路由，跨区 prewrite 在提案前就被结构化拒绝
+            [this](std::string_view key) -> std::optional<RegionId> {
+                auto r = meta_.find_region(key);
+                return r.has_value() ? std::optional<RegionId>{r->id} : std::nullopt;
+            });
         sessions_ = std::make_unique<TxnSessionManager>(*exec_, tso_);
 
         if (auto r = start_http_locked(); !r.has_value()) {
@@ -408,8 +413,15 @@ private:
         } else {
             return "ERR bad-request";
         }
-        if (!peer.propose(req).has_value()) {
+        auto accepted = peer.propose(req);
+        if (!accepted.has_value()) {
             return "ERR not-leader";
+        }
+        if (!*accepted) {
+            // ARCH-1 P0-3：去重命中 = 该 (client,seq) 早已 apply 过，语义上已成功。
+            // 这里不能再等 applied 追平 last_index+1——那个位点永远到不了。
+            peer.drop_reply(1, expect);   // 回收 propose 登记的合成回执
+            return "OK";
         }
         if (!wait_applied_locked(peer, expect)) {
             return "ERR apply-timeout";

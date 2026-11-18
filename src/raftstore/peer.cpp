@@ -52,6 +52,11 @@ std::string as_string(const std::string& bytes) { return bytes; }
 
 Peer::Peer(std::unique_ptr<raft::RaftLog> log, Storage& storage, const raft::Config& cfg)
     : self_(cfg.id), log_(std::move(log)), storage_(storage) {   // 顺序须与声明一致
+    // INV-16 / ARCH-1 P0-4：状态机游标必须从持久化位点播种，不能默认 0。
+    // 崩溃重启且 applied == committed 时，Raft 的 dispatch 游标已是 N，collect_apply()
+    // 无条目可灌 → 没有任何 apply 批次会把这里的 applied_ 推到 N → ReadIndex 永远等不到
+    // 追平，表现为"重启后不写就读不出数据"。播种后两条游标语义一致。
+    applied_ = log_->applied().value;
     raft_ = std::make_unique<raft::Raft>(cfg, *log_);
 }
 
@@ -69,12 +74,15 @@ std::uint64_t Peer::applied_seq(std::uint64_t client_id) const {
     return it == last_seq_.end() ? 0 : it->second;
 }
 
-result<void> Peer::propose(const cmdpb::RaftCmdRequest& req) {
+result<bool> Peer::propose(const cmdpb::RaftCmdRequest& req) {
     const std::uint64_t client_id = req.header().client_id();
     const std::uint64_t seq = req.header().sequence_id();
     // 去重：重试不得二次 apply（否则"删了又写回"这类问题会出现）
     if (client_id != 0 && seq != 0 && seq <= applied_seq(client_id)) {
-        return {};
+        // ARCH-1 P0-3：命中即"已成功"。登记一条合成回执，让按回执取结果的调用方也能收敛；
+        // 同时把"无需等待新提案"这件事通过返回值交给调用方，避免按 applied 位点空转。
+        replies_[{client_id, seq}].Clear();
+        return false;
     }
     std::string payload;
     if (!req.SerializeToString(&payload)) {
@@ -89,9 +97,12 @@ result<void> Peer::propose(const cmdpb::RaftCmdRequest& req) {
                 NotLeader{.region_id = RegionId{0}, .leader_hint = std::nullopt});
         }
         pending_proposals_.push_back(std::move(payload));
-        return {};
+        return true;
     }
-    return raft_->propose(std::move(payload));
+    if (auto r = raft_->propose(std::move(payload)); !r) {
+        return std::unexpected(r.error());
+    }
+    return true;
 }
 
 result<bool> Peer::flush_proposals() {
@@ -481,7 +492,9 @@ std::optional<KvError> run_txn_prewrite(Storage& storage, txn::LatchManager& lat
     }
     auto guard = latches.acquire(keys);   // 红线4：latch 持有至 apply 完成
     txn::MvccTxn mvcc(storage);
-    if (auto r = mvcc.prewrite(muts, req.primary_lock(), Ts{req.start_ts()}, req.lock_ttl(), 0);
+    // ARCH-1 P0-2：created_ms 随请求到达（旧客户端缺省 0，退化为"出生即过期"的旧行为）
+    if (auto r = mvcc.prewrite(muts, req.primary_lock(), Ts{req.start_ts()}, req.lock_ttl(),
+                               req.created_ms());
         !r.has_value()) {
         return std::move(r.error());
     }

@@ -85,6 +85,11 @@ message TxnPrewriteRequest {
     bytes primary_lock = 2;           // 必填：主锁 key（mutations 之一；提交/回滚的锚点）
     uint64 start_ts = 3;
     uint64 lock_ttl = 4;              // 毫秒：锁存活时长
+    // 加锁时刻（毫秒，与 check_txn_status 的 now_ms 同一口径）。缺省 0 = 旧客户端未携带，
+    // 服务端按 0 处理（锁会被判为早已过期）——这是向后兼容的退化路径，不是正确路径。
+    // 为什么必须随请求传：TTL 判定需要"锁出生的时刻"，服务端本地时钟猜不出客户端何时加锁，
+    // 用 0 当出生时刻会让运行超过 TTL 的进程把所有新锁判成过期（ARCH-1 P0-2）。
+    uint64 created_ms = 5;
 }
 message TxnPrewriteResponse {
     repeated bytes already_exist_keys = 1;  // 与既有锁冲突且不可覆盖的 key；可为空

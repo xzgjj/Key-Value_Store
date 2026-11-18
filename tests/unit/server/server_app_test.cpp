@@ -238,6 +238,48 @@ TEST(ServerAppTest, RepeatedSplitCreatesThirdPeer) {
     EXPECT_NE(got.find("v"), std::string::npos) << got;
 }
 
+// BUG-0006: ARCH-1 P0-4——重启后没有挂起条目时，"不写先读"必须可用。
+// 使用场景：进程正常关停（applied == committed，重放队列为空），重启后只读业务先到达。
+// 旧实现里 Peer::applied_ 默认 0、只在有 apply 批次时赋值，于是 ReadIndex 永远等不到追平，
+// 每次读都返回 IoFailed 直到有写入把管线踢活——典型的"测试绿、部署红"。
+// 本用例走的正是 ServerApp 装配路径（既有 applied_recovery_test 不走这里）。
+TEST(ServerAppTest, RestartWithoutPendingEntriesKeepsReadable) {
+    TempDir tmp{"tinykv_daemon_restart"};
+    const auto data_dir = tmp.path() / "db";
+    std::uint16_t port = 0;
+    {
+        ServerApp app(ServerOptions{.data_dir = data_dir, .status_port = 0,
+                                    .worker_interval = std::chrono::milliseconds(2),
+                                    .log_sink = {}});
+        ASSERT_TRUE(app.start().has_value());
+        port = app.status_port();
+        ASSERT_GT(port, 0);
+        const std::string endpoint = "127.0.0.1:" + std::to_string(port);
+        for (const auto& args : std::vector<std::vector<std::string>>{
+                 {"put", "rk1", "rv1"}, {"put", "rk2", "rv2"}}) {
+            std::vector<std::string> full{"--endpoint", endpoint};
+            full.insert(full.end(), args.begin(), args.end());
+            std::ostringstream out;
+            std::ostringstream err;
+            ASSERT_EQ(tinykv::cli::run_cli(full, out, err), 0) << err.str();
+        }
+        ASSERT_TRUE(app.stop().has_value());
+    }
+    // 重启：读写分离——先只读，不写任何东西
+    ServerApp app(ServerOptions{.data_dir = data_dir, .status_port = 0,
+                                .worker_interval = std::chrono::milliseconds(2),
+                                .log_sink = {}});
+    ASSERT_TRUE(app.start().has_value());
+    const std::string endpoint = "127.0.0.1:" + std::to_string(app.status_port());
+    std::ostringstream out;
+    std::ostringstream err;
+    const std::vector<std::string> args{"--endpoint", endpoint, "get", "rk1"};
+    ASSERT_EQ(tinykv::cli::run_cli(args, out, err), 0) << err.str();
+    EXPECT_NE(out.str().find("rv1"), std::string::npos)
+        << "重启后未写入即读失败（applied 游标未播种）: " << out.str();
+    ASSERT_TRUE(app.stop().has_value());
+}
+
 TEST(ServerAppTest, StopIsIdempotentAndPortGoesDown) {
     TempDir tmp{"tinykv_daemon_stop"};
     ServerApp app(ServerOptions{.data_dir = tmp.path() / "db", .status_port = 0,

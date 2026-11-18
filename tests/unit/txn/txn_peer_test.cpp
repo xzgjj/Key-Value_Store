@@ -15,8 +15,11 @@
 #include <gtest/gtest.h>
 
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <variant>
+#include <vector>
 
 #include "peer_cluster.h"
 
@@ -145,6 +148,68 @@ TEST(TxnPeer, CrashedTxnResolvedThroughRaftPath) {
     (void)c2.set("k2", "fresh");
     f.now_ms += 10;
     ASSERT_TRUE(c2.commit(f.now_ms).has_value());
+}
+
+// BUG-0007: ARCH-1 P0-2——加锁时刻必须经协议到达 apply 侧。
+// 使用场景：常驻进程的注入时钟已经跑过 TTL（now_ms 远大于 3000）。旧实现把 created_ms
+// 写死 0，于是"现在 - 0" 恒大于 TTL，任何新锁都被判过期，并发事务会把活锁当死锁回滚。
+TEST(TxnPeer, LockTtlUsesRequestCreationTime) {
+    Fixture f;
+    const std::uint64_t created = 500'000;   // 模拟进程已运行很久（远超默认 TTL 3s）
+    auto t = f.client();
+    (void)t.begin();
+    std::vector<tinykv::txn::Mutation> muts{
+        {.op = tinykv::txn::Mutation::Op::kPut, .key = "ttl_k", .value = "v"}};
+    ASSERT_TRUE(f.exec().prewrite(muts, "ttl_k", t.start_ts(), 3000, created).has_value());
+
+    // TTL 窗口内：锁必须"活着"（remaining > 0），而不是被当成出生即过期
+    auto alive = f.exec().check_txn_status("ttl_k", t.start_ts(), created + 100);
+    ASSERT_TRUE(alive.has_value());
+    EXPECT_FALSE(alive->committed);
+    EXPECT_FALSE(alive->rolled_back);
+    EXPECT_GT(alive->lock_ttl_remaining_ms, 0U)
+        << "created_ms 未随请求传递：运行超过 TTL 后新锁被判出生即过期";
+
+    // 越过 TTL：过期分支仍必须可触发（修复不能把 TTL 变成"永不过期"）
+    auto dead = f.exec().check_txn_status("ttl_k", t.start_ts(), created + 3000);
+    ASSERT_TRUE(dead.has_value());
+    EXPECT_EQ(dead->lock_ttl_remaining_ms, 0U);
+    EXPECT_FALSE(dead->committed);
+}
+
+// BUG-0008: ARCH-1 P0-1——跨 region 事务必须在提案前被结构化拒绝。
+// 使用场景：primary 在 region 1、secondary 在 region 2。旧实现把整批 mutations 经
+// primary 所在 peer 一次提案，数据全落 region 1，读 region 2 得空——"提交成功但数据不见了"。
+TEST(TxnPeer, CrossRegionPrewriteRejectedBeforeProposal) {
+    Fixture f;
+    // 虚拟路由：key < "m" 属 region 1，其余属 region 2（与 split 后的布局同构）
+    PeerTxnExecutor guarded(
+        f.cluster, [](std::string_view key) -> std::optional<tinykv::RegionId> {
+            return key < "m" ? tinykv::RegionId{1} : tinykv::RegionId{2};
+        });
+    std::vector<tinykv::txn::Mutation> muts{
+        {.op = tinykv::txn::Mutation::Op::kPut, .key = "a", .value = "1"},
+        {.op = tinykv::txn::Mutation::Op::kPut, .key = "z", .value = "2"}};
+    auto r = guarded.prewrite(muts, "a", tinykv::Ts{100}, 3000, 10);
+    ASSERT_FALSE(r.has_value()) << "跨区 prewrite 不得静默成功";
+    ASSERT_TRUE(std::holds_alternative<tinykv::InvalidArgument>(r.error()));
+    // 护栏在提案之前：两个 key 都不应落锁（读回不报 LockConflict 即证明无锁）
+    for (const std::string key : {"a", "z"}) {
+        auto got = f.cluster.peer(0).mvcc().get(key, tinykv::Ts{1000});
+        ASSERT_TRUE(got.has_value()) << key << " 被写入了锁：护栏没在提案前生效";
+        EXPECT_FALSE(got->has_value()) << key << " 不应有数据落地";
+    }
+}
+
+// 单区事务在护栏开启时照常通过（护栏不能误伤正常路径）
+TEST(TxnPeer, SingleRegionPrewritePassesGuard) {
+    Fixture f;
+    PeerTxnExecutor guarded(
+        f.cluster, [](std::string_view) { return tinykv::RegionId{1}; });
+    std::vector<tinykv::txn::Mutation> muts{
+        {.op = tinykv::txn::Mutation::Op::kPut, .key = "aa", .value = "1"},
+        {.op = tinykv::txn::Mutation::Op::kPut, .key = "ab", .value = "2"}};
+    ASSERT_TRUE(guarded.prewrite(muts, "aa", tinykv::Ts{100}, 3000, 10).has_value());
 }
 
 }  // namespace

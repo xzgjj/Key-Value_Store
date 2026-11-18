@@ -39,8 +39,11 @@ public:
     // cfg 的 voters 决定集群规模；storage 同时承载 raft log 与业务数据（M2 简化）
     [[nodiscard]] static result<std::unique_ptr<Peer>> open(const raft::Config& cfg, Storage& storage);
 
-    // 提交一条 RaftCmdRequest；重复的 (client_id, seq) 直接返回成功而不产生新提案
-    [[nodiscard]] result<void> propose(const cmdpb::RaftCmdRequest& req);
+    // 提交一条 RaftCmdRequest；重复的 (client_id, seq) 直接返回 false 而不产生新提案。
+    // 为什么把"是否真的入队"返回给调用方：去重命中意味着该请求早就 apply 过了，
+    // 调用方若仍按"applied 追平 last_index+1"等待，就会空转到超时（ARCH-1 P0-3）。
+    // true = 已入队/已提案，false = 去重命中（语义上已成功）。
+    [[nodiscard]] result<bool> propose(const cmdpb::RaftCmdRequest& req);
 
     // leader 本地读（M2 非线性一致，M3 由 ReadIndex 修正）
     [[nodiscard]] result<GetResult> get(Cf cf, std::string_view key) const;

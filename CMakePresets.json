@@ -12,7 +12,9 @@
             "generator": "Ninja",
             "binaryDir": "${sourceDir}/build/${presetName}",
             "cacheVariables": {
-                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+                "TINYKV_COMPILE_JOBS": "8",
+                "TINYKV_LINK_JOBS": "2"
             }
         },
         {
@@ -34,6 +36,16 @@
             "displayName": "Windows · MSYS2 ucrt64 g++ · Release",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release"
+            }
+        },
+        {
+            "name": "win-slim",
+            "inherits": "win-debug",
+            "displayName": "Windows · MSYS2 ucrt64 g++ · Debug(省磁盘)",
+            "description": "-g1：只保留文件/行号，产物约减半；info locals 不可用，深度调试请用 win-debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "TINYKV_MIN_DEBUG": "ON"
             }
         },
         {
@@ -77,6 +89,10 @@
             "configurePreset": "win-release"
         },
         {
+            "name": "win-slim",
+            "configurePreset": "win-slim"
+        },
+        {
             "name": "linux-debug",
             "configurePreset": "linux-debug"
         },
@@ -104,6 +120,13 @@
         {
             "name": "win-release",
             "configurePreset": "win-release",
+            "output": {
+                "outputOnFailure": true
+            }
+        },
+        {
+            "name": "win-slim",
+            "configurePreset": "win-slim",
             "output": {
                 "outputOnFailure": true
             }
