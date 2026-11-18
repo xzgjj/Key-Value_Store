@@ -11,6 +11,7 @@
 #pragma once
 
 #include <cstdint>
+#include <chrono>
 #include <functional>
 #include <map>
 #include <optional>
@@ -61,6 +62,21 @@ public:
     // 在 begin 之后泵若干轮，再取 confirmed 位点，等 applied 追平后读状态机。
     [[nodiscard]] result<std::uint64_t> begin_read_index();
 
+    // 统一线性一致读：发起 ReadIndex → 泵到 quorum 确认 → 等状态机 applied 追上确认位点。
+    // pump 由调用方注入（Peer 自己不持传输层）；单副本时 pump 可以只 tick/on_ready。
+    // timeout 非空时按墙钟限时（多副本下 follower 心跳响应受对端泵周期约束，
+    // 单纯按轮数自旋可能在响应到达前就耗尽）——两者取先到者。
+    [[nodiscard]] result<std::uint64_t> wait_read_index(
+        const std::function<void()>& pump, int max_rounds = 400,
+        std::optional<std::chrono::milliseconds> timeout = std::nullopt);
+    [[nodiscard]] std::uint64_t read_index_calls() const { return read_index_calls_; }
+
+    // apply 可观测性：状态机 apply 失败次数/最近错误种类，以及尚未取走的 txn 执行错误数。
+    // 这些计数在 Peer 自己的锁域内累加，由组合根汇总到 /status，避免错误被泵循环吞掉。
+    [[nodiscard]] std::uint64_t apply_error_count() const { return apply_errors_; }
+    [[nodiscard]] std::string last_apply_error() const { return last_apply_error_; }
+    [[nodiscard]] std::size_t pending_txn_errors() const { return txn_errors_.size(); }
+
     // 取走已获 quorum 确认的读位点（可能为空）
     [[nodiscard]] std::vector<std::uint64_t> take_confirmed_reads();
 
@@ -69,9 +85,15 @@ public:
     [[nodiscard]] bool lease_valid() const;
 
     [[nodiscard]] bool applied_at_least(std::uint64_t index) const { return applied_ >= index; }
+    [[nodiscard]] std::uint64_t applied_index() const { return applied_; }
 
-    // 压缩日志（快照/测试用）：超过 committed 会被 RaftLog 拒绝
+    // 压缩日志（快照/测试用）：超过 applied 会被 RaftLog 拒绝
     [[nodiscard]] result<void> compact_log(LogIndex upto) { return log_->compact(upto); }
+
+    // 已 apply 条目数与 first_index 的差达到该阈值时，on_ready 自动压缩日志。
+    // 0 = 关闭（基准对比用）。默认 512：避免长跑时日志无限增长。
+    void set_log_compact_threshold(std::size_t n) { log_compact_threshold_ = n; }
+    [[nodiscard]] std::size_t log_compact_threshold() const { return log_compact_threshold_; }
 
     // 直接读状态机（调用方保证 applied ≥ read_index，否则读到的可能不是线性一致点）
     [[nodiscard]] result<GetResult> read_directly(Cf cf, std::string_view key) const;
@@ -92,6 +114,7 @@ public:
                                                                         std::uint64_t seq);
 
     [[nodiscard]] bool is_leader() const { return raft_->is_leader(); }
+    [[nodiscard]] PeerId id() const { return self_; }
     [[nodiscard]] raft::Raft& raft() { return *raft_; }
     [[nodiscard]] std::uint64_t applied_seq(std::uint64_t client_id) const;
 
@@ -139,6 +162,9 @@ private:
     PeerId self_{0};
 
     [[nodiscard]] result<void> apply_entry(const raftpb::Entry& entry);
+    void record_apply_error(const KvError& error);
+    // 阈值触发日志压缩（on_ready 内调用）：0 阈值/非 leader/未追平都直接跳过
+    void compact_log_if_needed(std::uint64_t applied_index);
     [[nodiscard]] result<void> execute(const cmdpb::RaftCmdRequest& req);
     // M4 第③层：apply Split admin（校验开区间 + 更新 StoreMeta 路由；红线1/2）
     [[nodiscard]] result<void> apply_split_admin(const cmdpb::SplitRequest& split);
@@ -202,6 +228,10 @@ private:
     std::vector<std::uint64_t> confirmed_reads_;
     std::map<std::pair<std::uint64_t, std::uint64_t>, cmdpb::RaftCmdResponse> replies_;
     std::uint64_t applied_{0};   // 已 apply 到的日志位点
+    std::uint64_t read_index_calls_{0};
+    std::uint64_t apply_errors_{0};
+    std::string last_apply_error_;
+    std::size_t log_compact_threshold_{512};
 
     // 批量 propose：待攒批的已序列化请求 + 开关（默认开启）
     std::vector<std::string> pending_proposals_;

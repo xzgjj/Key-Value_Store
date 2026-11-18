@@ -69,8 +69,13 @@ public:
     [[nodiscard]] bool is_transferring() const { return transfer_target_.has_value(); }
     [[nodiscard]] std::optional<PeerId> transfer_target() const { return transfer_target_; }
 
-    // 取走本轮输出（消息 + 待 apply），并推进 applied 指针
+    // 取走本轮输出（消息 + 待 apply）。这里推进的是**内存 dispatch 位点**；
+    // 真正"已完成"的持久化位点由下面的 mark_applied 在状态机写完后确认。
     [[nodiscard]] Ready take_ready();
+
+    // apply 成功后确认位点：先校验不超过 committed，再持久化到 RaftLog。
+    // 失败必须让调用方停止后续确认——否则崩溃后会误认为这段已 apply。
+    [[nodiscard]] result<void> mark_applied(LogIndex idx);
 
     // 发起一次 ReadIndex：返回轮次标识。获 quorum 确认后位点出现在 Ready.confirmed_reads。
     // 非 leader 返回 NotLeader；LeaseRead 开启且租约有效时调用方可以跳过本方法直接读。
@@ -84,6 +89,10 @@ public:
 
     // 安装快照后调用：日志重置到 (index, term)，applied 前移，退回 follower
     void restore_snapshot(LogIndex index, Term term);
+
+    // 只有所有 voter 的 match_index 都到达 upto 才允许压缩日志，否则落后节点只能走快照。
+    // 由 leader 判定；follower 不持有全量 match 视图，返回 false 保守不压缩。
+    [[nodiscard]] bool can_compact(LogIndex upto) const;
 
     [[nodiscard]] Role role() const { return role_; }
     [[nodiscard]] bool is_leader() const { return role_ == Role::Leader; }

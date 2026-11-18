@@ -54,7 +54,8 @@ int main(int argc, char** argv) {
         std::cerr << "启动失败: " << tinykv::describe_kind(started.error()) << "\n";
         return 1;
     }
-    std::cout << "tinykv-server 就绪: status=" << host << ':' << app.status_port() << "\n";
+    std::cout << "tinykv-server 就绪: status=" << host << ':' << app.status_port()
+              << " observe=" << host << ':' << app.observe_port() << "\n";
 
     // 主循环：每秒唤醒推进注入时钟，收到信号才退出（ENG-04 禁 sleep_for，用 cv::wait_for）。
     // 时钟推进是 TTL 锁决议与 GC 安全点在真实进程里可自愈的前提（P1 修复）。

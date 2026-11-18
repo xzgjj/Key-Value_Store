@@ -5,7 +5,8 @@
 //   peer()     —— 目标 Peer（多副本时动态找 leader；单机固定返回自己）
 //   pump()     —— 推动共识前进（daemon=Worker 已在后台泵，这里只等；测试=主动 pump）
 //   applied()  —— 收敛判定（单机=本 peer 到位；多副本=全部副本到位）
-// 读路径（get/check_txn_status/locks_of）走 peer 本地 MVCC 直读（M2 leader 本地读同款偏差）。
+// 读路径（get/check_txn_status/locks_of）：统一走 Peer::wait_read_index——
+// quorum 确认 + applied 追平后才读状态机，不再依赖 leader 本地直读的弱一致语义。
 
 #pragma once
 
@@ -37,8 +38,13 @@ public:
 
     [[nodiscard]] tinykv::result<std::optional<std::string>> get(
         std::string_view key, tinykv::Ts start_ts) override {
-        std::optional<std::unique_lock<std::mutex>> gate = hold_gate();
-        return peer_(key).mvcc().get(key, start_ts);
+        auto gate = hold_gate();
+        auto& p = peer_(key);
+        const auto ri = p.wait_read_index([&] { pump_(key); });
+        if (!ri.has_value()) {
+            return std::unexpected(ri.error());
+        }
+        return p.mvcc().get(key, start_ts);
     }
 
     [[nodiscard]] tinykv::result<void> prewrite(std::span<const tinykv::txn::Mutation> mutations,
@@ -87,17 +93,28 @@ public:
     [[nodiscard]] tinykv::result<tinykv::txn::TxnStatus> check_txn_status(
         std::string_view primary, tinykv::Ts lock_start_ts, std::uint64_t now_ms) override {
         auto gate = hold_gate();
-        return peer_(primary).mvcc().check_txn_status(primary, lock_start_ts, now_ms);
+        auto& p = peer_(primary);
+        const auto ri = p.wait_read_index([&] { pump_(primary); });
+        if (!ri.has_value()) {
+            return std::unexpected(ri.error());
+        }
+        return p.mvcc().check_txn_status(primary, lock_start_ts, now_ms);
     }
 
     [[nodiscard]] tinykv::result<std::size_t> resolve_locks_of(
         std::string_view primary, tinykv::Ts lock_start_ts,
         std::optional<tinykv::Ts> commit_to) override {
         auto gate = hold_gate();
-        auto victims = peer_(primary).mvcc().locks_of(primary, lock_start_ts);
+        auto& p = peer_(primary);
+        const auto ri = p.wait_read_index([&] { pump_(primary); });
+        if (!ri.has_value()) {
+            return std::unexpected(ri.error());
+        }
+        auto victims = p.mvcc().locks_of(primary, lock_start_ts);
         if (victims.empty()) {
             return std::size_t{0};
         }
+        gate.reset();   // 写路径自己再加闸：同一线程不可对同一 mutex 重复 lock
         tinykv::result<void> outcome = std::unexpected(
             tinykv::InvalidArgument{"决议分支未执行"});
         if (commit_to.has_value()) {

@@ -10,3 +10,4 @@ add_tinykv_test(engine_get_put_test SRCS engine_get_put_test.cpp LIBS tinykv_sto
 add_tinykv_test(engine_scan_test SRCS engine_scan_test.cpp LIBS tinykv_storage)
 add_tinykv_test(engine_cf_test SRCS engine_cf_test.cpp LIBS tinykv_storage)
 add_tinykv_test(engine_scan_concurrent_test SRCS engine_scan_concurrent_test.cpp LIBS tinykv_storage)
+add_tinykv_test(engine_compaction_test SRCS engine_compaction_test.cpp LIBS tinykv_storage)

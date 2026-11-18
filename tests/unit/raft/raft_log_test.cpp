@@ -93,6 +93,7 @@ TEST(RaftLog, CompactMovesFirstIndexAndDummyTerm) {
     std::vector<Entry> entries{make_entry(1, 1, "a"), make_entry(2, 3, "b"), make_entry(3, 3, "c")};
     ASSERT_TRUE(f.log->append(entries).has_value());
     ASSERT_TRUE(f.log->set_committed(LogIndex{3}).has_value());
+    ASSERT_TRUE(f.log->set_applied(LogIndex{3}).has_value());
 
     ASSERT_TRUE(f.log->compact(LogIndex{2}).has_value());
     EXPECT_EQ(f.log->first_index(), LogIndex{3});
@@ -106,12 +107,15 @@ TEST(RaftLog, CompactMovesFirstIndexAndDummyTerm) {
     EXPECT_TRUE(std::holds_alternative<tinykv::Corrupted>(old.error()));
 }
 
-TEST(RaftLog, CompactCannotPassCommitted) {
+TEST(RaftLog, CompactCannotPassApplied) {
     Fixture f;
     std::vector<Entry> entries{make_entry(1, 1, "a"), make_entry(2, 1, "b")};
     ASSERT_TRUE(f.log->append(entries).has_value());
-    auto r = f.log->compact(LogIndex{2});   // committed 仍为 0
-    ASSERT_FALSE(r.has_value());
+    ASSERT_TRUE(f.log->set_committed(LogIndex{2}).has_value());
+    // applied 仍为 0：崩溃窗口内只允许重放，不允许把未确认 apply 的条目压掉
+    EXPECT_FALSE(f.log->compact(LogIndex{2}).has_value());
+    ASSERT_TRUE(f.log->set_applied(LogIndex{2}).has_value());
+    EXPECT_TRUE(f.log->compact(LogIndex{2}).has_value());
 }
 
 TEST(RaftLog, StateSurvivesReopen) {

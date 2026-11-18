@@ -11,6 +11,10 @@
 // key 布局（cf = Default，前缀保证有序）：
 //   "\0re" + be64(index) → 序列化的 raftpb.Entry（大端 index 保证 Scan 序 = index 序）
 //   "\0lm"               → 元信息：first/last/committed/term/vote/dummy_term 六个 u64
+//   "\0la"               → 已 apply 位点（单独键，避免改 "\0lm" 的 6×u64 格式触发数据迁移）
+//
+// committed 与 applied 必须分开落盘：前者由多数派复制推进，后者由状态机真正写完才推进。
+// 只持久化 committed 会把"已提交、未 apply"的崩溃窗口误判成已完成，导致写永久丢失。
 
 #pragma once
 
@@ -44,6 +48,11 @@ public:
     // commit 必须持久化：重启后若重置为 0，已提交但未 apply 的条目会被当成未提交
     [[nodiscard]] result<void> set_committed(LogIndex idx);
 
+    // 已 apply 位点：与 committed 分开持久化。缺失/损坏时返回 0（保守重放，宁可重复不可丢）。
+    // 这是存储层原语，不做"不超过 committed"这类上层不变量校验；校验由 Raft::mark_applied 负责。
+    [[nodiscard]] LogIndex applied() const { return LogIndex{meta_.applied}; }
+    [[nodiscard]] result<void> set_applied(LogIndex idx);
+
     [[nodiscard]] Term current_term() const { return Term{meta_.term}; }
     [[nodiscard]] std::optional<PeerId> voted_for() const {
         return meta_.vote == 0 ? std::nullopt : std::optional<PeerId>(PeerId{meta_.vote});
@@ -76,6 +85,7 @@ private:
         std::uint64_t term{0};
         std::uint64_t vote{0};
         std::uint64_t dummy_term{0};
+        std::uint64_t applied{0};   // 单独键持久化，不在 6×u64 的 "\0lm" blob 内
     };
 
     explicit RaftLog(Storage& storage) : storage_(storage) {}

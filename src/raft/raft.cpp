@@ -24,7 +24,11 @@ constexpr std::size_t kRemoveLeaderMinVoters = 2;
 Raft::Raft(Config cfg, RaftLog& log) : cfg_(std::move(cfg)), log_(log) {
     term_ = log_.current_term().value;
     voted_for_ = log_.voted_for();
-    applied_ = log_.committed().value;
+    // 两个位点语义不同：applied_ 是"已发进 Ready"的内存 dispatch 游标，
+    // RaftLog 里的 applied 是"状态机确实写完"的持久化游标。
+    // 崩溃窗口内后者会落后；启动时从持久化位点重建，并把缺口灌入首个 Ready 重放。
+    applied_ = std::min(log_.applied().value, log_.committed().value);
+    collect_apply();
     // 选举超时错峰：真实 Raft 用 [T,2T] 随机值，这里用 id 派生的确定性偏移。
     // 目的相同（避免所有节点同拍竞选导致无限分裂），但可复现——模拟器的前提。
     const std::uint64_t base = cfg_.election_timeout == 0 ? 1 : cfg_.election_timeout;
@@ -306,6 +310,27 @@ result<void> Raft::propose_conf_change(const raftpb::ConfChange& cc) {
     return {};
 }
 
+bool Raft::can_compact(LogIndex upto) const {
+    if (role_ != Role::Leader) {
+        return false;
+    }
+    for (const PeerId& p : cfg_.voters) {
+        std::uint64_t matched = 0;
+        if (same(p, cfg_.id)) {
+            matched = log_.last_index().value;
+        } else {
+            const auto it = match_index_.find(p.value);
+            if (it != match_index_.end()) {
+                matched = it->second;
+            }
+        }
+        if (matched < upto.value) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void Raft::apply_conf_change(const raftpb::ConfChange& cc) {
     const auto pid = PeerId{cc.node_id()};
     auto erase_peer = [](std::vector<PeerId>& v, PeerId p) {
@@ -436,6 +461,18 @@ void Raft::collect_apply() {
         }
     }
     applied_ = committed;
+}
+
+result<void> Raft::mark_applied(LogIndex idx) {
+    if (idx.value > log_.committed().value) {
+        return std::unexpected(
+            InvalidArgument{"applied 不得超过 committed：" + std::to_string(idx.value)});
+    }
+    if (auto r = log_.set_applied(idx); !r) {
+        return r;
+    }
+    applied_ = std::max(applied_, idx.value);
+    return {};
 }
 
 Ready Raft::take_ready() {

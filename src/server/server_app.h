@@ -16,8 +16,10 @@
 #include "scheduler/tso.h"
 
 #include <atomic>
+#include <algorithm>
 #include <charconv>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -27,6 +29,7 @@
 #include <utility>
 
 #include "server/interceptor.h"
+#include "server/http_helpers.h"
 #include "server/peer_registry.h"
 #include "server/peer_txn.h"
 #include "server/service.h"
@@ -35,18 +38,30 @@
 #include "server/txn_sessions.h"
 #include "server/worker.h"
 #include "storage/engine.h"
-#include <cstdint>
 #include "txn/executor.h"
+// asio（Windows SDK）会定义 DELETE 宏，必须放在 peer_txn.h（引用 kvpb::Mutation::DELETE）
+// 之后，否则宏展开破坏枚举。status_server.h 同样引入 asio，故本头统一置于最末。
+#include "raftstore/tcp_transport.h"
 namespace tinykv::server {
 
 struct ServerOptions {
     std::filesystem::path data_dir;      // 必填
     std::string host{"127.0.0.1"};
     std::uint16_t status_port{0};        // 0 = 随机
+    std::uint16_t observe_port{0};       // 观测端点独立端口；0 = 随机（独立 io_context）
     std::uint64_t election_timeout{8};
     std::uint64_t heartbeat{3};
     std::chrono::milliseconds worker_interval{10};
     LogSink log_sink;                    // 可注入请求日志 sink（空 = 不输出）
+
+    // ---- Raft 传输层（M7 ⑤：单机 KV → 分布式 store 的分水岭） ----
+    // voters 为空 = 单节点模式（不创建 Transport，保持既有行为）；非空 = 多副本组。
+    // replica_id 是本节点在 voters 中的身份；多副本下所有节点须用同一 voters 列表、
+    // 不同 replica_id。raft_port=0 由系统分配，start 后经 raft_port() 查询并 set_raft_peers()。
+    PeerId replica_id{1};
+    std::vector<PeerId> voters{};
+    std::uint16_t raft_port{0};
+    std::map<std::uint64_t, std::uint16_t> peer_ports{};   // 可选：启动即已知的对端端口
 };
 
 class ServerApp final : public Service {
@@ -71,8 +86,12 @@ public:
         if (!meta_.add_region(region).has_value()) {
             return std::unexpected(InvalidArgument{"region 1 注册失败"});
         }
-        registry_ = std::make_unique<RegionPeerRegistry>(opt_.data_dir, meta_,
-                                                         opt_.election_timeout, opt_.heartbeat);
+        if (auto r = start_transport_locked(); !r.has_value()) {
+            return r;
+        }
+        registry_ = std::make_unique<RegionPeerRegistry>(
+            opt_.data_dir, meta_, opt_.election_timeout, opt_.heartbeat,
+            opt_.replica_id, opt_.voters);
         // split 钩子：新 region 动态建 peer + 迁移数据（回调在 apply 路径内，仅动存储）。
         // 经工厂挂钩——bootstrap 与后续每个 split 新 peer 都自动覆盖（多级 split 可用）。
         registry_->set_observer_factory([this](raftstore::Peer& peer) {
@@ -88,7 +107,11 @@ public:
         if (auto r = registry_->bootstrap(region); !r.has_value()) {
             return std::unexpected(r.error());
         }
-        registry_->campaign_all();
+        // 单节点组可立即 tick 成 leader（无网络依赖）；多副本必须靠消息交换选主，
+        // 这里只把日志基线建好，选举交给后台 Worker 的 pump 驱动。
+        if (!multi_voter()) {
+            registry_->campaign_all();
+        }
 
         // 三个回调都按 key 路由到目标 region 的 peer（executor 持闸调用，这里不再加锁）
         exec_ = std::make_unique<PeerTxnExecutor>(
@@ -101,33 +124,14 @@ public:
             [this] { return registry_->all_peers(); });   // GC 广播到每个 region
         sessions_ = std::make_unique<TxnSessionManager>(*exec_, tso_);
 
-        auto started = StatusServer::start(opt_.host, opt_.status_port,
-                                           [this] { return status_json(); },
-                                           [this](const std::string& q) {
-                                               return intercepted(
-                                                   "GET", "/kv",
-                                                   http_query_param(q, "key"),
-                                                   [&] { return kv_read(q); });
-                                           },
-                                           [this](const std::string& body) {
-                                               return intercepted(
-                                                   "POST", "/kv", "",
-                                                   [&] { return kv_write(body); });
-                                           },
-                                           [this](const std::string& m, const std::string& p,
-                                                  const std::string& q, const std::string& b) {
-                                               return intercepted(m, p, "",
-                                                                  [&] { return admin(m, p, q, b); });
-                                           });
-        if (!started.has_value()) {
-            return std::unexpected(started.error());
+        if (auto r = start_http_locked(); !r.has_value()) {
+            return r;
         }
-        status_ = std::move(*started);
 
         worker_ = std::make_unique<Worker>(
             [this] {
                 std::lock_guard lock(peer_mu_);   // 后台泵与 HTTP 共闸（类注释）
-                registry_->pump_all();
+                tick_and_pump_locked();
             },
             opt_.worker_interval);
         if (auto r = worker_->start(); !r.has_value()) {
@@ -147,13 +151,16 @@ public:
             first_err = "worker: " + std::string(tinykv::describe_kind(r.error()));
         }
         worker_.reset();
-        status_.reset();   // HTTP 先下线（拒绝新请求），再收引擎
+        status_.reset();     // 业务 HTTP 先下线（拒绝新请求），再收引擎
+        observe_.reset();    // 观测端点独立 io_context：同样 join 线程，绝不 detach
         sessions_.reset();
         exec_.reset();
         if (auto r = registry_->close_all(); !r.has_value() && first_err.empty()) {
             first_err = "registry: " + std::string(tinykv::describe_kind(r.error()));
         }
         registry_.reset();
+        // Transport 的 io 线程独立于 Worker：先停 Worker（不再投递），再关闭传输层。
+        transport_.reset();
         if (!first_err.empty()) {
             return std::unexpected(IoFailed{.path = "server-app:stop", .reason = first_err});
         }
@@ -162,6 +169,22 @@ public:
 
     [[nodiscard]] std::uint16_t status_port() const { return status_ ? status_->port() : 0; }
     [[nodiscard]] std::uint16_t bound_port() const { return status_port(); }
+    [[nodiscard]] std::uint16_t observe_port() const { return observe_ ? observe_->port() : 0; }
+    // Raft 传输层（多副本）：系统分配端口时在 start 后查询，再经 set_raft_peers 互告。
+    [[nodiscard]] std::uint16_t raft_port() const { return transport_ ? transport_->port() : 0; }
+    void set_raft_peers(const std::map<std::uint64_t, std::uint16_t>& peer_ports) {
+        if (transport_ != nullptr) {
+            transport_->set_peers(peer_ports);
+        }
+    }
+    // 单 region 多 voter：首个 peer 是否为 leader（供测试/就绪探测；生产路由仍走 ReadIndex）
+    [[nodiscard]] bool is_leader() const {
+        if (registry_ == nullptr) {
+            return false;
+        }
+        auto peers = registry_->all_peers();
+        return !peers.empty() && peers.front()->is_leader();
+    }
     [[nodiscard]] std::size_t active_sessions() const { return sessions_ ? sessions_->active() : 0; }
     void advance_clock(std::uint64_t ms) {
         now_ms_.fetch_add(ms, std::memory_order_relaxed);
@@ -183,6 +206,118 @@ public:
     }
 
 private:
+    [[nodiscard]] bool multi_voter() const { return opt_.voters.size() > 1; }
+
+    // 多副本模式起 TcpTransport（独立 io_context 线程）；单节点不创建，保持零 socket 开销。
+    [[nodiscard]] result<void> start_transport_locked() {
+        if (opt_.voters.empty()) {
+            return {};
+        }
+        auto started = raftstore::TcpTransport::start(
+            raftstore::TcpOptions{.self = opt_.replica_id, .listen_host = opt_.host,
+                                  .listen_port = opt_.raft_port});
+        if (!started.has_value()) {
+            return std::unexpected(started.error());
+        }
+        transport_ = std::move(*started);
+        if (!opt_.peer_ports.empty()) {
+            transport_->set_peers(opt_.peer_ports);
+        }
+        return {};
+    }
+
+    // 业务 HTTP 端点 + 独立观测端点。观测端点 try_lock 快照，业务泵持闸时返回上一份。
+    [[nodiscard]] result<void> start_http_locked() {
+        auto started = StatusServer::start(
+            opt_.host, opt_.status_port, [this] { return status_json(); },
+            [this](const std::string& q) {
+                return intercepted("GET", "/kv", http::http_query_param(q, "key"),
+                                   [&] { return kv_read(q); });
+            },
+            [this](const std::string& body) {
+                return intercepted("POST", "/kv", "", [&] { return kv_write(body); });
+            },
+            [this](const std::string& m, const std::string& p, const std::string& q,
+                   const std::string& b) {
+                return intercepted(m, p, "", [&] { return admin(m, p, q, b); });
+            });
+        if (!started.has_value()) {
+            return std::unexpected(started.error());
+        }
+        status_ = std::move(*started);
+
+        {
+            std::lock_guard cache_lock(observe_mu_);
+            observe_cache_ = status_json();
+        }
+        auto observed = StatusServer::start(
+            opt_.host, opt_.observe_port, [this] { return status_snapshot(); }, {}, {},
+            [this](const std::string& m, const std::string& p, const std::string& q,
+                   const std::string& b) { return observe_admin(m, p, q, b); });
+        if (!observed.has_value()) {
+            status_.reset();
+            return std::unexpected(observed.error());
+        }
+        observe_ = std::move(*observed);
+        return {};
+    }
+
+    // ---- M7 ⑤：统一泵——收件 → 步进 → apply → 发件。调用方必须持 peer_mu_ ----
+    // tick 由 Worker 单独驱动；HTTP 路径只 pump 不 tick，避免高频时钟打乱选举节奏。
+    // 顺序很关键：先 step 收件（让 follower 及时跟上 leader），再 on_ready 推进共识与
+    // apply，最后 take_messages 发件；take_messages 绝不单独调用而不 on_ready（会清掉队列）。
+    void tick_and_pump_locked() {
+        for (auto* peer : registry_->all_peers()) {
+            peer->tick();
+        }
+        pump_locked();
+    }
+
+    void pump_locked() {
+        if (transport_ != nullptr) {
+            for (auto& msg : transport_->poll()) {
+                auto* target = registry_->peer_by_peer_id(PeerId{msg.to()});
+                if (target != nullptr) {
+                    (void)target->step_message(msg);
+                }
+            }
+        }
+        for (auto* peer : registry_->all_peers()) {
+            (void)peer->on_ready();
+        }
+        if (transport_ != nullptr) {
+            for (auto* peer : registry_->all_peers()) {
+                for (auto& out : peer->take_messages()) {
+                    // 发送失败是常态（对端未起/连接被拒），Raft 心跳会重传——不记错误
+                    (void)transport_->send(PeerId{out.to()}, out);
+                }
+            }
+        }
+    }
+
+    // 等待位点推进：单节点无网络，紧泵 400 轮即可；多副本必须让出 CPU 等 TCP 往返，
+    // 否则 400 轮空转在 1ms 内跑完，对端的心跳响应还没回来就误判超时。
+    [[nodiscard]] bool wait_applied_locked(raftstore::Peer& peer, std::uint64_t idx) {
+        if (!multi_voter()) {
+            for (int i = 0; i < 400; ++i) {
+                pump_locked();
+                if (peer.applied_at_least(idx)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (std::chrono::steady_clock::now() < deadline) {
+            pump_locked();
+            if (peer.applied_at_least(idx)) {
+                return true;
+            }
+            std::this_thread::yield();
+        }
+        return false;
+    }
+
     // 请求切面：统一 begin → 业务 → finish（成功判据：非空且非 ERR / 空 404 视为未命中）
     template <typename Fn>
     [[nodiscard]] std::string intercepted(const std::string& method, const std::string& path,
@@ -197,6 +332,10 @@ private:
     // 泵指定 key 所属 peer（executor 在闸内调用；新 peer 首次泵负责把 split observer 建的
     // 实例推成 leader 并 apply 初始条目）
     void pump_one(std::string_view key) {
+        if (multi_voter()) {
+            pump_locked();   // 多副本：选举/复制靠消息交换，高频 tick 会打乱节奏
+            return;
+        }
         auto* peer = registry_->peer_for(key);
         if (peer == nullptr) {
             return;
@@ -210,25 +349,45 @@ private:
 
     // ---- kv 面端点（经 raft 提案，"写走共识"红线不豁免） ----
     [[nodiscard]] std::string kv_read(const std::string& query) {
-        const auto key = http_query_param(query, "key");
+        const auto key = http::http_query_param(query, "key");
         if (key.empty()) {
             return {};
         }
         std::lock_guard lock(peer_mu_);
         kv_reads_.fetch_add(1, std::memory_order_relaxed);
+        auto& peer = registry_->require(key);
+        // 线性一致读：ReadIndex 确认 + applied 追平后才读状态机（不再直接 leader 本地读）
+        // 多副本下 pump 必须让出 CPU，否则心跳确认的 TCP 回包没机会到达 io_context 线程。
+        const auto ri = peer.wait_read_index(
+            [this] {
+                pump_locked();
+                if (multi_voter()) {
+                    std::this_thread::yield();
+                }
+            },
+            multi_voter() ? 200000 : 400,
+            multi_voter() ? std::optional<std::chrono::milliseconds>{5000} : std::nullopt);
+        if (!ri.has_value()) {
+            std::string why{tinykv::describe_kind(ri.error())};
+            if (const auto* io = std::get_if<IoFailed>(&ri.error())) {
+                why += ":" + io->reason;
+            }
+            return "{\"error\":\"" + why + "\"}";
+        }
+        read_index_reads_.fetch_add(1, std::memory_order_relaxed);
         // BUG-0004: raw 键走保留前缀，与 MVCC 的 user_key+8B ts 分属两个命名空间
-        auto got = registry_->require(key).get(Cf::Default, encode_raw_key(key));
+        auto got = peer.read_directly(Cf::Default, encode_raw_key(key));
         if (!got.has_value()) {
             return "{\"error\":\"" + std::string(tinykv::describe_kind(got.error())) + "\"}";
         }
         if (!got->value.has_value()) {
             return "{\"found\":false}";
         }
-        return "{\"found\":true,\"value\":\"" + escape(*got->value) + "\"}";
+        return "{\"found\":true,\"value\":\"" + http::escape(*got->value) + "\"}";
     }
 
     [[nodiscard]] std::string kv_write(const std::string& body) {
-        const auto parts = split_frame(body);
+        const auto parts = http::split_frame(body);
         if (parts.size() < 2 || parts[1].empty()) {
             return "ERR bad-request";
         }
@@ -252,15 +411,11 @@ private:
         if (!peer.propose(req).has_value()) {
             return "ERR not-leader";
         }
-        for (int round = 0; round < 400; ++round) {
-            peer.tick();
-            (void)peer.on_ready();
-            if (peer.applied_at_least(expect)) {
-                peer.drop_reply(1, expect);   // 组合根轮询位点，不消费回执 → 显式回收
-                return "OK";
-            }
+        if (!wait_applied_locked(peer, expect)) {
+            return "ERR apply-timeout";
         }
-        return "ERR apply-timeout";
+        peer.drop_reply(1, expect);   // 组合根轮询位点，不消费回执 → 显式回收
+        return "OK";
     }
 
     // ---- 事务/观测端点（docs/cli.md §11；会话作用域） ----
@@ -270,9 +425,23 @@ private:
         return method == "POST" ? admin_post(path, body) : admin_get(path, query);
     }
 
+    // 观测端口的处理器白名单：只暴露读型观测路径，事务写/GC/split 一律 404。
+    [[nodiscard]] std::string observe_admin(const std::string& method,
+                                            const std::string& path,
+                                            const std::string& query,
+                                            const std::string& body) {
+        if (method != "GET") {
+            return {};
+        }
+        if (path != "/regions" && path != "/region" && path != "/metrics" && path != "/trace") {
+            return {};
+        }
+        return admin(method, path, query, body);
+    }
+
     // POST 族：会话写操作 + GC（executor 自带闸，此处不加 peer_mu_）
     [[nodiscard]] std::string admin_post(const std::string& path, const std::string& body) {
-        const auto parts = split_frame(body);
+        const auto parts = http::split_frame(body);
         if (path == "/txn/begin") {
             auto sid = sessions_->begin(now_ms_.load());
             return sid.has_value() ? "OK session=" + *sid
@@ -285,7 +454,7 @@ private:
             return admin_txn_finish(path == "/txn/commit", parts);
         }
         if (path == "/txn/gc") {
-            const auto safe = parts.size() == 2 ? parse_u64(parts[1]) : std::nullopt;
+            const auto safe = parts.size() == 2 ? http::parse_u64(parts[1]) : std::nullopt;
             if (parts.size() > 1 && !safe.has_value()) {
                 return "ERR bad-request";
             }
@@ -306,7 +475,7 @@ private:
             return "ERR bad-request";
         }
         std::lock_guard lock(peer_mu_);
-        const auto rid = parse_u64(parts[1]);
+        const auto rid = http::parse_u64(parts[1]);
         if (!rid.has_value()) {
             return "ERR bad-request";   // BUG-0002: 非数字 region id 不得击穿解析路径
         }
@@ -325,8 +494,14 @@ private:
         if (!peer->propose(req).has_value()) {
             return "ERR not-leader";
         }
+        // 多 voter 下 RegionPeerRegistry 无法保证新 region 的 PeerId 全局唯一
+        // （raftpb::Message 只带 to=PeerId，无 region_id），此时 split 会造出不可路由的
+        // peer——明确拒绝，单节点模式不受影响。
+        if (multi_voter()) {
+            return "ERR split-unsupported-in-multi-voter";
+        }
         for (int round = 0; round < 400; ++round) {
-            registry_->pump_all();
+            pump_locked();
             if (peer->applied_at_least(expect)) {
                 peer->drop_reply(kSplitClient, expect);   // 同上，admin 回执也不消费
                 next_region_id_.fetch_add(1);
@@ -367,15 +542,15 @@ private:
     // GET 族：会话读 + 观测
     [[nodiscard]] std::string admin_get(const std::string& path, const std::string& query) {
         if (path == "/txn/get") {
-            auto r = sessions_->get_verbose(http_query_param(query, "session"),
-                                            http_query_param(query, "key"), now_ms_);
+            auto r = sessions_->get_verbose(http::http_query_param(query, "session"),
+                                            http::http_query_param(query, "key"), now_ms_);
             if (!r.has_value()) {
                 return {};
             }
-            return "{\"value\":\"" + escape(*r) + "\"}";
+            return "{\"value\":\"" + http::escape(*r) + "\"}";
         }
         if (path == "/txn/status") {
-            const auto sid = http_query_param(query, "session");
+            const auto sid = http::http_query_param(query, "session");
             auto st = sessions_->session_start_ts(sid);
             if (!st.has_value()) {
                 return {};
@@ -386,12 +561,12 @@ private:
         if (path == "/regions") {
             std::string out;
             for (const auto& r : meta_.all_regions()) {
-                out += (out.empty() ? "[" : ",") + region_json(r);
+                out += (out.empty() ? "[" : ",") + http::region_json(r);
             }
             return out + "]";
         }
         if (path == "/region") {
-            return region_detail(http_query_param(query, "id"));
+            return region_detail(http::http_query_param(query, "id"));
         }
         if (path == "/trace") {
             return intercept_events();
@@ -403,7 +578,7 @@ private:
     }
 
     [[nodiscard]] std::string region_detail(const std::string& id_text) {
-        const auto id = parse_u64(id_text);
+        const auto id = http::parse_u64(id_text);
         if (!id.has_value()) {
             return {};   // BUG-0002: 畸形查询参数 → 404，不得抛异常打崩进程
         }
@@ -411,7 +586,7 @@ private:
         if (!r.has_value()) {
             return {};
         }
-        std::string base = region_json(*r);
+        std::string base = http::region_json(*r);
         base.pop_back();   // 去掉尾 }，拼入 term/commit 后再闭合
         auto* peer = registry_->peer_by_id(r->id);
         const auto term = peer == nullptr ? 0U : peer->raft().term().value;
@@ -420,19 +595,58 @@ private:
                ",\"commit\":" + std::to_string(commit) + "}";
     }
 
+    // 同步快照：业务线程可等闸；观测端点用 status_snapshot() 永不等待业务闸
     [[nodiscard]] std::string status_json() {
         std::lock_guard lock(peer_mu_);
+        return status_json_locked();
+    }
+
+    // 观测端点专用：try_lock 成功则刷新缓存，失败则回上一份快照——绝不因业务泵卡住观测
+    [[nodiscard]] std::string status_snapshot() {
+        if (std::unique_lock lock(peer_mu_, std::try_to_lock); lock.owns_lock()) {
+            auto json = status_json_locked();
+            std::lock_guard cache_lock(observe_mu_);
+            observe_cache_ = std::move(json);
+        }
+        std::lock_guard cache_lock(observe_mu_);
+        return observe_cache_.empty() ? std::string{"{\"node\":\"tinykv-server\",\"ready\":false}"}
+                                      : observe_cache_;
+    }
+
+    [[nodiscard]] std::string status_json_locked() const {
+        std::uint64_t apply_errors = 0;
+        std::size_t txn_errors = 0;
+        std::string last_error;
+        std::uint64_t applied = 0;
+        if (registry_ != nullptr) {
+            for (auto* peer : registry_->all_peers()) {
+                apply_errors += peer->apply_error_count();
+                txn_errors += peer->pending_txn_errors();
+                applied = std::max(applied, peer->applied_index());
+                if (!peer->last_apply_error().empty()) {
+                    last_error = peer->last_apply_error();
+                }
+            }
+        }
         return "{\"node\":\"tinykv-server\",\"worker_cycles\":" +
                std::to_string(worker_ ? worker_->cycles() : 0) +
                ",\"sessions\":" + std::to_string(active_sessions()) +
                ",\"regions\":" + std::to_string(meta_.region_count()) +
                ",\"kv_writes\":" + std::to_string(kv_writes_.load()) +
                ",\"kv_reads\":" + std::to_string(kv_reads_.load()) +
+               ",\"read_index_reads\":" + std::to_string(read_index_reads_.load()) +
                ",\"txn_ops\":" + std::to_string(txn_ops_.load()) +
                ",\"intercept_calls\":" + std::to_string(metrics_->total_calls()) +
                ",\"peers\":" + std::to_string(registry_ ? registry_->size() : 0) +
                ",\"splits\":" + std::to_string(split_events_.load()) +
+               ",\"apply_errors\":" + std::to_string(apply_errors) +
+               ",\"txn_errors\":" + std::to_string(txn_errors) +
+               ",\"last_apply_error\":\"" + http::escape(last_error) + "\"" +
                ",\"now_ms\":" + std::to_string(now_ms_.load()) +
+               ",\"replica_id\":" + std::to_string(opt_.replica_id.value) +
+               ",\"voters\":" + std::to_string(opt_.voters.size()) +
+               ",\"leader\":" + (is_leader() ? "true" : "false") +
+               ",\"applied\":" + std::to_string(applied) +
                ",\"term\":" + std::to_string(first_term()) +
                ",\"commit\":" + std::to_string(first_commit()) +
                "}";
@@ -462,83 +676,25 @@ private:
                                        : tso_.current().value;
     }
 
-    // BUG-0002: 请求参数统一用 from_chars 解析——不抛异常、不接受尾随字符/负号/空串。
-    [[nodiscard]] static std::optional<std::uint64_t> parse_u64(std::string_view text) {
-        std::uint64_t out{0};
-        if (text.empty()) {
-            return std::nullopt;
-        }
-        const char* first = text.data();
-        const char* last = text.data() + text.size();
-        const auto res = std::from_chars(first, last, out, 10);
-        if (res.ec != std::errc{} || res.ptr != last) {
-            return std::nullopt;
-        }
-        return out;
-    }
-
-    [[nodiscard]] static std::vector<std::string> split_frame(const std::string& body) {
-        std::vector<std::string> parts;
-        std::istringstream in(body);
-        std::string item;
-        while (std::getline(in, item, '\t')) {
-            parts.push_back(item);
-        }
-        return parts;
-    }
-
-    [[nodiscard]] static std::string http_query_param(const std::string& query,
-                                                      const std::string& name) {
-        std::size_t begin = 0;
-        while (begin <= query.size()) {
-            const auto at = query.find('&', begin);
-            const auto item = query.substr(begin, at == std::string::npos ? at : at - begin);
-            const auto eq = item.find('=');
-            if (eq != std::string::npos && item.substr(0, eq) == name) {
-                return item.substr(eq + 1);
-            }
-            if (at == std::string::npos) {
-                break;
-            }
-            begin = at + 1;
-        }
-        return {};
-    }
-
-    [[nodiscard]] static std::string escape(const std::string& s) {
-        std::string out;
-        for (const char ch : s) {
-            if (ch == '"' || ch == '\\') {
-                out.push_back('\\');
-            }
-            out.push_back(ch);
-        }
-        return out;
-    }
-
-    [[nodiscard]] static std::string region_json(const raftstore::Region& r) {
-        return "{\"id\":" + std::to_string(r.id.value) +
-               ",\"start\":\"" + r.start_key + "\",\"end\":\"" + r.end_key +
-               "\",\"version\":" + std::to_string(r.epoch.version) +
-               ",\"conf_ver\":" + std::to_string(r.epoch.conf_ver) +
-               ",\"size_hint\":" + std::to_string(r.size_hint) + "}";
-
-    }
-
     static constexpr std::uint64_t kSplitClient = 0x5F5F5F5F;   // split admin 专用 client id
     static constexpr std::uint64_t kSessionIdleTtlMs = 30'000;  // 空闲会话回收线（锁 TTL 的 10 倍）
 
     ServerOptions opt_;
     std::mutex peer_mu_;                                   // 全部 Peer/Storage 访问的串行闸
     std::unique_ptr<RegionPeerRegistry> registry_;
+    std::unique_ptr<raftstore::TcpTransport> transport_;   // 多副本传输层（单节点为 nullptr）
     raftstore::StoreMeta meta_;
     tso::MonotonicTsProvider tso_;
     std::unique_ptr<PeerTxnExecutor> exec_;
     std::unique_ptr<TxnSessionManager> sessions_;
     std::unique_ptr<Worker> worker_;
     std::unique_ptr<StatusServer> status_;
+    std::unique_ptr<StatusServer> observe_;
+    mutable std::mutex observe_mu_;
+    std::string observe_cache_;
     std::atomic<std::uint64_t> kv_writes_{0};
     std::atomic<std::uint64_t> kv_reads_{0};
+    std::atomic<std::uint64_t> read_index_reads_{0};
     std::atomic<std::uint64_t> txn_ops_{0};
     std::atomic<std::uint64_t> split_events_{0};
     std::atomic<std::uint64_t> next_region_id_{1};   // 下一个 split 新 region id（CAS 前置）

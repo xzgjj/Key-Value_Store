@@ -1,7 +1,7 @@
 # TinyKV-CPP
 
 > 用现代 C++23 从零实现的 mini-TiKV：单机 KV → Raft → Multi-Raft → Percolator 分布式事务，  
-> 服务端、命令行、嵌入 API 三件套齐备，正确性由 61 个 ctest 与 CI 门禁背书。
+> 服务端、命令行、嵌入 API 三件套齐备，正确性由 65 个 ctest 与 CI 门禁背书。
 
 ![TinyKV-CI](https://github.com/xzgjj/Key-Value_Store/actions/workflows/ci.yml/badge.svg?branch=main)
 
@@ -19,7 +19,7 @@
 
 **以什么形态交付**：一个 `tinykv-server` 常驻进程、一个 `tinykv-cli` 命令行工具，以及一个可以嵌进别的程序的 C++ API——最小示例见 [examples/embed\_example.cpp](examples/embed_example.cpp)，编译进 CI，接口一改就红。
 
-**规模**：`src/` 约 9.1k 行 C++，`tests/` 约 8.5k 行，61 个测试可执行；`ctest` 一条命令跑全量，不需要手动拼编译参数。
+**规模**：`src/` 约 9.1k 行 C++，`tests/` 约 8.6k 行，65 个测试可执行；`ctest` 一条命令跑全量，不需要手动拼编译参数。
 
 **不追求什么**：不跟 TiKV/etcd 比生产成熟度。多租户、在线升级、安全鉴权、十万级 Region 调度都不在范围内；这个项目要回答的是"内核骨架到底怎么造"，而不是"怎么撑住一个云上的集群"。
 

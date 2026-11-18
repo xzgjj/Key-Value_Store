@@ -226,12 +226,88 @@ std::vector<std::uint64_t> Peer::take_confirmed_reads() {
 
 result<std::uint64_t> Peer::begin_read_index() { return raft_->read_index(); }
 
+namespace {
+
+// ReadIndex 两阶段泵：返回 quorum 确认位点；超时（轮数或墙钟）返回 nullopt。
+// 抽成自由函数是为了把 wait_read_index 的圈复杂度压到 CI 上限内。
+[[nodiscard]] std::optional<std::uint64_t> pump_read_quorum(
+    Peer& peer, const std::function<void()>& pump, int max_rounds,
+    std::chrono::steady_clock::time_point deadline, bool use_clock) {
+    const auto expired = [&] {
+        return use_clock && std::chrono::steady_clock::now() >= deadline;
+    };
+    std::optional<std::uint64_t> index;
+    for (int round = 0; round < max_rounds && !index.has_value(); ++round) {
+        if (expired()) {
+            break;
+        }
+        if (pump) {
+            pump();
+        }
+        auto confirmed = peer.take_confirmed_reads();
+        if (!confirmed.empty()) {
+            index = confirmed.back();
+        }
+    }
+    return index;
+}
+
+// 第二阶段：泵到状态机 applied 追上确认位点。
+void pump_until_applied(Peer& peer, const std::function<void()>& pump, std::uint64_t index,
+                        int max_rounds, std::chrono::steady_clock::time_point deadline,
+                        bool use_clock) {
+    for (int round = 0; round < max_rounds; ++round) {
+        if (peer.applied_at_least(index)) {
+            return;
+        }
+        if (use_clock && std::chrono::steady_clock::now() >= deadline) {
+            return;
+        }
+        if (pump) {
+            pump();
+        }
+    }
+}
+
+}  // namespace
+
+result<std::uint64_t> Peer::wait_read_index(const std::function<void()>& pump, int max_rounds,
+                                            std::optional<std::chrono::milliseconds> timeout) {
+    ++read_index_calls_;
+    auto ctx = raft_->read_index();
+    if (!ctx) {
+        return std::unexpected(ctx.error());
+    }
+    // 多副本下心跳回执受对端泵周期约束；纯按轮数自旋可能在响应到达前耗尽。
+    // timeout 给墙钟兜底：轮数与墙钟取先到者，两者都不设时行为与旧版一致。
+    const bool use_clock = timeout.has_value();
+    const auto deadline =
+        std::chrono::steady_clock::now() + timeout.value_or(std::chrono::milliseconds{0});
+    auto index = pump_read_quorum(*this, pump, max_rounds, deadline, use_clock);
+    if (!index.has_value()) {
+        return std::unexpected(IoFailed{.path = "peer:read-index",
+                                        .reason = "quorum 确认超时（分区或不是 leader）"});
+    }
+    // 确认位点只是"多数派认过的日志位置"，还要等状态机真正追上才允许读
+    pump_until_applied(*this, pump, *index, max_rounds, deadline, use_clock);
+    if (!applied_at_least(*index)) {
+        return std::unexpected(IoFailed{.path = "peer:read-index",
+                                        .reason = "applied 未追上确认位点"});
+    }
+    return *index;
+}
+
 void Peer::enable_lease(bool on) { raft_->enable_lease(on); }
 
 bool Peer::lease_valid() const { return raft_->lease_valid(); }
 
 result<GetResult> Peer::read_directly(Cf cf, std::string_view key) const {
     return storage_.get(cf, std::as_bytes(std::span{key.data(), key.size()}));
+}
+
+void Peer::record_apply_error(const KvError& error) {
+    ++apply_errors_;
+    last_apply_error_ = std::string(tinykv::describe_kind(error));
 }
 
 result<std::size_t> Peer::on_ready() {
@@ -256,14 +332,41 @@ result<std::size_t> Peer::on_ready() {
     }
     pump_snapshot_sends();
     std::size_t applied = 0;
+    std::uint64_t last = applied_;
     for (const raftpb::Entry& entry : ready.to_apply) {
         if (auto r = apply_entry(entry); !r) {
+            record_apply_error(r.error());
             return std::unexpected(r.error());
         }
         ++applied;
-        applied_ = entry.index();   // 已 apply 位点：ReadIndex 放行判据
+        last = entry.index();
+    }
+    if (applied != 0) {
+        // BUG-0005: 整批状态机写完成后才确认位点；中途失败则不确认，重启重放整批。
+        // 持久化位点由 RaftLog 与 meta 同批写入，快照重置也不会留下"meta 新、applied 旧"的窗口。
+        if (auto r = raft_->mark_applied(LogIndex{last}); !r) {
+            record_apply_error(r.error());
+            return std::unexpected(r.error());
+        }
+        applied_ = last;   // ReadIndex 放行判据只在确认后才前移
+        compact_log_if_needed(last);
     }
     return applied;
+}
+
+// 阈值触发日志压缩：只在所有 voter 都已 match 到该位点时执行，落后节点仍可走快照。
+// 压缩失败不阻断 apply（下次 on_ready 会再试），位点本身已经安全落盘。
+void Peer::compact_log_if_needed(std::uint64_t applied_index) {
+    if (log_compact_threshold_ == 0 || !raft_->is_leader()) {
+        return;
+    }
+    const auto first = log_->first_index().value;
+    if (applied_index < first || applied_index - first < log_compact_threshold_) {
+        return;
+    }
+    if (raft_->can_compact(LogIndex{applied_index})) {
+        (void)log_->compact(LogIndex{applied_index});
+    }
 }
 
 result<void> Peer::apply_entry(const raftpb::Entry& entry) {
@@ -459,6 +562,18 @@ result<void> Peer::execute_txn_payload(const std::string& payload, std::uint64_t
 result<void> Peer::apply_split_admin(const cmdpb::SplitRequest& split) {
     if (!my_region_.has_value() || store_meta_ == nullptr) {
         return std::unexpected(InvalidArgument{"split 需要注入 region 元数据与 StoreMeta"});
+    }
+    // BUG-0005 重放幂等：applied 标记丢失时，这条 split 可能已经切过元数据。
+    // 判据取"左半 end == split_key 且 split_key 归新 region"——原 region 的 end 不可能等于
+    // 开区间内的 split_key，所以命中必然是上次 apply 的结果，直接跳过 replace_region。
+    const auto current_left = store_meta_->find_region_by_id(my_region_->id);
+    if (current_left.has_value() && current_left->end_key == split.split_key()) {
+        const auto already_right = store_meta_->find_region(split.split_key());
+        if (already_right.has_value() && already_right->id.value == split.new_region_id() &&
+            already_right->start_key == split.split_key()) {
+            my_region_ = *current_left;
+            return {};
+        }
     }
     const auto ep = static_cast<std::uint64_t>(split.new_region_id());
     auto parts = split_region(*my_region_, split.split_key(), RegionId{ep});

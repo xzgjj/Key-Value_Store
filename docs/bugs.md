@@ -23,6 +23,7 @@
 | BUG-0002 | 常驻服务收到畸形查询参数（如 /region?id=abc）时 std::stoull 抛出未被捕获，异常穿出 io_context 后 terminate 整个服务进程，后续所有请求连接被拒 | `ctest --test-dir build/win-debug -R http_frame_test --gtest_filter=HttpFrameTest.MalformedQueryDoesNotKillDaemon`（黑盒等价命令 `curl "http://127.0.0.1:18733/region?id=abc"`） | `http_frame_test` | 2026-11-18 |
 | BUG-0003 | 2000 字节 PUT 请求被单次 1024 字节 read_some 静默截断为约 863 字节，服务端仍回 OK，客户端无从察觉数据不完整；TCP 分片也会触发 | `ctest --test-dir build/win-debug -R http_frame_test --gtest_filter=HttpFrameTest.LargeBodyIsNotTruncated` | `http_frame_test` | 2026-11-18 |
 | BUG-0004 | raw KV 键直接写入 Default CF 且不带 ts 后缀，split 迁移按"末 8 字节是 ts"剥键，8/12 字节 raw 键被误判给左 region 不迁移，路由按真键指向右 region 后读回 found:false，split 却回 OK | `ctest --test-dir build/win-debug -R http_frame_test --gtest_filter=HttpFrameTest.RawKeysSurviveSplit` | `http_frame_test` | 2026-11-18 |
+| BUG-0005 | Raft 的 committed 已落盘但状态机尚未 apply 时进程崩溃，重启把 applied 初始化为 committed，(applied, committed] 内的已提交条目再也不进 Ready，用户写永久丢失；applied 标记只存在内存、split/txn 重放幂等性也无回归证据 | `ctest --test-dir build/win-debug -R applied_recovery_test`（`PeerReplaysWritesAfterCommitBeforeApplyCrash` 等六个用例） | `applied_recovery_test` | 2026-11-18 |
 <!-- bugs:end -->
 
 > 空表 = 尚无缺陷登记。修第一个 bug 时按上面六步补第一行。

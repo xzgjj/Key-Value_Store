@@ -148,6 +148,9 @@ CI 用 `ctest -L unit|simulation|integration|bench` 选择，无需解析本页�
 | tests/unit/cli/cli_local_smoke_test.cpp | unit | `cli_local_smoke` | - | fast |
 | tests/bench/write_bench_test.cpp | bench | `write_bench` | - | nightly |
 | tests/unit/raft/raft_log_test.cpp | unit | `raft_log_test` | - | fast |
+| tests/unit/raft/applied_recovery_test.cpp | unit | `applied_recovery_test` | - | fast |
+| tests/unit/storage/engine_compaction_test.cpp | unit | `engine_compaction_test` | - | fast |
+| tests/unit/raft/readindex_path_test.cpp | unit | `readindex_path_test` | - | fast |
 | tests/unit/raft/raft_step_test.cpp | unit | `raft_step_test` | - | fast |
 | tests/unit/raft/raft_kv_test.cpp | unit | `raft_kv_test` | - | fast |
 | tests/unit/raft/transfer_leader_test.cpp | unit | `transfer_leader_test` | - | fast |
@@ -179,6 +182,7 @@ CI 用 `ctest -L unit|simulation|integration|bench` 选择，无需解析本页�
 | tests/unit/server/interceptor_test.cpp | unit | `interceptor_test` | - | fast |
 | tests/unit/server/peer_registry_test.cpp | unit | `peer_registry_test` | - | fast |
 | tests/unit/server/http_frame_test.cpp | unit | `http_frame_test` | - | fast |
+| tests/unit/server/multi_replica_test.cpp | unit | `multi_replica_test` | - | fast |
 | tests/unit/txn/gc_test.cpp | unit | `gc_test` | - | fast |
 | tests/integration/snapshot_test.cpp | integration | `snapshot_test` | - | nightly |
 | tests/integration/crash_recovery_test.cpp | integration | `crash_recovery_test` | - | nightly |

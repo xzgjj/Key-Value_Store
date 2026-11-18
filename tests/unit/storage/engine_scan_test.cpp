@@ -104,4 +104,32 @@ TEST(EngineScan, ValuesTravelWithKeys) {
     EXPECT_EQ((*it)->value(), "20");
 }
 
+// 流式归并：同 key 跨多 SST + 内存表时取最新值，墓碑压制旧层；COW 快照不被后续写入污染。
+TEST(EngineScan, StreamMergeAcrossLayersAndCowSnapshot) {
+    TempDir tmp("tinykv_scan_layers");
+    // 1 字节上限：每次写都 flush，造出多层 SST，最后一层留在内存表
+    auto engine = Engine::open(EngineOptions{
+        .dir = tmp.path() / "db", .memtable_limit_bytes = 1, .sst_compact_threshold = 0});
+    ASSERT_TRUE(engine.has_value());
+    ASSERT_TRUE((*engine)->write(put_batch("k", "old")).has_value());
+    ASSERT_TRUE((*engine)->write(put_batch("k", "new")).has_value());
+
+    auto reader = (*engine)->create_reader();   // 此刻 k=new（内存表最新）
+    ASSERT_TRUE(reader.has_value());
+    ASSERT_TRUE((*engine)->write(put_batch("k", "newer")).has_value());   // COW：不得改动快照
+    ASSERT_TRUE((*engine)->write(ModifyVec{Modify{Delete{.cf = Cf::Default, .key = "k"}}})
+                    .has_value());
+
+    auto snap = (*reader)->scan(Cf::Default, {}, 10);
+    ASSERT_TRUE(snap.has_value());
+    ASSERT_TRUE((*snap)->valid());
+    EXPECT_EQ((*snap)->value(), "new");   // 快照仍是建 Reader 时的值
+
+    auto live = (*engine)->create_reader();
+    ASSERT_TRUE(live.has_value());
+    auto live_it = (*live)->scan(Cf::Default, {}, 10);
+    ASSERT_TRUE(live_it.has_value());
+    EXPECT_FALSE((*live_it)->valid());    // 最新视图：k 已被墓碑删除
+}
+
 }  // namespace

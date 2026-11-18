@@ -4,6 +4,7 @@
 #include "storage/engine.h"
 
 #include <algorithm>
+#include <charconv>
 #include <fstream>
 #include <iterator>
 #include <map>
@@ -30,6 +31,19 @@ std::string sst_name(std::uint32_t seq) {
     return "sst-" + digits + ".sst";
 }
 
+// 从文件名取序号：合并后名字不再连续，恢复时必须按最大序号而不是表数量续号
+std::uint32_t sst_seq(const std::string& name) {
+    constexpr std::string_view prefix = "sst-";
+    if (!name.starts_with(prefix) || name.size() <= prefix.size()) {
+        return 0;
+    }
+    const char* first = name.data() + prefix.size();
+    const char* last = name.data() + name.size();
+    std::uint32_t out = 0;
+    const auto res = std::from_chars(first, last, out, 10);
+    return res.ec == std::errc{} ? out : 0;
+}
+
 // 扫描结果迭代器：materialize 后按需前进（M1 不做流式，理由见 sst.h 头注）
 class RangeIterator final : public Iterator {
 public:
@@ -50,10 +64,12 @@ private:
     std::size_t index_{0};
 };
 
-// 只读快照：持有内存表副本 + 当时的 SST 列表，后续 flush 不影响其结果集（SPEC-1 红线 3）
+// 只读快照：持有共享的（写时复制）内存表 + 当时的 SST 列表，后续 flush/写不影响其结果集
+// （SPEC-1 红线 3）。mem_ 用 shared_ptr<const>：Engine 写前会 COW，这里看到的永远是不可变视图。
 class SnapshotReader final : public Reader {
 public:
-    SnapshotReader(std::vector<SstEntry> mem, std::vector<std::shared_ptr<SstReader>> ssts)
+    SnapshotReader(std::shared_ptr<const MemTable> mem,
+                   std::vector<std::shared_ptr<SstReader>> ssts)
         : mem_(std::move(mem)), ssts_(std::move(ssts)) {}
 
     [[nodiscard]] result<GetResult> get(Cf cf, std::span<const std::byte> key) const override {
@@ -77,14 +93,8 @@ public:
         if (!lower) {
             return std::unexpected(lower.error());
         }
-        auto merged = merge_cf(cf, *lower);
-        std::vector<std::pair<std::string, std::string>> rows;
-        for (auto it = merged.begin(); it != merged.end() && rows.size() < limit; ++it) {
-            if (!it->second.has_value()) {
-                continue;  // 墓碑：该 key 已被删除
-            }
-            rows.emplace_back(it->first.substr(1), *it->second);  // 剥掉 1 字节 CF 前缀
-        }
+        // 流式归并：k 路游标取最小 key，命中 limit 即停，不再把全量数据 materialize 成 map。
+        auto rows = merge_stream(cf, *lower, limit);
         return std::make_unique<RangeIterator>(std::move(rows));
     }
 
@@ -92,41 +102,127 @@ private:
     [[nodiscard]] result<std::string> scan_lower_bound(Cf cf,
                                                        std::span<const std::byte> start) const {
         if (start.empty()) {
-            return std::string(1, static_cast<char>(cf));  // 该 CF 的起点
+            return std::string(1, static_cast<char>(cf));   // 该 CF 的起点
         }
         return encode_key(cf, start);
     }
 
-    // 旧源先写、新源后写覆盖：SST（旧→新）→ 内存表，得到"每 key 取最新"
-    [[nodiscard]] std::map<std::string, std::optional<std::string>, std::less<>> merge_cf(
-        Cf cf, std::string_view lower) const {
-        const char cf_byte = static_cast<char>(cf);
-        std::map<std::string, std::optional<std::string>, std::less<>> merged;
-        const auto in_range = [&](const std::string& k) {
-            return !k.empty() && k.front() == cf_byte && std::string_view(k) >= lower;
-        };
-        for (const auto& sst : ssts_) {
-            for (const auto& e : sst->entries()) {
-                if (in_range(e.key)) {
-                    merged[e.key] = e.value;
+    // k 路归并游标：SST 用下标 + 直接持有该表指针，内存表用 map 迭代器。
+    // 封装成类是为了把判空/取值/前移从 merge_stream 移出——否则主函数会被 lambda 撑到
+    // CI 的行数与复杂度上限。注意构造期就要能取 key（skip 循环），故必须直接持有表指针，
+    // 不能"先构造再绑定"——那会在构造期解引用空指针（曾导致 CI 段错误）。
+    class Cursor {
+    public:
+        Cursor() = default;
+        // SST 源：lower_bound 定位后跳到本 CF 首条
+        Cursor(const SstReader& sst, const std::string& lower, std::size_t source,
+               const std::function<bool(std::string_view)>& in_range)
+            : sst_(&sst), sst_count_(sst.entries().size()), from_mem_(false), source_(source) {
+            const auto& entries = sst.entries();
+            auto it = std::lower_bound(entries.begin(), entries.end(), lower,
+                                       [](const SstEntry& e, const std::string& k) {
+                                           return e.key < k;
+                                       });
+            sst_index_ = static_cast<std::size_t>(it - entries.begin());
+            while (valid() && !in_range(key())) {
+                ++sst_index_;
+            }
+        }
+        // 内存表源：map.lower_bound 后跳到本 CF 首条
+        Cursor(const MemTable::Map& map, const std::string& lower, std::size_t source,
+               const std::function<bool(std::string_view)>& in_range)
+            : mem_end_(map.end()), from_mem_(true), source_(source) {
+            mem_it_ = map.lower_bound(lower);
+            while (valid() && !in_range(key())) {
+                ++mem_it_;
+            }
+        }
+
+        [[nodiscard]] bool valid() const {
+            return from_mem_ ? mem_it_ != mem_end_ : sst_index_ < sst_count_;
+        }
+        [[nodiscard]] std::string_view key() const {
+            return from_mem_ ? std::string_view(mem_it_->first)
+                             : std::string_view(sst_->entries()[sst_index_].key);
+        }
+        [[nodiscard]] const std::optional<std::string>& value() const {
+            return from_mem_ ? mem_it_->second.value : sst_->entries()[sst_index_].value;
+        }
+        void advance(const std::function<bool(std::string_view)>& in_range) {
+            if (from_mem_) {
+                ++mem_it_;
+            } else {
+                ++sst_index_;
+                while (valid() && !in_range(key())) {
+                    ++sst_index_;
                 }
             }
         }
-        for (const auto& e : mem_) {
-            if (in_range(e.key)) {
-                merged[e.key] = e.value;
+        [[nodiscard]] std::size_t source() const { return source_; }
+
+    private:
+        const SstReader* sst_{nullptr};
+        std::size_t sst_index_{0};
+        std::size_t sst_count_{0};
+        MemTable::Map::const_iterator mem_it_;
+        MemTable::Map::const_iterator mem_end_;
+        bool from_mem_{false};
+        std::size_t source_{0};
+    };
+
+    [[nodiscard]] std::vector<Cursor> build_cursors(
+        const std::string& lower, const std::function<bool(std::string_view)>& in_range) const {
+        std::vector<Cursor> cursors;
+        cursors.reserve(ssts_.size() + 1);
+        for (std::size_t s = 0; s < ssts_.size(); ++s) {
+            cursors.emplace_back(*ssts_[s], lower, s, in_range);
+        }
+        cursors.emplace_back(mem_->entries(), lower, ssts_.size(), in_range);
+        return cursors;
+    }
+
+    [[nodiscard]] std::vector<std::pair<std::string, std::string>> merge_stream(
+        Cf cf, const std::string& lower, std::size_t limit) const {
+        const char cf_byte = static_cast<char>(cf);
+        const auto in_range = [&](std::string_view k) {
+            return !k.empty() && k.front() == cf_byte && k >= std::string_view(lower);
+        };
+        auto cursors = build_cursors(lower, in_range);
+        std::vector<std::pair<std::string, std::string>> rows;
+        while (rows.size() < limit) {
+            // 第一遍：找当前最小 key（跳过已耗尽或不在范围内的源）
+            std::string_view best_key;
+            for (const auto& c : cursors) {
+                if (!c.valid() || !in_range(c.key())) {
+                    continue;
+                }
+                if (best_key.empty() || c.key() < best_key) {
+                    best_key = c.key();
+                }
+            }
+            if (best_key.empty()) {
+                break;   // 所有源耗尽
+            }
+            // 第二遍：同 key 取最新源（下标越大越新）；命中该 key 的源一起前移
+            std::optional<std::string> chosen;
+            for (auto& c : cursors) {
+                if (!c.valid() || c.key() != best_key) {
+                    continue;
+                }
+                chosen = c.value();   // 从小到大覆盖，最后（最新）胜出
+                c.advance(in_range);
+            }
+            if (chosen.has_value()) {
+                rows.emplace_back(std::string(best_key.substr(1)), *chosen);
             }
         }
-        return merged;
+        return rows;
     }
 
     [[nodiscard]] std::optional<std::optional<std::string>> lookup(
         std::string_view encoded) const {
-        const auto it = std::lower_bound(
-            mem_.begin(), mem_.end(), encoded,
-            [](const SstEntry& e, std::string_view k) { return std::string_view(e.key) < k; });
-        if (it != mem_.end() && std::string_view(it->key) == encoded) {
-            return it->value;
+        if (const MemValue* v = mem_->find(encoded); v != nullptr) {
+            return v->value;
         }
         for (auto rit = ssts_.rbegin(); rit != ssts_.rend(); ++rit) {
             if (const SstEntry* e = (*rit)->find(encoded); e != nullptr) {
@@ -136,7 +232,7 @@ private:
         return std::nullopt;
     }
 
-    std::vector<SstEntry> mem_;
+    std::shared_ptr<const MemTable> mem_;
     std::vector<std::shared_ptr<SstReader>> ssts_;
 };
 
@@ -213,7 +309,8 @@ result<void> Engine::recover() {
             return std::unexpected(reader.error());
         }
         ssts_.push_back(std::shared_ptr<SstReader>(std::move(*reader)));
-        next_sst_seq_ = static_cast<std::uint32_t>(ssts_.size()) + 1;
+        sst_names_.push_back(name);
+        next_sst_seq_ = std::max(next_sst_seq_, sst_seq(name) + 1);
     }
 
     // 重放 WAL：只读，绝不 truncate（红线 1）
@@ -239,23 +336,33 @@ result<void> Engine::recover() {
 }
 
 result<void> Engine::apply_batch(std::span<const Modify> batch) {
+    MemTable& mem = mutable_mem_locked();
     for (const Modify& m : batch) {
         if (const auto* p = std::get_if<Put>(&m.op); p != nullptr) {
             auto enc = encode_user(p->cf, p->key);
             if (!enc) {
                 return std::unexpected(enc.error());
             }
-            mem_->put(std::move(*enc), p->value);
+            mem.put(std::move(*enc), p->value);
         } else {
             const auto& d = std::get<Delete>(m.op);
             auto enc = encode_user(d.cf, d.key);
             if (!enc) {
                 return std::unexpected(enc.error());
             }
-            mem_->put(std::move(*enc), std::nullopt);
+            mem.put(std::move(*enc), std::nullopt);
         }
     }
     return {};
+}
+
+MemTable& Engine::mutable_mem_locked() {
+    // 调用方持有 mu_：若有 Reader 持有旧 mem_ 快照，写前先复制，读侧继续看旧表。
+    // 无快照时 use_count()==1，直接原地写，与优化前行为一致（零额外拷贝）。
+    if (mem_.use_count() > 1) {
+        mem_ = std::make_shared<MemTable>(*mem_);
+    }
+    return *mem_;
 }
 
 result<std::unique_ptr<Engine>> Engine::open(const EngineOptions& opt) {
@@ -310,12 +417,9 @@ result<void> Engine::write(std::span<const Modify> batch) {
 
 result<std::unique_ptr<Reader>> Engine::create_reader() {
     std::lock_guard lock(mu_);
-    std::vector<SstEntry> snapshot;
-    snapshot.reserve(mem_->entries().size());
-    for (const auto& [key, value] : mem_->entries()) {
-        snapshot.push_back(SstEntry{.key = key, .value = value.value});
-    }
-    return std::make_unique<SnapshotReader>(std::move(snapshot), ssts_);
+    // 共享快照：直接把当前 mem_ 交给 Reader（O(1)），后续写入由 mutable_mem_locked()
+    // 在 use_count>1 时写时复制。SST 列表本身是 shared_ptr 且不可变，同样直接共享。
+    return std::make_unique<SnapshotReader>(mem_, ssts_);
 }
 
 result<void> Engine::flush_locked() {
@@ -341,14 +445,10 @@ result<void> Engine::flush_locked() {
         return std::unexpected(reader.error());
     }
     ssts_.push_back(std::shared_ptr<SstReader>(std::move(*reader)));
+    sst_names_.push_back(name);   // 名字与表一一对应，不能按序号重建（合并后序号不连续）
     ++next_sst_seq_;
 
-    std::vector<std::string> names;
-    names.reserve(ssts_.size());
-    for (std::size_t i = 0; i < ssts_.size(); ++i) {
-        names.push_back(sst_name(static_cast<std::uint32_t>(i + 1)));
-    }
-    if (auto r = write_manifest(names); !r) {
+    if (auto r = write_manifest(sst_names_); !r) {
         return r;
     }
 
@@ -366,6 +466,60 @@ result<void> Engine::flush_locked() {
     }
     wal_ = std::move(*wal);
     mem_ = std::make_shared<MemTable>();
+
+    // 表数过阈值即合并：清单已落盘、WAL 已清段，合并失败只留下"表偏多"的可恢复状态
+    if (opt_.sst_compact_threshold != 0 && ssts_.size() >= opt_.sst_compact_threshold) {
+        return compact_ssts_locked();
+    }
+    return {};
+}
+
+// 全量合并：旧→新覆盖得到每个 key 的最终值；合并后没有更老的表，墓碑可以安全丢弃。
+// 先写新表与清单，再删旧文件——中途崩溃只会留下未被清单引用的孤儿文件，不会丢数据。
+result<void> Engine::compact_ssts_locked() {
+    if (ssts_.size() < 2) {
+        return {};
+    }
+    std::map<std::string, std::optional<std::string>, std::less<>> merged;
+    for (const auto& sst : ssts_) {
+        for (const auto& e : sst->entries()) {
+            merged[e.key] = e.value;
+        }
+    }
+    if (merged.empty()) {
+        return {};
+    }
+    const auto old_names = sst_names_;
+    const std::string name = sst_name(next_sst_seq_);
+    auto writer = SstWriter::create(sst_dir_ / name);
+    if (!writer) {
+        return std::unexpected(writer.error());
+    }
+    for (const auto& [key, value] : merged) {
+        if (!value.has_value()) {
+            continue;   // 没有更老的表，墓碑无需保留
+        }
+        if (auto r = (*writer)->add(key, value); !r) {
+            return r;
+        }
+    }
+    if (auto r = (*writer)->finish(); !r) {
+        return r;
+    }
+    auto reader = SstReader::open(sst_dir_ / name);
+    if (!reader) {
+        return std::unexpected(reader.error());
+    }
+    ssts_.assign(1, std::shared_ptr<SstReader>(std::move(*reader)));
+    sst_names_.assign(1, name);
+    ++next_sst_seq_;
+    if (auto r = write_manifest(sst_names_); !r) {
+        return r;
+    }
+    std::error_code ec;
+    for (const auto& old : old_names) {
+        std::filesystem::remove(sst_dir_ / old, ec);   // 孤儿文件不影响恢复，删除失败不致命
+    }
     return {};
 }
 

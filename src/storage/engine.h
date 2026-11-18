@@ -32,6 +32,9 @@ struct EngineOptions {
     bool fsync_on_commit = true;                // REL-02 开关；关掉仅供基准对比
     std::size_t memtable_limit_bytes = 64U << 20U;
     std::size_t wal_segment_bytes = 128U << 20U;
+    // SST 个数达到该阈值即合并为一张（0 = 关闭，仅用于基准对比）。
+    // 没有它时 flush 每次只增不减，长跑会无限累积表与打开句柄。
+    std::size_t sst_compact_threshold = 8;
 };
 
 class Engine final : public Storage {
@@ -41,6 +44,12 @@ public:
     [[nodiscard]] result<GetResult> get(Cf cf, std::span<const std::byte> key) override;
     [[nodiscard]] result<void> write(std::span<const Modify> batch) override;
     [[nodiscard]] result<std::unique_ptr<Reader>> create_reader() override;
+
+    // 观测用：当前 SST 张数（测试断言合并阈值是否生效）
+    [[nodiscard]] std::size_t sst_count() const {
+        std::lock_guard lock(mu_);
+        return ssts_.size();
+    }
 
     // 显式关闭：flush 内存表并清理已落盘 WAL；幂等
     [[nodiscard]] result<void> close();
@@ -57,7 +66,11 @@ private:
 
     [[nodiscard]] result<void> recover();
     [[nodiscard]] result<void> apply_batch(std::span<const Modify> batch);
+    // 写前调用：若已有 Reader 持有快照（use_count>1）则先写时复制一份，
+    // 保证快照不可变；无 Reader 时零拷贝直接原地写。
+    [[nodiscard]] MemTable& mutable_mem_locked();
     [[nodiscard]] result<void> flush_locked();
+    [[nodiscard]] result<void> compact_ssts_locked();
     [[nodiscard]] result<std::vector<std::string>> load_manifest() const;
     [[nodiscard]] result<void> write_manifest(const std::vector<std::string>& names) const;
 
@@ -67,6 +80,7 @@ private:
     std::unique_ptr<Wal> wal_;
     std::shared_ptr<MemTable> mem_;
     std::vector<std::shared_ptr<SstReader>> ssts_;  // 旧 → 新
+    std::vector<std::string> sst_names_;            // 与 ssts_ 一一对应（合并后名字不再连续）
     std::uint32_t next_sst_seq_{1};
     bool closed_{false};
     mutable std::mutex mu_;

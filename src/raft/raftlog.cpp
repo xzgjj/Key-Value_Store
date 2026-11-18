@@ -12,6 +12,8 @@ namespace {
 constexpr std::size_t kMetaBytes = 6 * 8;   // 六个 u64
 constexpr const char kMetaKey[] = "\0lm";
 constexpr std::size_t kMetaKeyLen = 3;
+constexpr const char kAppliedKey[] = "\0la";
+constexpr std::size_t kAppliedKeyLen = 3;
 constexpr const char kEntryPrefix[] = "\0re";
 constexpr std::size_t kEntryPrefixLen = 3;
 constexpr std::size_t kIndexBytes = 8;
@@ -25,6 +27,7 @@ std::string entry_key(std::uint64_t index) {
 }
 
 std::string meta_key() { return std::string(kMetaKey, kMetaKeyLen); }
+std::string applied_key() { return std::string(kAppliedKey, kAppliedKeyLen); }
 
 std::span<const std::byte> as_bytes(const std::string& s) {
     return std::as_bytes(std::span{s.data(), s.size()});
@@ -63,6 +66,14 @@ result<std::unique_ptr<RaftLog>> RaftLog::open(Storage& storage) {
                           .vote = read_u64(m, 32),
                           .dummy_term = read_u64(m, 40)};
     }
+    // applied 独立键：老库没有该键 → 保持 0，重启后走 (0, committed] 重放（至少一次）
+    auto applied = storage.get(Cf::Default, as_bytes(applied_key()));
+    if (!applied) {
+        return std::unexpected(applied.error());
+    }
+    if (applied->value.has_value() && applied->value->size() == 8) {
+        log->meta_.applied = read_u64(*applied->value, 0);
+    }
     // 元信息缺失（全新日志）时保持默认值且**不写盘**：启动路径不做任何写动作（SPEC-1 红线 1 同源）
     return log;
 }
@@ -76,8 +87,20 @@ result<void> RaftLog::persist_meta() {
     put_u64(buf, meta_.term);
     put_u64(buf, meta_.vote);
     put_u64(buf, meta_.dummy_term);
-    ModifyVec batch{Modify{Put{.cf = Cf::Default, .key = meta_key(), .value = std::move(buf)}}};
+    std::string applied_buf;
+    applied_buf.reserve(8);
+    put_u64(applied_buf, meta_.applied);
+    // 两条 Put 同批：快照重置位点与 meta 一起落盘，避免"meta 已改、applied 还是旧值"的窗口
+    ModifyVec batch{Modify{Put{.cf = Cf::Default, .key = meta_key(), .value = std::move(buf)}},
+                    Modify{Put{.cf = Cf::Default,
+                               .key = applied_key(),
+                               .value = std::move(applied_buf)}}};
     return storage_.write(batch);
+}
+
+result<void> RaftLog::set_applied(LogIndex idx) {
+    meta_.applied = idx.value;
+    return persist_meta();
 }
 
 result<Term> RaftLog::term(LogIndex idx) const {
@@ -204,8 +227,8 @@ result<void> RaftLog::compact(LogIndex upto) {
     if (upto.value < meta_.first_index || upto.value > meta_.last_index) {
         return std::unexpected(InvalidArgument{"compact 位点越界"});
     }
-    if (upto.value > meta_.committed) {
-        return std::unexpected(InvalidArgument{"compact 不得越过 committed（SPEC-2 红线 9）"});
+    if (upto.value > meta_.applied) {
+        return std::unexpected(InvalidArgument{"compact 不得越过 applied（SPEC-2 红线 9）"});
     }
     // 压缩后 dummy entry 的任期取被压缩的最后一条，保证后续 term(idx) 与 prevLogTerm 判定正确
     auto last_compacted = at(upto);
@@ -239,6 +262,8 @@ result<void> RaftLog::reset_snapshot(LogIndex index, Term term) {
     meta_.last_index = index.value;
     meta_.committed = index.value;
     meta_.dummy_term = term.value;
+    // 快照覆盖到 index：旧日志已不可用，applied 必须同批前移，否则重启会从 0 重放已压缩条目
+    meta_.applied = index.value;
     return persist_meta();
 }
 

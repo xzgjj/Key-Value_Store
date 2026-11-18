@@ -124,6 +124,8 @@ TEST(RaftStep, CompactedPrevIndexRepliesCommittedInsteadOfReject) {
     }
     ASSERT_TRUE(c.log(1).append(entries).has_value());
     ASSERT_TRUE(c.log(1).set_committed(LogIndex{5}).has_value());
+    // 压缩红线收紧到 applied（M7 ②）：先推进 applied 再压缩，否则会被拒绝
+    ASSERT_TRUE(c.log(1).set_applied(LogIndex{5}).has_value());
     ASSERT_TRUE(c.log(1).compact(LogIndex{3}).has_value());
 
     // leader 发来 prev=1（已被压缩）的 AppendEntries

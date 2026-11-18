@@ -94,6 +94,13 @@
 | M6 | 1 | ①可判定性：构建+61测试+CI13 | PASS | cmake 全绿；ctest -j1 61/61（53.49s）；run_ci PASS×13；http_frame_test 5/5 覆盖 BUG-0002/0003/0004 |
 | M6 | 2 | ②契约与复用：对齐三项+登记+缺陷门禁+自测 | PASS | check_align 3/3（contract/doc_cmd/banned）；registry 61⇄61；bugfix 4 条全就位；ci/selftest PASS |
 | M6 | 3 | ③文档与红线：docs/guard/scope+键空间红线抽查 | PASS | CI docs×4+guard+scope PASS（570行/14文件已声明）；detach 0、proto 0 改动、新依赖 0、banned 0；README/CLAUDE/notes-m6 已回填 |
+| M7 | 1 | ①可判定性：applied_recovery 6例 + 全量62 + CI13 | PASS | cmake --preset win-debug 全绿；applied_recovery 6/6（位点重开保持/committed缺口重放/commit后apply前崩溃/put/split/txn 重放幂等）；ctest 62/62；run_ci PASS×13 |
+| M7 | 2 | ②契约与复用：独立键+双游标+登记 + bugfix门禁 + 自测 | PASS | check_align 3/3；registry 62⇄62；bugfix 5 条全就位（新增 BUG-0005）；复用 Storage::write 批量与 RaftLog meta 持久化，不引新依赖；split 重放幂等守卫由测试抓出后补 |
+| M7 | 3 | ③文档与红线：核心模块授权 + docs/guard/scope + 未决留痕 | PASS | 用户在确认区块后明确选"方案1：独立键"，src/raft/ 改动已逐条批准；CI docs×4+guard+scope PASS；6×u64 meta 格式零改动、无迁移脚本需求；implementation-notes §8.7 留痕 compact 判据与 txn 伪错误未决项 |
+| M7 | 4 | ④可判定性：第2–5项合并验证（压缩/ReadIndex/观测/多副本）+ 全量65 + CI13 | PASS | cmake --preset win-debug 全绿；ctest 65/65（57.7s）；engine_compaction 2/2（阈值压表数+墓碑不复活+重开一致+threshold=0 不合并）；readindex_path 2/2（raw/txn 读先 ReadIndex 再读）；multi_replica 2/2（真 TCP 三副本选主+复制+leader ReadIndex 读+多 voter 拒 split）；run_ci PASS×13；align 3/3 |
+| M7 | 5 | ⑤契约与复用：ReadIndex 墙钟兜底 + 多 voter 路由边界 + 存储快照共享 | PASS | ReadIndex 新增可选 timeout（轮数与墙钟取先到者）——多副本下纯轮数自旋会在心跳回执到达前耗尽，实测 2000 轮 < 5ms 对端 5ms 泵周期，诊断确证后改为 5s 墙钟；多 voter 显式拒绝 split：raftpb::Message 只带 to=PeerId 无 region_id，多 region×多 voter 会路由歧义，拒绝优于造不可路由 peer；MemTable 改 shared_ptr<const> + 写时复制，create_reader O(1)；scan 改 k 路流式归并，O(k) 内存、命中 limit 即停 |
+| M7 | 6 | ⑥文档与红线：CI 全门禁回修（复杂度/行数/段错误）+ docs/guard/scope | PASS | 首跑 static 报 4 处（peer.cpp on_ready 16 / server_app start 120行 / engine merge_stream 109行/26），抽 compact_log_if_needed、start_transport_locked/start_http_locked、Cursor 类+merge_stream 两遍归并后全过；CI 构建段错误根因=Cursor 构造期调 key() 时 ssts_ 未绑定（win-debug 恰好短路未崩），改直接持有 SstReader* 后 build/ci 50/50 全绿；registry 65⇄65；bugfix 5 条；guard/scope PASS |
+
 <!-- review:end -->
 
 ## 约定

@@ -132,4 +132,43 @@ TEST(HttpFrameTest, RawKeysSurviveSplit) {
     }
 }
 
+TEST(HttpFrameTest, ObserveEndpointIsIndependentAndReportsApplyErrors) {
+    HttpFixture f;
+    // 观测端点独立端口 + 独立 io_context：业务端口仍正常，观测口不暴露写操作
+    ASSERT_NE(f.app.observe_port(), 0);
+    ASSERT_NE(f.app.observe_port(), f.app.status_port());
+    const auto read = [&](const std::string& path) {
+        return tinykv::cli::http_get("127.0.0.1", f.app.observe_port(), path);
+    };
+    const auto initial = read("/status");
+    ASSERT_TRUE(initial.has_value());
+    EXPECT_NE(initial->find("\"apply_errors\":0"), std::string::npos);
+    EXPECT_NE(initial->find("\"txn_errors\":0"), std::string::npos);
+
+    const auto put = f.post("/kv", "put\tobs-key\tobs-value");
+    ASSERT_TRUE(put.has_value());
+    ASSERT_EQ(*put, "OK");
+    const auto biz_read = f.get("/kv?key=obs-key");
+    ASSERT_TRUE(biz_read.has_value());
+    EXPECT_NE(biz_read->find("\"found\":true"), std::string::npos);
+
+    bool saw_update = false;
+    std::string last_status;
+    for (int i = 0; i < 20 && !saw_update; ++i) {
+        const auto updated = read("/status");
+        if (updated.has_value()) {
+            last_status = *updated;
+        }
+        saw_update = updated.has_value() &&
+                     updated->find("\"kv_writes\":1") != std::string::npos &&
+                     updated->find("\"read_index_reads\":1") != std::string::npos;
+    }
+    EXPECT_TRUE(saw_update) << "观测端点应最終看到业务写入: " << last_status;
+
+    const auto rejected =
+        tinykv::cli::http_post("127.0.0.1", f.app.observe_port(), "/txn/begin", "begin");
+    ASSERT_TRUE(rejected.has_value());
+    EXPECT_TRUE(rejected->empty()) << "观测端口不得暴露事务写端点";
+}
+
 }  // namespace

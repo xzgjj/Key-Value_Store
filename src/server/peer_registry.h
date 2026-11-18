@@ -49,9 +49,12 @@ public:
 
     explicit RegionPeerRegistry(std::filesystem::path data_dir, raftstore::StoreMeta& meta,
                                 std::uint64_t election_timeout = 8,
-                                std::uint64_t heartbeat = 3)
+                                std::uint64_t heartbeat = 3,
+                                PeerId replica_id = PeerId{1},
+                                std::vector<PeerId> voters = {})
         : data_dir_(std::move(data_dir)), meta_(meta), election_(election_timeout),
-          heartbeat_(heartbeat) {}
+          heartbeat_(heartbeat), replica_id_(replica_id),
+          voters_(voters.empty() ? std::vector<PeerId>{replica_id} : std::move(voters)) {}
 
     void set_observer_factory(ObserverFactory fn) { observer_factory_ = std::move(fn); }
 
@@ -62,8 +65,8 @@ public:
             return std::unexpected(eng.error());
         }
         auto peer = raftstore::Peer::open(raft::Config{
-                                              .id = PeerId{region.id.value},
-                                              .voters = {PeerId{region.id.value}},
+                                              .id = replica_id_,
+                                              .voters = voters_,
                                               .election_timeout = election_,
                                               .heartbeat_interval = heartbeat_},
                                           **eng);
@@ -89,6 +92,19 @@ public:
         auto it = slots_.find(id);
         return it == slots_.end() ? nullptr : it->second.peer.get();
     }
+
+    // 传输层按 Raft PeerId 寻址（多副本时 PeerId ≠ RegionId）
+    [[nodiscard]] raftstore::Peer* peer_by_peer_id(PeerId id) const {
+        for (const auto& [region, slot] : slots_) {
+            (void)region;
+            if (slot.peer->id() == id) {
+                return slot.peer.get();
+            }
+        }
+        return nullptr;
+    }
+
+    [[nodiscard]] const std::vector<PeerId>& voters() const { return voters_; }
 
     [[nodiscard]] raftstore::Peer& require(std::string_view key) const {
         auto* p = peer_for(key);
@@ -280,6 +296,8 @@ private:
     raftstore::StoreMeta& meta_;
     std::uint64_t election_;
     std::uint64_t heartbeat_;
+    PeerId replica_id_{1};
+    std::vector<PeerId> voters_;
     ObserverFactory observer_factory_;
     std::map<RegionId, PeerSlot> slots_;
 };
