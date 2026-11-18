@@ -239,3 +239,23 @@ tinykv-cli --endpoint 127.0.0.1:3380 txn set "$SID" k v
 tinykv-cli --endpoint 127.0.0.1:3380 txn get "$SID" k
 tinykv-cli --endpoint 127.0.0.1:3380 txn commit "$SID"
 ```
+
+### 11.3 跨区事务（M7 ⑦，已转正）
+
+`txn.cross_region_enabled` **默认 true**：同一事务的 key 落在不同 region 时，按 region 分组
+两阶段提交（PREPARE → 取 commit_ts → 先提交 primary 组 → 再提交其余组）；中途崩溃由
+"读者遇锁 → 查 primary 状态"收敛，不产生半提交。显式配 false 即回"跨区拒绝"（退出码 2，
+错误指明 key 与 primary 各属哪个 region）。开关状态经 `/status` 的 `txn_cross_region` 字段可查。
+
+示例（a 落 region 1、z 落 region 2，先 split 出两个 region）：
+
+```bash
+tinykv-cli --endpoint 127.0.0.1:3380 region split 1 m
+SID=$(tinykv-cli --endpoint 127.0.0.1:3380 txn begin | sed 's/session=//')
+tinykv-cli --endpoint 127.0.0.1:3380 txn set "$SID" a 1
+tinykv-cli --endpoint 127.0.0.1:3380 txn set "$SID" z 2
+tinykv-cli --endpoint 127.0.0.1:3380 txn commit "$SID"
+```
+
+服务端并发模型由 `server.lock_shards`（默认 16）控制：同 region 请求串行、跨 region 并行；
+1 = 一把大锁回退档，多副本模式强制 1。行为见 `docs/notes-m7.md` §2。

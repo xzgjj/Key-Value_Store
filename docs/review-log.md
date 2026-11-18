@@ -129,3 +129,14 @@
 
 结论：ctest 75/75、CI PASS×13、C++17/20/23 三档同步绿。`txn.cross_region_enabled` 仍默认关闭，
 转正条件写在 `docs/CONTRACT-REVIEW.md` D-3（需要夜跑级随机中断，不只是枚举）。
+
+## 2026-11-18 · M7 收口三轮审查（分支 6：⑦ 随机 chaos 转正 + ⑨a 接线组合根）
+
+| 轮次 | 关注面 | 发现 | 处置 |
+|---|---|---|---|
+| 第 1 轮（正确性） | 随机 chaos 的崩溃语义与窗口覆盖；分片闸的锁序与泵路径 | ①随机 chaos 首版把主组固定在 dir1、断言却按随机布局期望 primary 在 dir2——kill≥3（主组已提交）轮次必失败，红→绿有据；②分片闸下 kv_write 的等待循环泵全部 peer，会与另一 region 的 handler 跨桶竞争 | ①子进程目录与主组侧匹配后 150 轮通过；②单节点改 pump_peer_only 只泵目标 peer，多副本保持全局闸 |
+| 第 2 轮（工程门禁） | CI 十三阶段（banned/dup_code/scope） | ①bench 用 sleep_for 预热命中 ENG-04 违禁模式；②Daemon 装置与 txn_cross_region_test 撞 dup_code（8 行×3 块）；③diff 超预算（733 行/19 文件） | ①改有界轮询；②提取 tests/testlib/server_daemon.h 共享（顺带修 include 顺序宏污染）；③按"不构成风险默认批准"条款放行并在 task_scope 留痕 |
+| 第 3 轮（契约与文档） | 契约面唯一事实源 + 工作区完整性 | ①C-10（开关转正）/C-11（/status 字段）/C-12（lock_shards 配置）三条新契约需落档；②cli.md 缺跨区事务节；③**工作区遭外部会话干扰**：根 SPEC.md 与 TinyKV-CPP-设计思路与需求.md 被移入 docs/（42 链接全断），.slidep/、年终总结/、.cache/ 等未跟踪目录落入仓库 | ①三条已进 CONTRACT-REVIEW；②补 §11.3 跨区事务；③两文件移回原位（consistency 恢复 42/42），外来目录加 .gitignore 不动内容 |
+
+三轮结论：PASS。验证：ctest fast 58/58 + ServerApp nightly 10/10、`txn_cross_region_chaos_random`
+150 轮、`region_concurrency_bench` 比值 1.04、CI PASS×13。M7 完成判定达成（见 docs/notes-m7.md §1）。

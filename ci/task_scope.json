@@ -1,31 +1,16 @@
 {
-  "task": "M7 收口第二批：⑨a 锁分片接线组合根（PeerGate 分区闸/全局闸 + server.lock_shards 配置 + registry 内部锁）+ 接线用例 + 并发基准 + 文档同步",
+  "task": "M7 收口第三批：文档收口——notes-m7.md 里程碑笔记 + 三轮审查台账 + cli.md 跨区事务节（M7 增量契约落档）",
   "paths": [
-    "src/server/lock_registry.h",
-    "src/server/peer_txn.h",
-    "src/server/peer_registry.h",
-    "src/server/server_app.h",
-    "src/server/main.cpp",
-    "src/config/config.h",
-    "src/config/config.cpp",
-    "tests/unit/server/lock_shards_wiring_test.cpp",
-    "tests/unit/server/CMakeLists.txt",
-    "tests/bench/region_concurrency_bench_test.cpp",
-    "tests/bench/CMakeLists.txt",
-    "tests/testlib/peer_txn.h",
-    "tests/testlib/server_daemon.h",
-    "tests/integration/txn_cross_region_test.cpp",
-    "docs/testing.md",
-    "docs/SPEC-6-m7-evolution.md",
-    "docs/CONTRACT-REVIEW.md",
-    "README.md",
-    "demo.yaml"
+    "docs/notes-m7.md",
+    "docs/review-log.md",
+    "docs/cli.md",
+    "ci/task_scope.json"
   ],
-  "reason": "SPEC-6 §6.1.2 排序第 4 位（⑦ 收口后接线）：LockRegistry 接入组合根——执行器闸从 std::mutex* 升级为 PeerGateFn（分区闸=单 region 桶，全局闸=全部桶升序，多副本/回退档退化 peer_mu_）；registry 加内部锁保护 slots_（分片后 split 动态建 slot 与路由读并发）；泵路径单节点只泵目标 peer（分区闸下泵全部 peer 会跨桶竞争）。新增 lock_shards_wiring_test 3 例（行为等价/跨区并发/回退档）与 region_concurrency_bench（M7-PERF-01 证据：跨区吞吐与改前持平 0.99，瓶颈转移到 HTTP 单 io_context 线程，如实记录）。Daemon/session_of 装置与 txn_cross_region_test 撞 dup_code → 提取到 testlib/server_daemon.h 共享（tests/testlib 登记表豁免）。",
+  "reason": "M7 完成判定的最后一项：docs/notes-m7.md（⑦⑧⑨a⑩ 交付全景、关键决策、踩坑、完成判定对照、移交项）；review-log.md 追加本批三轮审查（正确性/工程门禁/契约文档，含工作区外部干扰的发现与处置）；cli.md §11.3 补跨区事务（⑦ 转正后的 CLI 契约）与 server.lock_shards 说明。SPEC-6 完成判定要求 notes-m7.md 与 ⑦ 转正一起落档。",
   "bugfix": false,
   "fixes": [],
-  "overflow_approved": true,
-  "behavior_change_approved": true,
-  "behavior_change_note": "①组合根并发模型从一把大锁变为分桶闸（server.lock_shards 默认 16；同 region 串行不变，跨 region 并行度放开——这正是 ⑨a 的目标行为变化）；②PeerTxnExecutor 构造参数 std::mutex* gate → PeerGateFn（C++ 内部接口，生产装配点与 testlib 适配器两处已同步）；③region apply 行为对外不变。",
-  "approver": "用户（2026-11-18：⑨a 本批接线，默认 16 分片；超预算 624 行/17 文件按'不构成风险默认批准'条款放行）"
+  "overflow_approved": false,
+  "behavior_change_approved": false,
+  "behavior_change_note": "",
+  "approver": "用户（2026-11-18：M7 收口文档随批次落档）"
 }
