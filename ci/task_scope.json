@@ -1,29 +1,17 @@
 {
-  "task": "M8 ⑭ TLS 传输（SPEC-7 §7.2.4）：StatusServer accept 层可选 ssl::stream + 配置键 + 测试",
+  "task": "M8 ⑮ 结构还债（SPEC-7 §7.2.5）：server_app.h 纯移动拆三头（app/gate/http）",
   "paths": [
-    "src/server/status_server.h",
-    "src/server/status_server.cpp",
     "src/server/server_app.h",
-    "src/server/main.cpp",
-    "src/config/config.h",
-    "src/config/config.cpp",
-    "src/server/CMakeLists.txt",
-    "vcpkg.json",
-    ".github/workflows/ci.yml",
-    "tests/testdata/tls_test_cert.pem",
-    "tests/testdata/tls_test_key.pem",
-    "tests/unit/server/tls_transport_test.cpp",
-    "tests/unit/server/tls_config_test.cpp",
-    "tests/unit/server/CMakeLists.txt",
-    "demo.yaml",
-    "README.md",
+    "src/server/server_gate.h",
+    "src/server/server_http.h",
+    "scripts/split_server_app.py",
     "ci/task_scope.json"
   ],
-  "reason": "M8-SEC-01：业务端口可选 TLS（默认空 = M7 明文逐字节，红线 3）；半配置启动拒绝 + 证书加载失败启动报错（错误矩阵 §7.3.3）；D7-3 配 TLS 后 token 可选；观测端口维持明文。OpenSSL 经 vcpkg.json + MSYS2 pacman + CI 双平台装配。预置测试证书（tests/testdata，自签 10 年）。",
+  "reason": "998 行四合一拆为三头：server_app.h（装配+生命周期+声明面 557 行）、server_gate.h（闸/泵辅助 9 成员 138 行）、server_http.h（handler 面 24 成员 462 行）。纯移动：函数体逐字搬运，类内签名改声明，类外定义加 inline+ServerApp:: 限定（ODR 必需，非语义修改）；模板成员 intercepted 连模板头整体移动。编译时间对比留 evidence（无显著差异，如实记录）。",
   "bugfix": false,
   "fixes": [],
   "overflow_approved": true,
   "behavior_change_approved": true,
   "behavior_change_note": "http_threads 默认 1→2（并发度变更，D7-1）；用户 2026-11-18 按 SPEC-7 §7.3.2 批准。显式配 1 即回 M7 单线程行为。",
-  "approver": "用户（2026-11-18：不构成风险一律默认批准条款——16 文件 = 15 上限 + tests/testdata 预置证书 2 件，属既定方案内的依赖装配，无行为风险）"
+  "approver": "用户（2026-11-18：D7-6 M8 内只拆 server_app.h 按建议执行）"
 }
