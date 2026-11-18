@@ -39,4 +39,11 @@ result<std::string> encode_ts_key(Cf cf, std::span<const std::byte> user_key, Ts
     return base;
 }
 
+// BUG-0004：raw KV 键 = 保留前缀 + user_key（不加 ts，不进 MVCC 版本空间）
+std::string encode_raw_key(std::string_view user_key) {
+    std::string out(kRawKeyPrefix);
+    out.append(user_key);
+    return out;
+}
+
 }  // namespace tinykv

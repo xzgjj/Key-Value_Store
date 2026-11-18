@@ -178,6 +178,7 @@ CI 用 `ctest -L unit|simulation|integration|bench` 选择，无需解析本页�
 | tests/unit/server/server_app_test.cpp | unit | `server_app_test` | - | fast |
 | tests/unit/server/interceptor_test.cpp | unit | `interceptor_test` | - | fast |
 | tests/unit/server/peer_registry_test.cpp | unit | `peer_registry_test` | - | fast |
+| tests/unit/server/http_frame_test.cpp | unit | `http_frame_test` | - | fast |
 | tests/unit/txn/gc_test.cpp | unit | `gc_test` | - | fast |
 | tests/integration/snapshot_test.cpp | integration | `snapshot_test` | - | nightly |
 | tests/integration/crash_recovery_test.cpp | integration | `crash_recovery_test` | - | nightly |

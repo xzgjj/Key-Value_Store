@@ -25,6 +25,7 @@
 #include <utility>
 #include <vector>
 
+#include "common/encode.h"
 #include "common/error.h"
 #include "common/error_format.h"
 #include "common/ids.h"
@@ -243,10 +244,19 @@ private:
         }
         for (; (*it)->valid(); (*it)->next()) {
             const std::string stored((*it)->key());
-            if (stored.empty() || stored[0] == '\0') {
+            if (stored.empty()) {
+                continue;
+            }
+            // BUG-0004: raw 键与 MVCC 键在 Default CF 共存，必须先按保留前缀分派，
+            // 再判 user key 归属；否则剥掉 8B ts 会把 raw 长键误判到左 region 而静默丢失。
+            std::string user;
+            if (stored.starts_with(kRawKeyPrefix)) {
+                user = stored.substr(kRawKeyPrefix.size());
+            } else if (stored[0] != '\0') {
+                user = user_key_of(cf, stored);
+            } else {
                 continue;   // raft log 内部键（\0re / \0lm）不迁移
             }
-            const auto user = user_key_of(cf, stored);
             if (!region.contains(user)) {
                 continue;
             }

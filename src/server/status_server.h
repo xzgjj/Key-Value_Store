@@ -14,6 +14,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 
 #include <asio.hpp>
@@ -61,12 +62,20 @@ public:
 
 private:
     StatusServer() = default;
+    // BUG-0002/P0-2：逐块累积到"头结束 + Content-Length 字节体"齐全再分派
+    struct FrameReader {
+        enum class State { More, Done, Rejected };
+        std::string raw;
+        std::size_t header_end{0};
+        std::size_t body_need{0};
+        [[nodiscard]] State consume(std::string_view chunk);
+    };
     void accept_loop();
     void serve(std::shared_ptr<asio::ip::tcp::socket> sock);
-    void serve_write(std::shared_ptr<asio::ip::tcp::socket> sock, const std::string& req);
-    // ⑦b：POST 管理端点（split/trace）——复用 serve_write 的"一次读完整帧"假设
-    void serve_admin_write(std::shared_ptr<asio::ip::tcp::socket> sock, const std::string& req,
-                           const std::string& path);
+    void read_frame(std::shared_ptr<asio::ip::tcp::socket> sock,
+                    std::shared_ptr<FrameReader> reader);
+    // BUG-0002: 请求分派的唯一异常屏障——业务处理器抛出的异常到此为止
+    [[nodiscard]] std::string dispatch(const std::string& request);
     // ⑦b：GET 分派（status/kv/admin 三路）；nullopt = 404
     [[nodiscard]] std::optional<std::string> handle_get(const RequestLine& line) const;
     // 回一段固定文本并断开（三个 serve 路径共用的收尾）

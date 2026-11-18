@@ -1,7 +1,7 @@
 # TinyKV-CPP
 
 > 用现代 C++23 从零实现的 mini-TiKV：单机 KV → Raft → Multi-Raft → Percolator 分布式事务，  
-> 服务端、命令行、嵌入 API 三件套齐备，正确性由 60 个 ctest 与 CI 门禁背书。
+> 服务端、命令行、嵌入 API 三件套齐备，正确性由 61 个 ctest 与 CI 门禁背书。
 
 ![TinyKV-CI](https://github.com/xzgjj/Key-Value_Store/actions/workflows/ci.yml/badge.svg?branch=main)
 
@@ -19,7 +19,7 @@
 
 **以什么形态交付**：一个 `tinykv-server` 常驻进程、一个 `tinykv-cli` 命令行工具，以及一个可以嵌进别的程序的 C++ API——最小示例见 [examples/embed\_example.cpp](examples/embed_example.cpp)，编译进 CI，接口一改就红。
 
-**规模**：`src/` 约 9.1k 行 C++，`tests/` 约 8.5k 行，60 个测试可执行；`ctest` 一条命令跑全量，不需要手动拼编译参数。
+**规模**：`src/` 约 9.1k 行 C++，`tests/` 约 8.5k 行，61 个测试可执行；`ctest` 一条命令跑全量，不需要手动拼编译参数。
 
 **不追求什么**：不跟 TiKV/etcd 比生产成熟度。多租户、在线升级、安全鉴权、十万级 Region 调度都不在范围内；这个项目要回答的是"内核骨架到底怎么造"，而不是"怎么撑住一个云上的集群"。
 
@@ -127,7 +127,7 @@ auto got = (*engine)->get(Cf::Default, std::as_bytes(std::span{"k1", 2}));
 
 ### 关键设计
 
-**每个 Region 一份独立引擎，是为了不让 Raft 日志互相踩踏。** Raft 日志以固定前缀 `\0re` / `\0lm` 存在 Default 列族里，每个 Peer 的日志都从 index 1 开始。如果两个 Peer 共用一份 Engine，它们会写同一把日志键，后写覆盖先写，回放时必然串日志。因此每个 Region 有自己的 `data_dir/regions/<id>`，初始 Region 1 沿用 data\_dir 根目录以兼容旧布局。Split 成功时，apply 路径上的 observer 同步创建右半 Region 的 Engine 和 Peer，并把落在 `[split_key, end)` 的用户数据迁过去：跳过 `\0` 前缀的内部键，Default/Write 去掉末尾 8 字节大端 ts 得到用户键，Lock 键本身就是用户键。新 Peer 从空日志起步，状态机里只有迁过来的数据，和路由表始终一致。
+**每个 Region 一份独立引擎，是为了不让 Raft 日志互相踩踏。** Raft 日志以固定前缀 `\0re` / `\0lm` 存在 Default 列族里，每个 Peer 的日志都从 index 1 开始。如果两个 Peer 共用一份 Engine，它们会写同一把日志键，后写覆盖先写，回放时必然串日志。因此每个 Region 有自己的 `data_dir/regions/<id>`，初始 Region 1 沿用 data\_dir 根目录以兼容旧布局。Split 成功时，apply 路径上的 observer 同步创建右半 Region 的 Engine 和 Peer，并把落在 `[split_key, end)` 的用户数据迁过去：跳过 `\0` 前缀的 Raft 内部键，Default/Write 去掉末尾 8 字节大端 ts 得到 MVCC 用户键，Lock 键本身就是用户键，raw KV 则以保留前缀 `\0rk` 独立成命名空间（否则长 raw 键会被误剥 ts 后缀而丢数据）。新 Peer 从空日志起步，状态机里只有迁过来的数据，和路由表始终一致。
 
 **读请求走 ReadIndex，LeaseRead 默认关闭。** 线性一致读的代价必须付在正确的地方：写要进 Raft 日志，读不必。ReadIndex 先确认当前 leader 和读索引，再在本地状态机上读，既拿到线性一致性又省掉一次日志提交。LeaseRead 更快，但依赖时钟漂移假设，因此只作为显式开启的降级选项，不让默认行为建立在未经验证的前提上。
 

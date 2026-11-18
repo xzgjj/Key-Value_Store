@@ -5,7 +5,7 @@
 //   config → Storage(Engine) → Raft(Peer) → Worker(泵循环) → StatusServer(HTTP)
 // 信号触发优雅关闭：SIGINT/SIGTERM → 原子标志 → ServerApp::stop()（逆序下线：HTTP 先拒绝
 //   新请求，再收 Worker/Peer/Engine）。
-// 确定性时钟：now 由主循环推进（每秒 +1000ms），TTL/GC 判定可复现；接真实时钟时换输入源。
+// 确定性时钟：主循环每秒推进 1000ms（注入口径，非墙钟），TTL/GC 判定因此可复现。
 
 #include <atomic>
 #include <chrono>
@@ -47,18 +47,26 @@ int main(int argc, char** argv) {
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
 
+    const auto host = opt.host;   // opt 随即 move 进 app，日志保留实际监听地址
     tinykv::server::ServerApp app(std::move(opt));
     auto started = app.start();
     if (!started.has_value()) {
         std::cerr << "启动失败: " << tinykv::describe_kind(started.error()) << "\n";
         return 1;
     }
-    std::cout << "tinykv-server 就绪: status=127.0.0.1:" << app.status_port() << "\n";
+    std::cout << "tinykv-server 就绪: status=" << host << ':' << app.status_port() << "\n";
 
-    // 主循环：等待停止信号（cv 等待，非 sleep_for——ENG-04）
+    // 主循环：每秒唤醒推进注入时钟，收到信号才退出（ENG-04 禁 sleep_for，用 cv::wait_for）。
+    // 时钟推进是 TTL 锁决议与 GC 安全点在真实进程里可自愈的前提（P1 修复）。
     {
         std::unique_lock lock(g_mu);
-        g_cv.wait(lock, [] { return g_stop.load(); });
+        while (!g_stop.load()) {
+            g_cv.wait_for(lock, std::chrono::seconds(1), [] { return g_stop.load(); });
+            if (!g_stop.load()) {
+                app.advance_clock(1000);
+                app.sweep_sessions();   // 空闲会话回收：GC 安全点不被僵尸会话钉死
+            }
+        }
     }
     std::cout << "收到停止信号，优雅关闭中…\n";
     auto stopped = app.stop();

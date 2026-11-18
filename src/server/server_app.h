@@ -11,15 +11,18 @@
 
 #pragma once
 
+#include "common/encode.h"
 #include "raftstore/peer.h"
 #include "scheduler/tso.h"
 
 #include <atomic>
+#include <charconv>
 #include <filesystem>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <sstream>
+#include <string_view>
 #include <thread>
 #include <utility>
 
@@ -160,7 +163,24 @@ public:
     [[nodiscard]] std::uint16_t status_port() const { return status_ ? status_->port() : 0; }
     [[nodiscard]] std::uint16_t bound_port() const { return status_port(); }
     [[nodiscard]] std::size_t active_sessions() const { return sessions_ ? sessions_->active() : 0; }
-    void advance_clock(std::uint64_t ms) { now_ms_ += ms; }   // 确定性时钟推进（测试/运维）
+    void advance_clock(std::uint64_t ms) {
+        now_ms_.fetch_add(ms, std::memory_order_relaxed);
+    }   // 确定性时钟推进（测试/主循环），atomic 供 HTTP 线程安全读取
+    // 主循环每秒调用：回收空闲会话，避免 GC 安全点被僵尸会话钉死
+    void sweep_sessions() {
+        if (sessions_ != nullptr) {
+            (void)sessions_->sweep(now_ms_.load(), kSessionIdleTtlMs);
+        }
+    }
+    [[nodiscard]] std::size_t pending_replies() const {
+        std::size_t total = 0;
+        if (registry_ != nullptr) {
+            for (auto* peer : registry_->all_peers()) {
+                total += peer->reply_count();
+            }
+        }
+        return total;
+    }
 
 private:
     // 请求切面：统一 begin → 业务 → finish（成功判据：非空且非 ERR / 空 404 视为未命中）
@@ -196,7 +216,8 @@ private:
         }
         std::lock_guard lock(peer_mu_);
         kv_reads_.fetch_add(1, std::memory_order_relaxed);
-        auto got = registry_->require(key).get(Cf::Default, key);
+        // BUG-0004: raw 键走保留前缀，与 MVCC 的 user_key+8B ts 分属两个命名空间
+        auto got = registry_->require(key).get(Cf::Default, encode_raw_key(key));
         if (!got.has_value()) {
             return "{\"error\":\"" + std::string(tinykv::describe_kind(got.error())) + "\"}";
         }
@@ -208,7 +229,7 @@ private:
 
     [[nodiscard]] std::string kv_write(const std::string& body) {
         const auto parts = split_frame(body);
-        if (parts.size() < 2) {
+        if (parts.size() < 2 || parts[1].empty()) {
             return "ERR bad-request";
         }
         std::lock_guard lock(peer_mu_);
@@ -220,11 +241,11 @@ private:
         req.mutable_header()->set_sequence_id(expect);
         if (parts[0] == "put" && parts.size() == 3) {
             auto* one = req.add_requests();
-            one->mutable_put()->set_key(parts[1]);
+            one->mutable_put()->set_key(encode_raw_key(parts[1]));
             one->mutable_put()->set_value(parts[2]);
         } else if (parts[0] == "del" && parts.size() == 2) {
             auto* one = req.add_requests();
-            one->mutable_delete_()->set_key(parts[1]);
+            one->mutable_delete_()->set_key(encode_raw_key(parts[1]));
         } else {
             return "ERR bad-request";
         }
@@ -235,6 +256,7 @@ private:
             peer.tick();
             (void)peer.on_ready();
             if (peer.applied_at_least(expect)) {
+                peer.drop_reply(1, expect);   // 组合根轮询位点，不消费回执 → 显式回收
                 return "OK";
             }
         }
@@ -252,7 +274,7 @@ private:
     [[nodiscard]] std::string admin_post(const std::string& path, const std::string& body) {
         const auto parts = split_frame(body);
         if (path == "/txn/begin") {
-            auto sid = sessions_->begin();
+            auto sid = sessions_->begin(now_ms_.load());
             return sid.has_value() ? "OK session=" + *sid
                                    : "ERR " + std::string(tinykv::describe_kind(sid.error()));
         }
@@ -263,9 +285,12 @@ private:
             return admin_txn_finish(path == "/txn/commit", parts);
         }
         if (path == "/txn/gc") {
-            const Ts safe_point{parts.size() == 2 ? std::stoull(parts[1])
-                                                  : sessions_safe_point()};
-            auto r = exec_->gc(safe_point.value);
+            const auto safe = parts.size() == 2 ? parse_u64(parts[1]) : std::nullopt;
+            if (parts.size() > 1 && !safe.has_value()) {
+                return "ERR bad-request";
+            }
+            const Ts point{safe.value_or(sessions_safe_point())};
+            auto r = exec_->gc(point.value);
             return r.has_value() ? "OK gc"   // 计数在 apply 侧日志
                                  : "ERR " + std::string(tinykv::describe_kind(r.error()));
         }
@@ -281,7 +306,11 @@ private:
             return "ERR bad-request";
         }
         std::lock_guard lock(peer_mu_);
-        const auto region_id = RegionId{std::stoull(parts[1])};
+        const auto rid = parse_u64(parts[1]);
+        if (!rid.has_value()) {
+            return "ERR bad-request";   // BUG-0002: 非数字 region id 不得击穿解析路径
+        }
+        const auto region_id = RegionId{*rid};
         auto* peer = registry_->peer_by_id(region_id);
         if (peer == nullptr) {
             return "ERR no-region";
@@ -299,6 +328,7 @@ private:
         for (int round = 0; round < 400; ++round) {
             registry_->pump_all();
             if (peer->applied_at_least(expect)) {
+                peer->drop_reply(kSplitClient, expect);   // 同上，admin 回执也不消费
                 next_region_id_.fetch_add(1);
                 return split_error_.empty() ? "OK split" : "ERR " + split_error_;
             }
@@ -373,7 +403,11 @@ private:
     }
 
     [[nodiscard]] std::string region_detail(const std::string& id_text) {
-        auto r = meta_.find_region_by_id(RegionId{id_text.empty() ? 0 : std::stoull(id_text)});
+        const auto id = parse_u64(id_text);
+        if (!id.has_value()) {
+            return {};   // BUG-0002: 畸形查询参数 → 404，不得抛异常打崩进程
+        }
+        auto r = meta_.find_region_by_id(RegionId{*id});
         if (!r.has_value()) {
             return {};
         }
@@ -398,6 +432,7 @@ private:
                ",\"intercept_calls\":" + std::to_string(metrics_->total_calls()) +
                ",\"peers\":" + std::to_string(registry_ ? registry_->size() : 0) +
                ",\"splits\":" + std::to_string(split_events_.load()) +
+               ",\"now_ms\":" + std::to_string(now_ms_.load()) +
                ",\"term\":" + std::to_string(first_term()) +
                ",\"commit\":" + std::to_string(first_commit()) +
                "}";
@@ -425,6 +460,21 @@ private:
         // 无活跃会话时取当前 TSO（全部已提交数据只保留最新版本）；有会话则取最小活跃 start_ts
         return sessions_->active() > 0 ? sessions_->min_active_start_ts().value
                                        : tso_.current().value;
+    }
+
+    // BUG-0002: 请求参数统一用 from_chars 解析——不抛异常、不接受尾随字符/负号/空串。
+    [[nodiscard]] static std::optional<std::uint64_t> parse_u64(std::string_view text) {
+        std::uint64_t out{0};
+        if (text.empty()) {
+            return std::nullopt;
+        }
+        const char* first = text.data();
+        const char* last = text.data() + text.size();
+        const auto res = std::from_chars(first, last, out, 10);
+        if (res.ec != std::errc{} || res.ptr != last) {
+            return std::nullopt;
+        }
+        return out;
     }
 
     [[nodiscard]] static std::vector<std::string> split_frame(const std::string& body) {
@@ -476,6 +526,7 @@ private:
     }
 
     static constexpr std::uint64_t kSplitClient = 0x5F5F5F5F;   // split admin 专用 client id
+    static constexpr std::uint64_t kSessionIdleTtlMs = 30'000;  // 空闲会话回收线（锁 TTL 的 10 倍）
 
     ServerOptions opt_;
     std::mutex peer_mu_;                                   // 全部 Peer/Storage 访问的串行闸
@@ -498,7 +549,7 @@ private:
     bool running_{false};
 
 public:
-    std::uint64_t now_ms_{0};                        // 注入时钟：TTL/GC 判定由调用方推进（确定性纪律）
+    std::atomic<std::uint64_t> now_ms_{0};            // 注入时钟：主循环每秒推进，HTTP 线程只读
 };
 
 }  // namespace tinykv::server

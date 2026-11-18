@@ -54,3 +54,16 @@ Worker 后台泵、HTTP handler、executor 内部泵共用它。observer 回调�
   与 Interceptor e2e（1）。
 - `snapshot_bench` 在默认并发 ctest 下偶发 9.7MB/s（门槛 10），单跑过——资源竞争抖动，
   复测用 `ctest -j1`。
+
+## 5. 双重交叉评审后的修复（2026-11-18）
+
+| 项 | 修复 | 回归 |
+|---|---|---|
+| 畸形参数打崩进程 | `from_chars` 无异常解析 + HTTP 分派层统一 catch | `http_frame_test.MalformedQueryDoesNotKillDaemon` |
+| 大请求静默截断 | 按 Content-Length 循环读满（上限 8KB 头 / 1MB 体） | `http_frame_test.LargeBodyIsNotTruncated` |
+| split 丢 raw 键 | raw 键加保留前缀 `\0rk`，迁移按前缀分派 | `http_frame_test.RawKeysSurviveSplit` |
+| 时钟不推进 | 主循环每秒 `advance_clock(1000)`，`now_ms_` 改 atomic | `http_frame_test.AdvancedClockIsObservable` |
+| 会话/回执无界增长 | 30s 空闲 sweep；回执成功路径显式回收、错误取走即删 | `http_frame_test.IdleSessionsAndRepliesAreReclaimed` |
+
+修复后验证：`ctest -j1` 61/61；CI PASS×13；align 3/3；M6 review 三轮 PASS。
+评审全文见 `.handover/双重交叉评审-2026-11-18.md`（本地交接目录，不入库）。

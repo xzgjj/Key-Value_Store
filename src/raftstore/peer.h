@@ -81,6 +81,11 @@ public:
     // 不提供阻塞版本：Peer 不持有传输层，阻塞就得在状态机里起线程。
     [[nodiscard]] std::optional<cmdpb::RaftCmdResponse> take_reply(std::uint64_t client_id,
                                                                   std::uint64_t seq);
+    // 组合根轮询 applied 位点、不取回执时必须显式丢弃，否则常驻进程的回执表无界增长
+    void drop_reply(std::uint64_t client_id, std::uint64_t seq) {
+        replies_.erase(std::pair{client_id, seq});
+    }
+    [[nodiscard]] std::size_t reply_count() const { return replies_.size(); }
 
     // log 模式读：把 Get/Scan 作为提案走一遍共识，回执里带结果（PERF-03 的对比基线）
     [[nodiscard]] std::optional<cmdpb::RaftCmdResponse> take_read_reply(std::uint64_t client_id,
@@ -120,7 +125,9 @@ public:
         if (it == txn_errors_.end()) {
             return std::nullopt;
         }
-        return std::move(it->second);
+        auto out = std::move(it->second);
+        txn_errors_.erase(it);   // 常驻进程：错误按位点取走即回收，不得只增不删
+        return out;
     }
     // 只读事务操作直接走 leader 本地 MVCC（M2 leader 本地读同款偏差，记 notes-m5）
     [[nodiscard]] txn::MvccTxn mvcc() { return txn::MvccTxn(storage_); }

@@ -26,7 +26,7 @@ public:
     TxnSessionManager(txn::TxnExecutor& executor, tinykv::tso::TsProvider& tso)
         : executor_(executor), tso_(tso) {}
 
-    [[nodiscard]] tinykv::result<std::string> begin() {
+    [[nodiscard]] tinykv::result<std::string> begin(std::uint64_t now_ms = 0) {
         std::lock_guard lock(mu_);
         auto client = std::make_unique<tinykv::txn::TxnClient>(executor_, tso_);
         auto r = client->begin();
@@ -35,7 +35,35 @@ public:
         }
         const auto sid = "t" + std::to_string(++next_id_);
         clients_[sid] = std::move(client);
+        created_ms_[sid] = now_ms;
         return sid;
+    }
+
+    // 空闲会话回收：超时会话走一次 rollback 清锁，成功后从表与 GC 安全点宿主中移除。
+    // 回滚失败（非 leader 等）保留会话，下一轮再试——不允许把未清的锁直接丢掉。
+    void sweep(std::uint64_t now_ms, std::uint64_t idle_ttl_ms) {
+        std::vector<std::string> expired;
+        {
+            std::lock_guard lock(mu_);
+            for (const auto& [sid, created] : created_ms_) {
+                if (now_ms >= created && now_ms - created >= idle_ttl_ms) {
+                    expired.push_back(sid);
+                }
+            }
+        }
+        for (const auto& sid : expired) {
+            auto client = take(sid);
+            if (!client.has_value()) {
+                continue;
+            }
+            if (!(*client)->rollback().has_value()) {
+                put_back(sid, std::move(*client));
+                continue;
+            }
+            std::lock_guard lock(mu_);
+            clients_.erase(sid);
+            created_ms_.erase(sid);
+        }
     }
 
     [[nodiscard]] tinykv::result<void> set(const std::string& sid, const std::string& key,
@@ -96,6 +124,7 @@ public:
         if (r.has_value()) {
             std::lock_guard lock(mu_);
             clients_.erase(sid);   // 提交即关闭会话
+            created_ms_.erase(sid);
         } else {
             put_back(sid, std::move(*client));
         }
@@ -110,6 +139,7 @@ public:
         auto r = (*client)->rollback();
         std::lock_guard lock(mu_);
         clients_.erase(sid);   // 回滚即关闭会话
+        created_ms_.erase(sid);
         return r;
     }
 
@@ -176,6 +206,7 @@ private:
     tinykv::tso::TsProvider& tso_;
     mutable std::mutex mu_;
     std::map<std::string, std::unique_ptr<tinykv::txn::TxnClient>> clients_;
+    std::map<std::string, std::uint64_t> created_ms_;   // sid → 创建时刻（空闲回收用）
     std::uint64_t next_id_{0};
 };
 

@@ -11,8 +11,9 @@
 
 阶段识别
 --------
-缺省 stage = 当前分支名映射（分支 `0` → 阶段 M0），与"SPEC 编号 = 阶段编号 =
-分支编号"的约定同源；不在整数分支上时须显式 --stage，避免记到错误阶段。
+缺省 stage = 台账中**最后出现的阶段**（真实进度），不再用分支名硬映射：M6 在分支 `4`
+上交付，硬映射会校验 M4 的旧轮次并给出假绿灯。台账无记录时才回退到分支名推断；
+任何情况下都可用 --stage 显式指定。
 
 用法
 ----
@@ -108,8 +109,16 @@ def append_round(path: Path, row: Round) -> None:
     path.write_text(text[:end] + cells + text[end:], encoding="utf-8")
 
 
-def current_stage(root: Path) -> str:
-    """分支 `0` → `M0`；非整数分支返回空串（调用方须显式指定）。"""
+def current_stage(root: Path, rounds: list[Round] | None = None) -> str:
+    """优先取台账最后出现的阶段；台账为空时才回退到分支名 `4` → `M4`。
+
+    分支号与阶段号并不总是一一对应（M6 也在分支 4 上交付），用分支名推断会让
+    gate 校验上一阶段的旧轮次、给新阶段假绿灯。
+    """
+    if rounds is None:
+        rounds = parse_rounds(_read(root / LOG_REL))
+    if rounds:
+        return rounds[-1].stage
     try:
         p = subprocess.run(["git", "-C", str(root), "branch", "--show-current"],
                            capture_output=True, text=True, timeout=30)
@@ -151,7 +160,7 @@ def main() -> int:
     root = Path(__file__).resolve().parent.parent
     ap = argparse.ArgumentParser(description="审查轮次持久化（三轮检查台账）")
     ap.add_argument("action", choices=["status", "record", "gate"])
-    ap.add_argument("--stage", default=None, help="阶段标识（如 M0）；缺省由分支名推断")
+    ap.add_argument("--stage", default=None, help="阶段标识（如 M0）；缺省取台账最新阶段")
     ap.add_argument("--focus", default="", help="record：本轮检查重点")
     ap.add_argument("--verdict", default="PASS", choices=["PASS", "FAIL"], help="record：本轮结论")
     ap.add_argument("--note", default="", help="record：命令与产物位置")
@@ -164,12 +173,12 @@ def main() -> int:
         path.write_text(TEMPLATE, encoding="utf-8")
         print(f"已创建 {LOG_REL}（含空台账模板）")
 
-    stage = args.stage or current_stage(root)
+    rounds = parse_rounds(_read(path))
+    stage = args.stage or current_stage(root, rounds)
     if not stage:
-        print("FAIL：当前分支不是整数阶段分支，请用 --stage 显式指定阶段")
+        print("FAIL：台账无记录且当前分支不是整数阶段分支，请用 --stage 显式指定阶段")
         return 2
 
-    rounds = parse_rounds(_read(path))
     if args.action == "status":
         return cmd_status(rounds, stage)
     if args.action == "gate":

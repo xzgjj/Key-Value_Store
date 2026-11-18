@@ -4,10 +4,15 @@
 #include "server/status_server.h"
 
 #include <array>
+#include <charconv>
+#include <string_view>
 #include <utility>
 
 namespace tinykv::server {
 namespace {
+
+constexpr std::size_t kMaxHeaderBytes = 8 * 1024;
+constexpr std::size_t kMaxBodyBytes = 1U << 20U;
 
 std::string http_response(const std::string& body) {
     return "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " +
@@ -16,6 +21,52 @@ std::string http_response(const std::string& body) {
 
 constexpr const char* kNotFound =
     "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+[[nodiscard]] char lower_ascii(char ch) {
+    return ch >= 'A' && ch <= 'Z' ? static_cast<char>(ch - 'A' + 'a') : ch;
+}
+
+[[nodiscard]] bool starts_with_ci(std::string_view line, std::string_view key) {
+    if (line.size() < key.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < key.size(); ++i) {
+        if (lower_ascii(line[i]) != key[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] std::size_t parse_size(std::string_view value) {
+    while (!value.empty() && value.front() == ' ') {
+        value.remove_prefix(1);
+    }
+    std::size_t out = 0;
+    const auto res = std::from_chars(value.data(), value.data() + value.size(), out, 10);
+    return res.ec == std::errc{} && res.ptr == value.data() + value.size() ? out : 0;
+}
+
+// 头部里大小写不敏感地找 Content-Length；无异常解析，畸形值一律按 0 处理
+[[nodiscard]] std::size_t content_length_of(std::string_view header) {
+    constexpr std::string_view key = "content-length:";
+    std::size_t pos = 0;
+    while ((pos = header.find('\n', pos)) != std::string_view::npos) {
+        ++pos;
+        const auto eol = header.find('\r', pos);
+        if (eol == std::string_view::npos || eol <= pos) {
+            continue;
+        }
+        auto line = header.substr(pos, eol - pos);
+        while (!line.empty() && line.front() == ' ') {
+            line.remove_prefix(1);
+        }
+        if (starts_with_ci(line, key)) {
+            return parse_size(line.substr(key.size()));
+        }
+    }
+    return 0;
+}
 
 [[nodiscard]] std::optional<RequestLine> parse_request_line(const std::string& request) {
     const auto sp1 = request.find(' ');
@@ -103,21 +154,6 @@ void StatusServer::accept_loop() {
     });
 }
 
-void StatusServer::serve_write(std::shared_ptr<asio::ip::tcp::socket> sock,
-                               const std::string& req) {
-    // 只支持一次读到的完整请求（帧很小，CLI 一次 write 就发完）
-    const auto sep = req.find("\r\n\r\n");
-    const std::string body = sep == std::string::npos ? std::string{} : req.substr(sep + 4);
-    respond(sock, http_response(kv_write_(body)));
-}
-
-void StatusServer::serve_admin_write(std::shared_ptr<asio::ip::tcp::socket> sock,
-                                     const std::string& req, const std::string& path) {
-    const auto sep = req.find("\r\n\r\n");
-    const std::string body = sep == std::string::npos ? std::string{} : req.substr(sep + 4);
-    respond(sock, http_response(admin_handler_("POST", path, "", body)));
-}
-
 void StatusServer::respond(std::shared_ptr<asio::ip::tcp::socket> sock, const std::string& text) {
     asio::async_write(*sock, asio::buffer(text), [sock](const asio::error_code&, std::size_t) {
         asio::error_code ig;
@@ -144,34 +180,76 @@ std::optional<std::string> StatusServer::handle_get(const RequestLine& line) con
     return std::nullopt;
 }
 
+StatusServer::FrameReader::State StatusServer::FrameReader::consume(std::string_view chunk) {
+    raw.append(chunk);
+    if (header_end == 0) {
+        const auto at = raw.find("\r\n\r\n");
+        if (at == std::string::npos) {
+            return raw.size() > kMaxHeaderBytes ? State::Rejected : State::More;
+        }
+        header_end = at + 4;
+        body_need = content_length_of(std::string_view(raw).substr(0, at));
+        if (body_need > kMaxBodyBytes) {
+            return State::Rejected;
+        }
+    }
+    return raw.size() - header_end >= body_need ? State::Done : State::More;
+}
+
+std::string StatusServer::dispatch(const std::string& request) {
+    // BUG-0002: 业务异常到此为止；一个畸形请求只回错误，不允许打崩常驻进程
+    try {
+        const auto line = parse_request_line(request);
+        if (!line.has_value()) {
+            return kNotFound;
+        }
+        const auto body = [&] {
+            const auto at = request.find("\r\n\r\n");
+            return at == std::string::npos ? std::string{} : request.substr(at + 4);
+        }();
+        if (line->method == "POST") {
+            if (kv_write_ && line->path == "/kv") {
+                return http_response(kv_write_(body));
+            }
+            if (admin_handler_) {
+                return http_response(admin_handler_("POST", line->path, "", body));
+            }
+            return kNotFound;
+        }
+        if (line->method == "GET") {
+            auto out = handle_get(*line);
+            return out.has_value() ? http_response(*out) : std::string(kNotFound);
+        }
+        return kNotFound;
+    } catch (const std::exception&) {
+        return http_response("ERR bad-request");
+    } catch (...) {
+        return http_response("ERR bad-request");
+    }
+}
+
 void StatusServer::serve(std::shared_ptr<asio::ip::tcp::socket> sock) {
-    auto buf = std::make_shared<std::array<char, 1024>>();
-    sock->async_read_some(asio::buffer(*buf), [this, sock, buf](const asio::error_code& ec,
-                                                               std::size_t n) {
+    read_frame(std::move(sock), std::make_shared<FrameReader>());
+}
+
+void StatusServer::read_frame(std::shared_ptr<asio::ip::tcp::socket> sock,
+                              std::shared_ptr<FrameReader> reader) {
+    auto buf = std::make_shared<std::array<char, 4096>>();
+    sock->async_read_some(asio::buffer(*buf), [this, sock, reader, buf](
+                                                  const asio::error_code& ec, std::size_t n) {
         if (ec) {
             return;
         }
-        const std::string request(buf->data(), n);
-        const auto line = parse_request_line(request);
-        if (!line.has_value()) {
-            return;   // 连 malformed 请求都不必回——一次性进程语义，直接断开
-        }
-        if (line->method == "POST") {
-            if (kv_write_ && line->path == "/kv") {
-                serve_write(sock, request);
-                return;
-            }
-            if (admin_handler_) {
-                serve_admin_write(sock, request, line->path);
-                return;
-            }
-        }
-        if (line->method == "GET") {
-            auto body = handle_get(*line);
-            respond(sock, body.has_value() ? http_response(*body) : std::string(kNotFound));
+        const auto state = reader->consume(std::string_view(buf->data(), n));
+        if (state == FrameReader::State::More) {
+            read_frame(sock, reader);   // 帧未齐：继续读，不再丢尾部
             return;
         }
-        respond(sock, std::string(kNotFound));
+        if (state == FrameReader::State::Rejected) {
+            respond(sock, http_response("ERR bad-request"));
+            return;
+        }
+        respond(sock, dispatch(reader->raw));
     });
 }
 

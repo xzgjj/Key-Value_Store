@@ -91,6 +91,9 @@
 | M5 | 16 | ⑦可判定性：CI13 + notes-m5 + 证据表逐行核对 + 全量54 | PASS | run_ci PASS×13；ctest 54/54；notes-m5 §4 逐行：8行✅（P0 全达）+ FUNC-17 P2 挂账；SPEC 建议名↔登记名映射注明；证据物 build/evidence/nightly/txn_chaos_150.txt |
 | M5 | 17 | ⑦契约与复用：M5 全程档1-2复核（复用判定顺序遵守） | PASS | align 3/3；复用台账：档1 复用 kv.proto 事务骨架（M0 已核对零改动）/Engine 三CF/encode_ts_key/scheduler 位置；档2 语言机制（variant/expected/optional/虚分派）；档3/4 未触发（零新依赖，不引 grpc/不做 JSON）；X-1~X-6 无回潮 |
 | M5 | 18 | ⑦文档收尾：挂账清单 + M5 累计18轮全PASS | PASS | 挂账：GC(FUNC-17 P2)/CLI 交互式事务(随daemon化)/txn读路径线性一致(ReadIndex结合)/M5-TXNERROR-DRAFT 追认；M5 18 轮全 PASS；ctest 54/54；CI PASS×13；登记 54⇄54 |
+| M6 | 1 | ①可判定性：构建+61测试+CI13 | PASS | cmake 全绿；ctest -j1 61/61（53.49s）；run_ci PASS×13；http_frame_test 5/5 覆盖 BUG-0002/0003/0004 |
+| M6 | 2 | ②契约与复用：对齐三项+登记+缺陷门禁+自测 | PASS | check_align 3/3（contract/doc_cmd/banned）；registry 61⇄61；bugfix 4 条全就位；ci/selftest PASS |
+| M6 | 3 | ③文档与红线：docs/guard/scope+键空间红线抽查 | PASS | CI docs×4+guard+scope PASS（570行/14文件已声明）；detach 0、proto 0 改动、新依赖 0、banned 0；README/CLAUDE/notes-m6 已回填 |
 <!-- review:end -->
 
 ## 约定

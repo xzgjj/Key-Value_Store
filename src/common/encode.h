@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <span>
 #include <string>
+#include <string_view>
 
 #include "common/error.h"
 #include "common/ids.h"
@@ -32,5 +33,11 @@ enum class Cf : uint8_t { Default = 0, Write = 1, Lock = 2 };
 
 // 事务时间戳编码：CF 前缀 + user_key + 大端 ts 后缀（ts 排序序 = 数值序，SPEC-4 §21）
 [[nodiscard]] result<std::string> encode_ts_key(Cf cf, std::span<const std::byte> user_key, Ts ts);
+
+// BUG-0004：raw KV 在 Default CF 内的保留前缀。MVCC 数据键形如 user_key+8B ts，
+// raw 键没有 ts 后缀；共用同一列族时 split 迁移无法靠长度区分两者。raw 键统一加此
+// 前缀后归属可判定。该前缀位于 raft 内部键 "\0re"/"\0lm" 的 \0 保留段，第三字节不同。
+inline constexpr std::string_view kRawKeyPrefix = "\0rk";
+[[nodiscard]] std::string encode_raw_key(std::string_view user_key);
 
 }  // namespace tinykv
