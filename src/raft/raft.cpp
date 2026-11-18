@@ -2,15 +2,17 @@
 // 归属：TinyKV-CPP（M2 Raft 共识，FUNC-03/04）。
 
 #include "raft/raft.h"
+#include "common/compat.h"
 
 #include <algorithm>
-#include <span>
 #include <utility>
 
 namespace tinykv::raft {
 namespace {
 
-bool same(const PeerId& a, const PeerId& b) { return a == b; }
+bool same(const PeerId& a, const PeerId& b) {
+    return a == b;
+}
 
 // M4 ④b / D3-5：learner 追平门槛。日志差 <100 entry 且该状态持续 5s。
 // 模拟器按 100ms/tick 约定 → 5s = 50 tick；用 tick 而非墙钟保证可复现。
@@ -51,18 +53,16 @@ bool Raft::is_learner_caught_up(PeerId p) const {
     // match_index_ 缺失视为 0（从未复制过任何日志）。leader 自己不在 learners_ 中。
     const auto it = match_index_.find(p.value);
     const std::uint64_t matched = it == match_index_.end() ? 0 : it->second;
-    const std::uint64_t lag = log_.last_index().value > matched
-                                  ? log_.last_index().value - matched
-                                  : 0;
+    const std::uint64_t lag =
+        log_.last_index().value > matched ? log_.last_index().value - matched : 0;
     if (lag >= kCatchUpLagLimit) {
-        return false;   // 日志差过大，未达标
+        return false;  // 日志差过大，未达标
     }
     const auto since = learner_catch_since_.find(p.value);
     if (since == learner_catch_since_.end()) {
-        return false;   // 差虽小，但还没连续保持 5s
+        return false;  // 差虽小，但还没连续保持 5s
     }
-    return now_ticks_ >= since->second &&
-           now_ticks_ - since->second >= kCatchUpTicks;
+    return now_ticks_ >= since->second && now_ticks_ - since->second >= kCatchUpTicks;
 }
 
 raftpb::Message Raft::make(raftpb::MessageId id, PeerId to) const {
@@ -78,13 +78,13 @@ void Raft::become_follower(std::uint64_t term, std::optional<PeerId> vote) {
     if (term > term_) {
         term_ = term;
         voted_for_ = vote;
-        (void)log_.set_hard_state(Term{term_}, voted_for_);   // 先持久化 term/vote，再对外发消息
+        (void)log_.set_hard_state(Term{term_}, voted_for_);  // 先持久化 term/vote，再对外发消息
     }
     role_ = Role::Follower;
     leader_ = 0;
     election_elapsed_ = 0;
     votes_.clear();
-    clear_transfer();   // 已降级：转移意图作废（目标自己赢了或别人上台都算转移结束）
+    clear_transfer();  // 已降级：转移意图作废（目标自己赢了或别人上台都算转移结束）
 }
 
 void Raft::campaign() {
@@ -117,7 +117,7 @@ void Raft::become_leader() {
     role_ = Role::Leader;
     leader_ = cfg_.id.value;
     heartbeat_elapsed_ = 0;
-    clear_transfer();   // 自己成了 leader：任何在途转移意图都已由本次选举决出结果
+    clear_transfer();  // 自己成了 leader：任何在途转移意图都已由本次选举决出结果
     const auto last = log_.last_index().value;
     for (const PeerId& p : cfg_.voters) {
         next_index_[p.value] = last + 1;
@@ -132,13 +132,12 @@ void Raft::refresh_learner_catchup() {
     for (const PeerId& p : learners_) {
         const auto it = match_index_.find(p.value);
         const std::uint64_t matched = it == match_index_.end() ? 0 : it->second;
-        const std::uint64_t lag = log_.last_index().value > matched
-                                      ? log_.last_index().value - matched
-                                      : 0;
+        const std::uint64_t lag =
+            log_.last_index().value > matched ? log_.last_index().value - matched : 0;
         if (lag >= kCatchUpLagLimit) {
-            learner_catch_since_.erase(p.value);   // 掉队：重新计时
+            learner_catch_since_.erase(p.value);  // 掉队：重新计时
         } else {
-            learner_catch_since_.try_emplace(p.value, now_ticks_);   // 首次达标记起点
+            learner_catch_since_.try_emplace(p.value, now_ticks_);  // 首次达标记起点
         }
     }
     // 已被移除的 learner 不留残项（apply_conf_change 摘除后同步清理）
@@ -165,7 +164,7 @@ void Raft::maybe_send_timeout_now() {
     const auto it = match_index_.find(transfer_target_->value);
     const std::uint64_t matched = it == match_index_.end() ? 0 : it->second;
     if (matched < log_.last_index().value) {
-        send_append(*transfer_target_);   // 先把它补上，回执到达时再送 TimeoutNow
+        send_append(*transfer_target_);  // 先把它补上，回执到达时再送 TimeoutNow
         return;
     }
     outbox_.push_back(make(raftpb::MSG_TIMEOUT_NOW, *transfer_target_));
@@ -174,17 +173,17 @@ void Raft::maybe_send_timeout_now() {
 
 result<void> Raft::transfer_leader(PeerId target) {
     if (role_ != Role::Leader) {
-        return std::unexpected(NotLeader{.region_id = RegionId{0}, .leader_hint = std::nullopt});
+        return tinykv::unexpected(NotLeader{.region_id = RegionId{0}, .leader_hint = std::nullopt});
     }
     if (same(target, cfg_.id)) {
-        return std::unexpected(InvalidArgument{"转移目标就是自己"});
+        return tinykv::unexpected(InvalidArgument{"转移目标就是自己"});
     }
     if (!is_voter(target)) {
         // learner 不投票也不该当 leader：让它竞选会抬 term 但永远凑不够多数派
-        return std::unexpected(InvalidArgument{"转移目标不是 voter"});
+        return tinykv::unexpected(InvalidArgument{"转移目标不是 voter"});
     }
     transfer_target_ = target;
-    transfer_deadline_ = now_ticks_ + cfg_.election_timeout;   // 红线6：只给一个 election timeout
+    transfer_deadline_ = now_ticks_ + cfg_.election_timeout;  // 红线6：只给一个 election timeout
     transfer_notified_ = false;
     maybe_send_timeout_now();
     return {};
@@ -193,16 +192,16 @@ result<void> Raft::transfer_leader(PeerId target) {
 void Raft::handle_timeout_now(const raftpb::Message& msg) {
     (void)msg;
     if (!is_voter(cfg_.id)) {
-        return;   // learner 收到也不竞选（只收日志）
+        return;  // learner 收到也不竞选（只收日志）
     }
     if (role_ == Role::Leader) {
-        return;   // 已经是 leader：没有可接的对象
+        return;  // 已经是 leader：没有可接的对象
     }
-    campaign();   // 不等 election timeout，立即竞选（带 term+1，原 leader 会投票并降级）
+    campaign();  // 不等 election timeout，立即竞选（带 term+1，原 leader 会投票并降级）
 }
 
 void Raft::tick() {
-    ++now_ticks_;   // 单调 tick 计数：租约/追平判定用 tick 而非墙钟，保证模拟可复现
+    ++now_ticks_;  // 单调 tick 计数：租约/追平判定用 tick 而非墙钟，保证模拟可复现
     if (role_ == Role::Leader) {
         refresh_learner_catchup();
         // 红线6：一个 election timeout 内没完成即放弃（意图易失，不落日志、不通知客户端）
@@ -253,19 +252,19 @@ result<void> Raft::step(const raftpb::Message& msg) {
         case raftpb::MSG_SNAPSHOT:
             return {};
         default:
-            break;   // proto 枚举带哨兵值，必须显式兜底
+            break;  // proto 枚举带哨兵值，必须显式兜底
     }
-    return std::unexpected(InvalidArgument{"未知消息类型"});
+    return tinykv::unexpected(InvalidArgument{"未知消息类型"});
 }
 
 result<void> Raft::propose(std::string data) {
     if (role_ != Role::Leader) {
-        return std::unexpected(NotLeader{.region_id = RegionId{0}, .leader_hint = std::nullopt});
+        return tinykv::unexpected(NotLeader{.region_id = RegionId{0}, .leader_hint = std::nullopt});
     }
     if (transfer_target_.has_value()) {
         // 红线6：转移期拒新提案。若放行，目标可能带着"更多未提交条目"去竞选，
         // 转移就变成一次状态不确定的冒险；宁可让调用方重试。
-        return std::unexpected(InvalidArgument{"leader 转移中，暂不接受新提案"});
+        return tinykv::unexpected(InvalidArgument{"leader 转移中，暂不接受新提案"});
     }
     append_entry_and_replicate(data);
     return {};
@@ -273,10 +272,10 @@ result<void> Raft::propose(std::string data) {
 
 result<void> Raft::propose_conf_change(const raftpb::ConfChange& cc) {
     if (role_ != Role::Leader) {
-        return std::unexpected(NotLeader{.region_id = RegionId{0}, .leader_hint = std::nullopt});
+        return tinykv::unexpected(NotLeader{.region_id = RegionId{0}, .leader_hint = std::nullopt});
     }
     if (transfer_target_.has_value()) {
-        return std::unexpected(InvalidArgument{"leader 转移中，暂不接受成员变更"});
+        return tinykv::unexpected(InvalidArgument{"leader 转移中，暂不接受成员变更"});
     }
     const PeerId target{cc.node_id()};
     // 红线 5 / D3-5 前置守卫（在落盘前拒绝，避免把注定卡死的变更写进日志）：
@@ -284,29 +283,29 @@ result<void> Raft::propose_conf_change(const raftpb::ConfChange& cc) {
         // AddVoter 门槛：目标须是 learner 且已追平（日志差 <100 且持续 5s）。
         // 已经是 voter 的重复提案放行（幂等，apply_conf_change 本就去重）。
         if (is_learner(target) && !is_learner_caught_up(target)) {
-            return std::unexpected(InvalidArgument{"learner 未追平，拒绝 AddVoter"});
+            return tinykv::unexpected(InvalidArgument{"learner 未追平，拒绝 AddVoter"});
         }
     } else if (cc.type() == raftpb::ConfRemoveNode) {
         // 两节点集群移除 leader 自己 → 剩余单节点无法形成多数派，写永久卡死。
         // TransferLeader 按既定拆到第⑦层；本层只守卫拒绝，不改 leader。
         if (same(target, cfg_.id) && cfg_.voters.size() <= kRemoveLeaderMinVoters) {
-            return std::unexpected(
+            return tinykv::unexpected(
                 InvalidArgument{"两节点集群不可移除 leader 自己（需先 TransferLeader）"});
         }
     }
     // 成员变更作为 EntryConfChange 落盘：apply 时才生效，崩溃后可从日志重建
     std::string data;
     if (!cc.SerializeToString(&data)) {
-        return std::unexpected(Corrupted{.where = "raft:confchange", .reason = "序列化失败"});
+        return tinykv::unexpected(Corrupted{.where = "raft:confchange", .reason = "序列化失败"});
     }
     Entry entry;
     entry.set_index(log_.last_index().value + 1);
     entry.set_term(term_);
     entry.set_data(std::move(data));
     entry.set_type(raftpb::EntryConfChange);
-    (void)log_.append(std::span<const Entry>(&entry, 1));
+    (void)log_.append(tinykv::span<const Entry>(&entry, 1));
     broadcast_append();
-    advance_commit();   // 单副本时靠自己推进；多副本由回执推进（无副作用）
+    advance_commit();  // 单副本时靠自己推进；多副本由回执推进（无副作用）
     return {};
 }
 
@@ -346,7 +345,7 @@ void Raft::apply_conf_change(const raftpb::ConfChange& cc) {
             }
             break;
         case raftpb::ConfAddVoter:
-            erase_peer(learners_, pid);                       // learner → voter
+            erase_peer(learners_, pid);  // learner → voter
             if (std::find(cfg_.voters.begin(), cfg_.voters.end(), pid) == cfg_.voters.end()) {
                 cfg_.voters.push_back(pid);
                 next_index_[pid.value] = log_.last_index().value + 1;
@@ -370,7 +369,7 @@ void Raft::append_entry_and_replicate(const std::string& data) {
     entry.set_term(term_);
     entry.set_data(data);
     // type 默认 EntryNormal（0），无需显式设置——旧 data/快照零改动兼容
-    (void)log_.append(std::span<const Entry>(&entry, 1));
+    (void)log_.append(tinykv::span<const Entry>(&entry, 1));
     broadcast_append();
     // 单副本集群没有 follower 回执，commit 只能靠自己推进；多副本时此调用不影响
     // （match 值仍为 0，多数派位置不会前移）。
@@ -465,7 +464,7 @@ void Raft::collect_apply() {
 
 result<void> Raft::mark_applied(LogIndex idx) {
     if (idx.value > log_.committed().value) {
-        return std::unexpected(
+        return tinykv::unexpected(
             InvalidArgument{"applied 不得超过 committed：" + std::to_string(idx.value)});
     }
     if (auto r = log_.set_applied(idx); !r) {
@@ -490,7 +489,7 @@ Ready Raft::take_ready() {
 
 result<std::uint64_t> Raft::read_index() {
     if (role_ != Role::Leader) {
-        return std::unexpected(NotLeader{.region_id = RegionId{0}, .leader_hint = std::nullopt});
+        return tinykv::unexpected(NotLeader{.region_id = RegionId{0}, .leader_hint = std::nullopt});
     }
     const std::uint64_t ctx = ++read_ctx_seq_;
     // read_index 必须取"发起时已提交位点"：这是 ReadIndex 的核心——只要多数派确认过
@@ -535,7 +534,7 @@ void Raft::handle_vote_request(const raftpb::Message& msg) {
             } else {
                 voted_for_ = from;
                 (void)log_.set_hard_state(Term{term_}, voted_for_);
-                election_elapsed_ = 0;   // 只在**同意**时重置；拒绝不重置（红线 1）
+                election_elapsed_ = 0;  // 只在**同意**时重置；拒绝不重置（红线 1）
             }
         }
     }
@@ -549,7 +548,8 @@ void Raft::handle_vote_response(const raftpb::Message& msg) {
         return;
     }
     const PeerId from{msg.from()};
-    if (std::none_of(votes_.begin(), votes_.end(), [&](const PeerId& v) { return same(v, from); })) {
+    if (std::none_of(votes_.begin(), votes_.end(),
+                     [&](const PeerId& v) { return same(v, from); })) {
         votes_.push_back(from);
     }
     if (votes_.size() >= majority()) {
@@ -693,7 +693,7 @@ void Raft::handle_append_response(const raftpb::Message& msg) {
     }
     match_index_[from.value] = msg.index();
     next_index_[from.value] = msg.index() + 1;
-    on_match_advanced(from);   // ⑦a：转移目标可能刚追平，补发 TimeoutNow
+    on_match_advanced(from);  // ⑦a：转移目标可能刚追平，补发 TimeoutNow
     // 只有 voter 的回执能推进 commit：learner 不计入多数派（红线：learner 不投票）。
     // 若让 learner 回执也调 advance_commit，region 会出现"少数派写入已提交"的严重错误。
     if (from_voter) {
@@ -710,14 +710,14 @@ void Raft::handle_heartbeat_response(const raftpb::Message& msg) {
 
     const std::uint64_t ctx = msg.read_ctx();
     if (ctx == 0) {
-        return;   // 普通心跳回执：只刷新租约
+        return;  // 普通心跳回执：只刷新租约
     }
     const auto it = pending_reads_.find(ctx);
     if (it == pending_reads_.end()) {
-        return;   // 已确认或已失效
+        return;  // 已确认或已失效
     }
     if (msg.index() < it->second.index) {
-        return;   // follower 日志还没到这个位点，不能计入 quorum
+        return;  // follower 日志还没到这个位点，不能计入 quorum
     }
     if (++it->second.acks >= majority()) {
         confirmed_reads_.push_back(it->second.index);
@@ -745,7 +745,7 @@ void Raft::handle_heartbeat(const raftpb::Message& msg) {
     auto reply = make(raftpb::MSG_HEARTBEAT_RESPONSE, from);
     reply.set_index(log_.last_index().value);
     reply.set_commit(log_.committed().value);
-    reply.set_read_ctx(msg.read_ctx());   // 原样带回，leader 据此做 quorum 确认
+    reply.set_read_ctx(msg.read_ctx());  // 原样带回，leader 据此做 quorum 确认
     outbox_.push_back(std::move(reply));
 }
 

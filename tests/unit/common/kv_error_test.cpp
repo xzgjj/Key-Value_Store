@@ -20,7 +20,7 @@ TEST(KvError, ResultCarriesValueOrError) {
     EXPECT_TRUE(ok.has_value());
     EXPECT_EQ(ok.value(), 42);
 
-    result<int> err = std::unexpected(InvalidArgument{"limit < 0"});
+    result<int> err = tinykv::unexpected(InvalidArgument{"limit < 0"});
     ASSERT_FALSE(err.has_value());
     EXPECT_TRUE(std::holds_alternative<InvalidArgument>(err.error()));
 }
@@ -104,7 +104,7 @@ TEST(KvError, VariantDispatchByType) {
     const std::string rendered = std::visit(
         [](const auto& v) -> std::string {
             using T = std::decay_t<decltype(v)>;
-            if constexpr (std::same_as<T, InvalidArgument>) {
+            if constexpr (std::is_same_v<T, InvalidArgument>) {
                 return "invalid: " + v.what;
             } else {
                 return "unreachable";

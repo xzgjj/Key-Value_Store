@@ -13,13 +13,13 @@
 #pragma once
 
 #include <cstdint>
-#include <expected>
-#include <stdexcept>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <variant>
 
+#include "common/compat.h"
 #include "common/ids.h"
 
 namespace tinykv {
@@ -35,7 +35,17 @@ struct RegionEpoch {
     uint64_t version{};
     uint64_t conf_ver{};
 
+#if defined(__cpp_impl_three_way_comparison) && __cpp_impl_three_way_comparison >= 201907L
     friend constexpr bool operator==(RegionEpoch, RegionEpoch) = default;
+#else
+    // C++17 兜底：默认比较运算符是 C++20 特性，这里逐字段显式写
+    friend constexpr bool operator==(const RegionEpoch& a, const RegionEpoch& b) noexcept {
+        return a.version == b.version && a.conf_ver == b.conf_ver;
+    }
+    friend constexpr bool operator!=(const RegionEpoch& a, const RegionEpoch& b) noexcept {
+        return !(a == b);
+    }
+#endif
 
     // 严格更新：两维均不小于对方，且至少一维更大（epoch 只单调推进，不允许回退）
     [[nodiscard]] constexpr bool is_newer_than(const RegionEpoch& other) const noexcept {
@@ -86,16 +96,16 @@ struct InvalidArgument {
 // ---- M5 事务错误（SPEC-4 §4.3.3 错误矩阵；用户 2026-11-16 授权按 SPEC 落版） ----
 
 struct WriteConflict {
-    std::string key;            // 冲突 key
-    std::uint64_t start_ts{};   // 本事务 start_ts
+    std::string key;                     // 冲突 key
+    std::uint64_t start_ts{};            // 本事务 start_ts
     std::uint64_t conflict_commit_ts{};  // 对方 Write 的 commitTs（> start_ts 即冲突）
     // hint：立即 abort 自身（无死锁结构保证）；换 ts 重试或报用户
 };
 
 struct LockConflict {
-    std::string key;               // 被锁住的 key
-    std::string primary;           // 锁的 primary 指针（决议锚点）
-    std::uint64_t lock_start_ts{}; // 持锁事务的 start_ts
+    std::string key;                // 被锁住的 key
+    std::string primary;            // 锁的 primary 指针（决议锚点）
+    std::uint64_t lock_start_ts{};  // 持锁事务的 start_ts
     // hint：等待→TTL 过后 CheckTxnStatus 决议
 };
 
@@ -109,7 +119,9 @@ class TsNotMonotonic final : public std::runtime_error {
 public:
     explicit TsNotMonotonic(std::uint64_t got, std::uint64_t last)
         : std::runtime_error("TSO 非严格单调: got=" + std::to_string(got) +
-                             " last=" + std::to_string(last)), got_(got), last_(last) {}
+                             " last=" + std::to_string(last)),
+          got_(got),
+          last_(last) {}
     [[nodiscard]] std::uint64_t got() const noexcept { return got_; }
     [[nodiscard]] std::uint64_t last() const noexcept { return last_; }
 
@@ -124,6 +136,6 @@ using KvError = std::variant<KeyNotInRegion, StaleEpoch, NotLeader, IoFailed, Co
 // 全项目统一结果别名：API 边界一律 [[nodiscard]]（清单 #6；错误分层见 CLAUDE.md §7-1：
 // 不变量破坏/环境致命错误走异常，不进此通道）
 template <typename T>
-using result = std::expected<T, KvError>;
+using result = tinykv::expected<T, KvError>;
 
 }  // namespace tinykv

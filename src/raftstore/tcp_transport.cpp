@@ -10,14 +10,14 @@ namespace tinykv::raftstore {
 namespace {
 
 constexpr std::size_t kLenBytes = 4;
-constexpr std::uint32_t kMaxFrame = 64U << 20U;   // 单帧上限，防坏长度导致巨量分配
+constexpr std::uint32_t kMaxFrame = 64U << 20U;  // 单帧上限，防坏长度导致巨量分配
 
 std::string frame_of(const std::string& payload) {
     std::string frame;
     frame.reserve(kLenBytes + payload.size());
     const auto len = static_cast<std::uint32_t>(payload.size());
     for (int shift = 24; shift >= 0; shift -= 8) {
-        frame.push_back(static_cast<char>((len >> shift) & 0xFFU));   // 大端长度
+        frame.push_back(static_cast<char>((len >> shift) & 0xFFU));  // 大端长度
     }
     frame.append(payload);
     return frame;
@@ -34,33 +34,36 @@ std::uint32_t length_of(const std::array<char, kLenBytes>& head) {
 }  // namespace
 
 result<std::unique_ptr<TcpTransport>> TcpTransport::start(const TcpOptions& opt) {
-    auto transport = std::unique_ptr<TcpTransport>(new TcpTransport(opt.listen_host));   // NOLINT
+    auto transport = std::unique_ptr<TcpTransport>(new TcpTransport(opt.listen_host));  // NOLINT
 
     asio::error_code ec;
     const asio::ip::tcp::endpoint endpoint(asio::ip::make_address(opt.listen_host, ec),
                                            opt.listen_port);
     if (ec) {
-        return std::unexpected(IoFailed{.path = opt.listen_host, .reason = "监听地址非法"});
+        return tinykv::unexpected(IoFailed{.path = opt.listen_host, .reason = "监听地址非法"});
     }
     transport->acceptor_ = std::make_unique<asio::ip::tcp::acceptor>(transport->ctx_);
     transport->acceptor_->open(endpoint.protocol(), ec);
     if (ec) {
-        return std::unexpected(IoFailed{.path = opt.listen_host, .reason = "open 失败: " + ec.message()});
+        return tinykv::unexpected(
+            IoFailed{.path = opt.listen_host, .reason = "open 失败: " + ec.message()});
     }
     transport->acceptor_->set_option(asio::socket_base::reuse_address(true), ec);
     transport->acceptor_->bind(endpoint, ec);
     if (ec) {
-        return std::unexpected(IoFailed{.path = opt.listen_host,
-                                        .reason = "bind 失败（端口可能被占用）: " + ec.message()});
+        return tinykv::unexpected(IoFailed{
+            .path = opt.listen_host, .reason = "bind 失败（端口可能被占用）: " + ec.message()});
     }
     transport->acceptor_->listen(asio::socket_base::max_listen_connections, ec);
     if (ec) {
-        return std::unexpected(IoFailed{.path = opt.listen_host, .reason = "listen 失败: " + ec.message()});
+        return tinykv::unexpected(
+            IoFailed{.path = opt.listen_host, .reason = "listen 失败: " + ec.message()});
     }
     transport->bound_port_ = transport->acceptor_->local_endpoint(ec).port();
 
-    transport->guard_ = std::make_unique<
-        asio::executor_work_guard<asio::io_context::executor_type>>(transport->ctx_.get_executor());
+    transport->guard_ =
+        std::make_unique<asio::executor_work_guard<asio::io_context::executor_type>>(
+            transport->ctx_.get_executor());
     transport->accept_loop();
     transport->thread_ = std::thread([raw = transport.get()] { raw->ctx_.run(); });
     return transport;
@@ -71,10 +74,10 @@ TcpTransport::~TcpTransport() {
         asio::error_code ec;
         acceptor_->close(ec);
     }
-    guard_.reset();          // 释放 work guard，run() 才会自然返回
+    guard_.reset();  // 释放 work guard，run() 才会自然返回
     ctx_.stop();
     if (thread_.joinable()) {
-        thread_.join();      // 绝不 detach：线程生命周期由对象负责
+        thread_.join();  // 绝不 detach：线程生命周期由对象负责
     }
 }
 
@@ -90,40 +93,39 @@ void TcpTransport::accept_loop() {
             read_frame(sock);
         }
         if (acceptor_ != nullptr && acceptor_->is_open()) {
-            accept_loop();   // 继续接下一个
+            accept_loop();  // 继续接下一个
         }
     });
 }
 
 void TcpTransport::read_frame(std::shared_ptr<asio::ip::tcp::socket> sock) {
     auto head = std::make_shared<std::array<char, kLenBytes>>();
-    asio::async_read(*sock, asio::buffer(*head),
-                     [this, sock, head](const asio::error_code& ec, std::size_t) {
-                         if (ec) {
-                             asio::error_code ig;
-                             sock->close(ig);
-                             return;
-                         }
-                         const auto len = length_of(*head);
-                         if (len == 0 || len > kMaxFrame) {
-                             asio::error_code ig;
-                             sock->close(ig);
-                             return;
-                         }
-                         auto body = std::make_shared<std::string>(len, '\0');
-                         asio::async_read(*sock, asio::buffer(*body),
-                                          [this, sock, body](const asio::error_code& err2,
-                                                             std::size_t) {
-                                              if (!err2) {
-                                                  raftpb::Message msg;
-                                                  if (msg.ParseFromString(*body)) {
-                                                      std::lock_guard lock(inbox_mu_);
-                                                      inbox_.push_back(std::move(msg));
-                                                  }
-                                              }
-                                              read_frame(sock);   // 继续读下一帧（同一条连接可复用）
-                                          });
-                     });
+    asio::async_read(
+        *sock, asio::buffer(*head), [this, sock, head](const asio::error_code& ec, std::size_t) {
+            if (ec) {
+                asio::error_code ig;
+                sock->close(ig);
+                return;
+            }
+            const auto len = length_of(*head);
+            if (len == 0 || len > kMaxFrame) {
+                asio::error_code ig;
+                sock->close(ig);
+                return;
+            }
+            auto body = std::make_shared<std::string>(len, '\0');
+            asio::async_read(*sock, asio::buffer(*body),
+                             [this, sock, body](const asio::error_code& err2, std::size_t) {
+                                 if (!err2) {
+                                     raftpb::Message msg;
+                                     if (msg.ParseFromString(*body)) {
+                                         std::lock_guard lock(inbox_mu_);
+                                         inbox_.push_back(std::move(msg));
+                                     }
+                                 }
+                                 read_frame(sock);  // 继续读下一帧（同一条连接可复用）
+                             });
+        });
 }
 
 result<void> TcpTransport::send(PeerId to, const raftpb::Message& msg) {
@@ -132,14 +134,15 @@ result<void> TcpTransport::send(PeerId to, const raftpb::Message& msg) {
         std::lock_guard lock(peers_mu_);
         const auto it = peer_ports_.find(to.value);
         if (it == peer_ports_.end()) {
-            return std::unexpected(InvalidArgument{"未知对端 PeerId=" + std::to_string(to.value)});
+            return tinykv::unexpected(
+                InvalidArgument{"未知对端 PeerId=" + std::to_string(to.value)});
         }
         port = it->second;
     }
 
     std::string payload;
     if (!msg.SerializeToString(&payload)) {
-        return std::unexpected(Corrupted{.where = "tcp:send", .reason = "消息序列化失败"});
+        return tinykv::unexpected(Corrupted{.where = "tcp:send", .reason = "消息序列化失败"});
     }
     auto frame = std::make_shared<std::string>(frame_of(payload));
     const std::string host = host_;
@@ -155,7 +158,7 @@ result<void> TcpTransport::send(PeerId to, const raftpb::Message& msg) {
         const asio::ip::tcp::endpoint ep(addr, port);
         sock->async_connect(ep, [sock, frame](const asio::error_code& ec) {
             if (ec) {
-                return;   // 对端未起：丢弃，等下一轮心跳重传
+                return;  // 对端未起：丢弃，等下一轮心跳重传
             }
             asio::async_write(*sock, asio::buffer(*frame),
                               [sock](const asio::error_code&, std::size_t) {

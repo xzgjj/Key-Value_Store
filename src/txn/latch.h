@@ -10,21 +10,20 @@
 
 #include <algorithm>
 #include <map>
-#include <mutex>
-#include <string_view>
 #include <memory>
 #include <mutex>
-#include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
+#include "common/compat.h"
 #include "common/error.h"
 
 namespace tinykv::txn {
 
 class LatchManager {
-    struct Slot {   // 槽类型前置定义（guard 析构需要完整类型释放 shared_ptr）
+    struct Slot {  // 槽类型前置定义（guard 析构需要完整类型释放 shared_ptr）
         std::mutex mu;
     };
 
@@ -54,12 +53,12 @@ public:
         LatchGuard(std::vector<std::shared_ptr<Slot>> slots, std::vector<std::string> keys)
             : slots_(std::move(slots)), keys_(std::move(keys)) {}
 
-        std::vector<std::shared_ptr<Slot>> slots_;   // 已加锁的槽（按 key 排序）
+        std::vector<std::shared_ptr<Slot>> slots_;  // 已加锁的槽（按 key 排序）
         std::vector<std::string> keys_;
     };
 
     // 取得全部 key 的 latch：阻塞至每个 key 都空闲；key 排序后加锁（防死锁，红线4）
-    [[nodiscard]] LatchGuard acquire(std::span<const std::string> keys) {
+    [[nodiscard]] LatchGuard acquire(tinykv::span<const std::string> keys) {
         std::vector<std::string> sorted(keys.begin(), keys.end());
         std::sort(sorted.begin(), sorted.end());
         sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
@@ -67,7 +66,7 @@ public:
         std::vector<std::shared_ptr<Slot>> slots;
         slots.reserve(sorted.size());
         {
-            std::lock_guard lock(mu_);   // 只保护槽表本身；槽内 mutex 在锁外逐个取
+            std::lock_guard lock(mu_);  // 只保护槽表本身；槽内 mutex 在锁外逐个取
             for (const auto& key : sorted) {
                 auto& slot = slots_[key];
                 if (!slot) {
@@ -77,7 +76,7 @@ public:
             }
         }
         for (auto& slot : slots) {
-            slot->mu.lock();   // 全序加锁：不可能成环（无死锁的结构性保证）
+            slot->mu.lock();  // 全序加锁：不可能成环（无死锁的结构性保证）
         }
         return LatchGuard(std::move(slots), std::move(sorted));
     }

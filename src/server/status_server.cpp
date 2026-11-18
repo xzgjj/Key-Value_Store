@@ -95,7 +95,7 @@ constexpr const char* kNotFound =
 result<std::unique_ptr<StatusServer>> StatusServer::start(
     const std::string& host, std::uint16_t port, std::function<std::string()> provider,
     KvHandler kv_handler, KvWriteHandler kv_write, AdminHandler admin_handler) {
-    auto server = std::unique_ptr<StatusServer>(new StatusServer());   // NOLINT：构造私有
+    auto server = std::unique_ptr<StatusServer>(new StatusServer());  // NOLINT：构造私有
     server->provider_ = std::move(provider);
     server->kv_handler_ = std::move(kv_handler);
     server->kv_write_ = std::move(kv_write);
@@ -104,27 +104,27 @@ result<std::unique_ptr<StatusServer>> StatusServer::start(
     asio::error_code ec;
     const asio::ip::tcp::endpoint endpoint(asio::ip::make_address(host, ec), port);
     if (ec) {
-        return std::unexpected(IoFailed{.path = host, .reason = "状态端点地址非法"});
+        return tinykv::unexpected(IoFailed{.path = host, .reason = "状态端点地址非法"});
     }
     server->acceptor_ = std::make_unique<asio::ip::tcp::acceptor>(server->ctx_);
     server->acceptor_->open(endpoint.protocol(), ec);
     if (ec) {
-        return std::unexpected(IoFailed{.path = host, .reason = "open 失败: " + ec.message()});
+        return tinykv::unexpected(IoFailed{.path = host, .reason = "open 失败: " + ec.message()});
     }
     server->acceptor_->set_option(asio::socket_base::reuse_address(true), ec);
     server->acceptor_->bind(endpoint, ec);
     if (ec) {
-        return std::unexpected(
+        return tinykv::unexpected(
             IoFailed{.path = host, .reason = "bind 失败（端口占用？）: " + ec.message()});
     }
     server->acceptor_->listen(asio::socket_base::max_listen_connections, ec);
     if (ec) {
-        return std::unexpected(IoFailed{.path = host, .reason = "listen 失败: " + ec.message()});
+        return tinykv::unexpected(IoFailed{.path = host, .reason = "listen 失败: " + ec.message()});
     }
     server->bound_port_ = server->acceptor_->local_endpoint(ec).port();
 
-    server->guard_ = std::make_unique<
-        asio::executor_work_guard<asio::io_context::executor_type>>(server->ctx_.get_executor());
+    server->guard_ = std::make_unique<asio::executor_work_guard<asio::io_context::executor_type>>(
+        server->ctx_.get_executor());
     server->accept_loop();
     server->thread_ = std::thread([raw = server.get()] { raw->ctx_.run(); });
     return server;
@@ -138,7 +138,7 @@ StatusServer::~StatusServer() {
     guard_.reset();
     ctx_.stop();
     if (thread_.joinable()) {
-        thread_.join();   // 绝不 detach
+        thread_.join();  // 绝不 detach
     }
 }
 
@@ -235,22 +235,22 @@ void StatusServer::serve(std::shared_ptr<asio::ip::tcp::socket> sock) {
 void StatusServer::read_frame(std::shared_ptr<asio::ip::tcp::socket> sock,
                               std::shared_ptr<FrameReader> reader) {
     auto buf = std::make_shared<std::array<char, 4096>>();
-    sock->async_read_some(asio::buffer(*buf), [this, sock, reader, buf](
-                                                  const asio::error_code& ec, std::size_t n) {
-        if (ec) {
-            return;
-        }
-        const auto state = reader->consume(std::string_view(buf->data(), n));
-        if (state == FrameReader::State::More) {
-            read_frame(sock, reader);   // 帧未齐：继续读，不再丢尾部
-            return;
-        }
-        if (state == FrameReader::State::Rejected) {
-            respond(sock, http_response("ERR bad-request"));
-            return;
-        }
-        respond(sock, dispatch(reader->raw));
-    });
+    sock->async_read_some(asio::buffer(*buf),
+                          [this, sock, reader, buf](const asio::error_code& ec, std::size_t n) {
+                              if (ec) {
+                                  return;
+                              }
+                              const auto state = reader->consume(std::string_view(buf->data(), n));
+                              if (state == FrameReader::State::More) {
+                                  read_frame(sock, reader);  // 帧未齐：继续读，不再丢尾部
+                                  return;
+                              }
+                              if (state == FrameReader::State::Rejected) {
+                                  respond(sock, http_response("ERR bad-request"));
+                                  return;
+                              }
+                              respond(sock, dispatch(reader->raw));
+                          });
 }
 
 }  // namespace tinykv::server

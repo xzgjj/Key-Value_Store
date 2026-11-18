@@ -9,9 +9,9 @@
 #pragma once
 
 #include <optional>
-#include <span>
 #include <string>
 
+#include "common/compat.h"
 #include "common/error.h"
 #include "txn/mvcc.h"
 
@@ -23,12 +23,13 @@ public:
 
     [[nodiscard]] virtual result<std::optional<std::string>> get(std::string_view key,
                                                                  Ts start_ts) = 0;
-    [[nodiscard]] virtual result<void> prewrite(std::span<const Mutation> mutations,
+    [[nodiscard]] virtual result<void> prewrite(tinykv::span<const Mutation> mutations,
                                                 std::string_view primary, Ts start_ts,
                                                 std::uint64_t ttl_ms, std::uint64_t now_ms) = 0;
-    [[nodiscard]] virtual result<void> commit(std::span<const std::string> keys, Ts start_ts,
+    [[nodiscard]] virtual result<void> commit(tinykv::span<const std::string> keys, Ts start_ts,
                                               Ts commit_ts) = 0;
-    [[nodiscard]] virtual result<void> rollback(std::span<const std::string> keys, Ts start_ts) = 0;
+    [[nodiscard]] virtual result<void> rollback(tinykv::span<const std::string> keys,
+                                                Ts start_ts) = 0;
     [[nodiscard]] virtual result<TxnStatus> check_txn_status(std::string_view primary,
                                                              Ts lock_start_ts,
                                                              std::uint64_t now_ms) = 0;
@@ -46,16 +47,17 @@ public:
                                                          Ts start_ts) override {
         return mvcc_.get(key, start_ts);
     }
-    [[nodiscard]] result<void> prewrite(std::span<const Mutation> mutations,
-                                        std::string_view primary, Ts start_ts,
-                                        std::uint64_t ttl_ms, std::uint64_t now_ms) override {
+    [[nodiscard]] result<void> prewrite(tinykv::span<const Mutation> mutations,
+                                        std::string_view primary, Ts start_ts, std::uint64_t ttl_ms,
+                                        std::uint64_t now_ms) override {
         return mvcc_.prewrite(mutations, primary, start_ts, ttl_ms, now_ms);
     }
-    [[nodiscard]] result<void> commit(std::span<const std::string> keys, Ts start_ts,
+    [[nodiscard]] result<void> commit(tinykv::span<const std::string> keys, Ts start_ts,
                                       Ts commit_ts) override {
         return mvcc_.commit(keys, start_ts, commit_ts);
     }
-    [[nodiscard]] result<void> rollback(std::span<const std::string> keys, Ts start_ts) override {
+    [[nodiscard]] result<void> rollback(tinykv::span<const std::string> keys,
+                                        Ts start_ts) override {
         return mvcc_.rollback(keys, start_ts);
     }
     [[nodiscard]] result<TxnStatus> check_txn_status(std::string_view primary, Ts lock_start_ts,

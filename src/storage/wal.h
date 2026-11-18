@@ -1,5 +1,5 @@
-// 文件用途：预写日志——追加段文件 + 逐条 CRC32C + group commit（批量 fsync）+ 只读重放（SPEC-1 §1.4.2/§1.4.3）。
-// 归属：TinyKV-CPP（M1 单机存储，FUNC-02 / REL-02；M2 PERF-01 收口）。
+// 文件用途：预写日志——追加段文件 + 逐条 CRC32C + group commit（批量 fsync）+ 只读重放（SPEC-1
+// §1.4.2/§1.4.3）。 归属：TinyKV-CPP（M1 单机存储，FUNC-02 / REL-02；M2 PERF-01 收口）。
 //
 // 记录布局（段文件内顺序追加，一条记录 = 一个写入批次）：
 //   [u32 len][u32 crc32c(payload)][payload]
@@ -26,22 +26,22 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
-#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
 
+#include "common/compat.h"
 #include "common/error.h"
 #include "storage/storage.h"
 
 namespace tinykv {
 
 struct WalOptions {
-    std::filesystem::path dir;                          // 段文件目录（引擎的 wal/ 子目录）
-    bool fsync_on_commit = true;                        // false 仅供基准对比，掉电会丢窗口内数据
-    std::size_t segment_bytes = 128U << 20U;            // 单段上限，超过则切新段
-    std::chrono::milliseconds commit_window{2};         // group commit 攒批窗口（SPEC-2 D2-2）
+    std::filesystem::path dir;                   // 段文件目录（引擎的 wal/ 子目录）
+    bool fsync_on_commit = true;                 // false 仅供基准对比，掉电会丢窗口内数据
+    std::size_t segment_bytes = 128U << 20U;     // 单段上限，超过则切新段
+    std::chrono::milliseconds commit_window{2};  // group commit 攒批窗口（SPEC-2 D2-2）
 };
 
 // 重放结果：batches 按写入顺序；stopped=true 表示尾部不完整或校验失败，reason 记录原因
@@ -64,7 +64,7 @@ public:
     [[nodiscard]] static result<void> clear_all(const std::filesystem::path& dir);
 
     // 追加一个批次：fwrite+fflush 后即返回；fsync 由后台提交者在本窗口内合并执行
-    [[nodiscard]] result<void> append(std::span<const Modify> batch);
+    [[nodiscard]] result<void> append(tinykv::span<const Modify> batch);
 
     // 同步刷盘原语（fflush+fsync）：析构、切段、测试与关闭路径使用
     [[nodiscard]] result<void> sync();
@@ -83,10 +83,10 @@ private:
         std::chrono::milliseconds commit_window);
 
     [[nodiscard]] result<void> open_new_segment();
-    [[nodiscard]] result<void> sync_locked();   // 持 mu_ 时调用：强制 fflush+fsync 当前段
+    [[nodiscard]] result<void> sync_locked();  // 持 mu_ 时调用：强制 fflush+fsync 当前段
     // 后台提交者落盘失败 → 粘住错误（后续 append 一律 IoFailed），不再空转重试（code-review P1-1）
     void mark_failed_locked(std::string_view reason);
-    void commit_loop();                         // 后台提交者：窗口内合并 fsync
+    void commit_loop();  // 后台提交者：窗口内合并 fsync
 
     std::filesystem::path dir_;
     std::filesystem::path current_;
@@ -97,15 +97,15 @@ private:
     std::uint64_t current_size_{0};
 
     std::chrono::milliseconds commit_window_{2};
-    std::mutex mu_;            // 保护 file_/current_size_ 与写路径
-    std::mutex commit_mu_;     // 提交者等待窗口用；notify 前须持有它，避免唤醒丢失
+    std::mutex mu_;         // 保护 file_/current_size_ 与写路径
+    std::mutex commit_mu_;  // 提交者等待窗口用；notify 前须持有它，避免唤醒丢失
     std::condition_variable cv_;
     std::thread committer_;
     std::atomic<bool> stop_{false};
     std::atomic<bool> dirty_{false};
     std::atomic<std::uint64_t> fsync_count_{0};
-    std::atomic<bool> failed_{false};   // 粘性失败：落盘链路已不可信（code-review P1-1）
-    std::string fail_reason_;           // 受 mu_ 保护
+    std::atomic<bool> failed_{false};  // 粘性失败：落盘链路已不可信（code-review P1-1）
+    std::string fail_reason_;          // 受 mu_ 保护
 };
 
 }  // namespace tinykv

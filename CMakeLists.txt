@@ -8,7 +8,16 @@ project(tinykv
     DESCRIPTION "TinyKV-CPP：Raft 分布式 KV 存储的工程化复刻"
     LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 23)
+# ---------------------------------------------------------------------------
+# 语言标准（默认 23；20/17 用于拓宽支持面）
+#   为什么可调：C++23 的 std::expected / std::span 在 17 下不存在，项目用
+#   src/common/compat.h 提供等价物；C++20 是"原生 std::expected + 无 concept 依赖"的中间档。
+#   17 档的两条已知代价（已在 compat.h 与 docs 里写明）：
+#     1) 指定初始化器（.field = v）按 GNU 扩展使用，故 17 档不启用 -Wpedantic；
+#     2) std::string::starts_with / operator<=> 由 compat.h 的等价函数替代。
+# ---------------------------------------------------------------------------
+set(TINYKV_CXX_STANDARD "23" CACHE STRING "C++ 标准：23（默认）/20/17")
+set(CMAKE_CXX_STANDARD ${TINYKV_CXX_STANDARD})
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -43,7 +52,12 @@ endif()
 if(MSVC)
     add_compile_options(/W4 /WX)
 else()
-    add_compile_options(-Wall -Wextra -Wpedantic -Werror)
+    add_compile_options(-Wall -Wextra -Werror)
+    # -Wpedantic 只在 20 及以上启用：17 档的指定初始化器是 GNU 扩展，
+    # 开着它等于把"可编译"变成"不可编译"（见项目根 CMakeLists 语言标准一节）。
+    if(NOT TINYKV_CXX_STANDARD STREQUAL "17")
+        add_compile_options(-Wpedantic)
+    endif()
 endif()
 
 # MinGW（Windows + GNU）运行时静态链接：可执行自包含，规避 PATH 上异源 MinGW DLL

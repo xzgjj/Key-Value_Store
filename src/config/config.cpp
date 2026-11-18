@@ -63,8 +63,8 @@ bool parse_size(const std::string& v, std::size_t& out) {
 result<void> apply_key(Config& cfg, const std::string& section, const std::string& key,
                        const std::string& value, int line_no) {
     const auto bad = [&](const std::string& why) {
-        return result<void>(std::unexpected(InvalidArgument{
-            "配置第 " + std::to_string(line_no) + " 行：" + why}));
+        return result<void>(tinykv::unexpected(
+            InvalidArgument{"配置第 " + std::to_string(line_no) + " 行：" + why}));
     };
     if (section == "engine") {
         if (key == "dir") {
@@ -77,8 +77,9 @@ result<void> apply_key(Config& cfg, const std::string& section, const std::strin
                        : bad("fsync_on_commit 只能是 true/false");
         }
         if (key == "memtable_limit_mb") {
-            return parse_size(value, cfg.engine.memtable_limit_mb) ? result<void>{}
-                                                                  : bad("memtable_limit_mb 必须是整数");
+            return parse_size(value, cfg.engine.memtable_limit_mb)
+                       ? result<void>{}
+                       : bad("memtable_limit_mb 必须是整数");
         }
         if (key == "wal_segment_mb") {
             return parse_size(value, cfg.engine.wal_segment_mb) ? result<void>{}
@@ -105,7 +106,7 @@ result<void> apply_key(Config& cfg, const std::string& section, const std::strin
 result<Config> load_config(const std::filesystem::path& path) {
     std::ifstream in(path);
     if (!in.is_open()) {
-        return std::unexpected(IoFailed{.path = path.string(), .reason = "配置文件打不开"});
+        return tinykv::unexpected(IoFailed{.path = path.string(), .reason = "配置文件打不开"});
     }
 
     Config cfg;
@@ -124,7 +125,7 @@ result<Config> load_config(const std::filesystem::path& path) {
         const bool nested = raw.rfind(kIndent, 0) == 0;
         const auto colon = raw.find(':');
         if (colon == std::string::npos) {
-            return std::unexpected(
+            return tinykv::unexpected(
                 InvalidArgument{"配置第 " + std::to_string(line_no) + " 行缺少冒号"});
         }
         const std::string key = trim(raw.substr(0, colon));
@@ -132,19 +133,19 @@ result<Config> load_config(const std::filesystem::path& path) {
         if (!nested) {
             if (!value.empty()) {
                 // 顶层只允许"组名:"，本项目没有顶层标量
-                return std::unexpected(InvalidArgument{
-                    "配置第 " + std::to_string(line_no) + " 行：顶层键 '"
-                    + key + "' 不接受标量值（本项目配置只有一级分组）"});
+                return tinykv::unexpected(
+                    InvalidArgument{"配置第 " + std::to_string(line_no) + " 行：顶层键 '" + key +
+                                    "' 不接受标量值（本项目配置只有一级分组）"});
             }
             section = key;
             continue;
         }
         if (section.empty()) {
-            return std::unexpected(
+            return tinykv::unexpected(
                 InvalidArgument{"配置第 " + std::to_string(line_no) + " 行缩进出现在任何分组之前"});
         }
         if (auto r = apply_key(cfg, section, key, value, line_no); !r) {
-            return std::unexpected(r.error());
+            return tinykv::unexpected(r.error());
         }
     }
     return cfg;

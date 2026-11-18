@@ -7,7 +7,6 @@
 
 #pragma once
 
-#include <concepts>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -22,21 +21,21 @@ namespace tinykv {
     return std::visit(
         [](const auto& v) -> std::string_view {
             using T = std::decay_t<decltype(v)>;
-            if constexpr (std::same_as<T, KeyNotInRegion>) {
+            if constexpr (std::is_same_v<T, KeyNotInRegion>) {
                 return "KeyNotInRegion";
-            } else if constexpr (std::same_as<T, StaleEpoch>) {
+            } else if constexpr (std::is_same_v<T, StaleEpoch>) {
                 return "StaleEpoch";
-            } else if constexpr (std::same_as<T, NotLeader>) {
+            } else if constexpr (std::is_same_v<T, NotLeader>) {
                 return "NotLeader";
-            } else if constexpr (std::same_as<T, IoFailed>) {
+            } else if constexpr (std::is_same_v<T, IoFailed>) {
                 return "IoFailed";
-            } else if constexpr (std::same_as<T, Corrupted>) {
+            } else if constexpr (std::is_same_v<T, Corrupted>) {
                 return "Corrupted";
-            } else if constexpr (std::same_as<T, WriteConflict>) {
+            } else if constexpr (std::is_same_v<T, WriteConflict>) {
                 return "WriteConflict";
-            } else if constexpr (std::same_as<T, LockConflict>) {
+            } else if constexpr (std::is_same_v<T, LockConflict>) {
                 return "LockConflict";
-            } else if constexpr (std::same_as<T, Retryable>) {
+            } else if constexpr (std::is_same_v<T, Retryable>) {
                 return "Retryable";
             } else {
                 return "InvalidArgument";
@@ -50,35 +49,38 @@ namespace tinykv {
     return std::visit(
         [](const auto& v) -> std::string {
             using T = std::decay_t<decltype(v)>;
-            if constexpr (std::same_as<T, KeyNotInRegion>) {
-                return "KeyNotInRegion: key 不在该 region 范围内 region_id="
-                       + std::to_string(v.region_id.value) + "；原因=路由过期或刚发生 split；"
+            if constexpr (std::is_same_v<T, KeyNotInRegion>) {
+                return "KeyNotInRegion: key 不在该 region 范围内 region_id=" +
+                       std::to_string(v.region_id.value) +
+                       "；原因=路由过期或刚发生 split；"
                        "建议=回源调度器刷新路由后重试";
-            } else if constexpr (std::same_as<T, StaleEpoch>) {
-                return "StaleEpoch: 请求 epoch 落后 region_id=" + std::to_string(v.region_id.value)
-                       + "；原因=路由缓存过期；建议=按 have/want 刷新路由后重试";
-            } else if constexpr (std::same_as<T, NotLeader>) {
-                return std::string("NotLeader: region_id=") + std::to_string(v.region_id.value)
-                       + "；原因=leader 已变更；建议="
-                       + (v.leader_hint ? "按 leader_hint 重定向" : "leader 未知，回源查询后重试");
-            } else if constexpr (std::same_as<T, IoFailed>) {
-                return "IoFailed: path=" + v.path + "；原因=" + v.reason
-                       + "；建议=检查磁盘空间与目录权限";
-            } else if constexpr (std::same_as<T, Corrupted>) {
-                return "Corrupted: 位置=" + v.where + "；原因=" + v.reason
-                       + "；建议=从副本重拉或按快照恢复";
-            } else if constexpr (std::same_as<T, WriteConflict>) {
-                return "WriteConflict: key=" + v.key + " start_ts=" + std::to_string(v.start_ts)
-                       + " conflict_commit_ts=" + std::to_string(v.conflict_commit_ts)
-                       + "；原因=他事务已提交新版本（SI 写写冲突）；建议=换 start_ts 重试或报用户";
-            } else if constexpr (std::same_as<T, LockConflict>) {
-                return "LockConflict: key=" + v.key + " primary=" + v.primary
-                       + " lock_start_ts=" + std::to_string(v.lock_start_ts)
-                       + "；原因=他事务持锁；建议=等待 TTL 过期后 CheckTxnStatus 决议";
-            } else if constexpr (std::same_as<T, Retryable>) {
+            } else if constexpr (std::is_same_v<T, StaleEpoch>) {
+                return "StaleEpoch: 请求 epoch 落后 region_id=" +
+                       std::to_string(v.region_id.value) +
+                       "；原因=路由缓存过期；建议=按 have/want 刷新路由后重试";
+            } else if constexpr (std::is_same_v<T, NotLeader>) {
+                return std::string("NotLeader: region_id=") + std::to_string(v.region_id.value) +
+                       "；原因=leader 已变更；建议=" +
+                       (v.leader_hint ? "按 leader_hint 重定向" : "leader 未知，回源查询后重试");
+            } else if constexpr (std::is_same_v<T, IoFailed>) {
+                return "IoFailed: path=" + v.path + "；原因=" + v.reason +
+                       "；建议=检查磁盘空间与目录权限";
+            } else if constexpr (std::is_same_v<T, Corrupted>) {
+                return "Corrupted: 位置=" + v.where + "；原因=" + v.reason +
+                       "；建议=从副本重拉或按快照恢复";
+            } else if constexpr (std::is_same_v<T, WriteConflict>) {
+                return "WriteConflict: key=" + v.key + " start_ts=" + std::to_string(v.start_ts) +
+                       " conflict_commit_ts=" + std::to_string(v.conflict_commit_ts) +
+                       "；原因=他事务已提交新版本（SI 写写冲突）；建议=换 start_ts 重试或报用户";
+            } else if constexpr (std::is_same_v<T, LockConflict>) {
+                return "LockConflict: key=" + v.key + " primary=" + v.primary +
+                       " lock_start_ts=" + std::to_string(v.lock_start_ts) +
+                       "；原因=他事务持锁；建议=等待 TTL 过期后 CheckTxnStatus 决议";
+            } else if constexpr (std::is_same_v<T, Retryable>) {
                 return "Retryable: " + v.what + "；原因=锁已决议清除；建议=安全重试";
             } else {
-                return "InvalidArgument: " + v.what + "；原因=调用方参数非法；建议=按字段修正后重试";
+                return "InvalidArgument: " + v.what +
+                       "；原因=调用方参数非法；建议=按字段修正后重试";
             }
         },
         error);

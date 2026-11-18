@@ -13,9 +13,9 @@
 #include <string>
 #include <vector>
 
+#include <algorithm>
 #include "raft/raft.h"
 #include "raft_test_base.h"
-#include <algorithm>
 
 #include "raftstore/peer.h"
 #include "storage/engine.h"
@@ -34,8 +34,7 @@ using tinykv::raftstore::Peer;
               [](const tinykv::raftstore::Region& a, const tinykv::raftstore::Region& b) {
                   return a.start_key < b.start_key;
               });
-    if (regions.empty() || !regions.front().start_key.empty() ||
-        !regions.back().end_key.empty()) {
+    if (regions.empty() || !regions.front().start_key.empty() || !regions.back().end_key.empty()) {
         return false;
     }
     for (std::size_t i = 1; i < regions.size(); ++i) {
@@ -61,8 +60,10 @@ using tinykv::raftstore::Peer;
 }
 
 // Split admin 提案构造（split_test/mr_chaos/bench 共用）
-[[nodiscard]] inline tinykv::cmdpb::RaftCmdRequest make_split_admin(
-    std::uint64_t client, std::uint64_t seq, const std::string& key, std::uint64_t new_region_id) {
+[[nodiscard]] inline tinykv::cmdpb::RaftCmdRequest make_split_admin(std::uint64_t client,
+                                                                    std::uint64_t seq,
+                                                                    const std::string& key,
+                                                                    std::uint64_t new_region_id) {
     tinykv::cmdpb::RaftCmdRequest req;
     req.mutable_header()->set_client_id(client);
     req.mutable_header()->set_sequence_id(seq);
@@ -120,7 +121,7 @@ public:
             for (auto& m : peers_[i]->take_messages()) {
                 const int to = static_cast<int>(m.to()) - 1;
                 if (from_isolated || partition_.count(to) > 0) {
-                    continue;   // 隔离节点发不出、也收不到
+                    continue;  // 隔离节点发不出、也收不到
                 }
                 if (to >= 0 && to < size()) {
                     (void)peers_[static_cast<std::size_t>(to)]->step_message(m);
@@ -193,24 +194,24 @@ public:
 
 private:
     [[nodiscard]] static tinykv::result<std::optional<std::string>> direct(Peer& p,
-                                                                          const std::string& key) {
+                                                                           const std::string& key) {
         auto got = p.read_directly(tinykv::Cf::Default, key);
         if (!got) {
-            return std::unexpected(got.error());
+            return tinykv::unexpected(got.error());
         }
         return got->value;
     }
 
     [[nodiscard]] tinykv::result<std::optional<std::string>> read_via_log(Peer& p,
-                                                                         const std::string& key,
-                                                                         std::uint64_t client,
-                                                                         std::uint64_t seq) {
+                                                                          const std::string& key,
+                                                                          std::uint64_t client,
+                                                                          std::uint64_t seq) {
         tinykv::cmdpb::RaftCmdRequest req;
         req.mutable_header()->set_client_id(client);
         req.mutable_header()->set_sequence_id(seq);
         req.add_requests()->mutable_get()->set_key(key);
         if (!p.propose(req).has_value()) {
-            return std::unexpected(
+            return tinykv::unexpected(
                 tinykv::NotLeader{.region_id = tinykv::RegionId{0}, .leader_hint = std::nullopt});
         }
         for (int i = 0; i < 200; ++i) {
@@ -224,13 +225,13 @@ private:
             }
             return std::optional<std::string>{reply->cmd_responses(0).get().value()};
         }
-        return std::unexpected(tinykv::IoFailed{.path = "peer_cluster", .reason = "log 读超时"});
+        return tinykv::unexpected(tinykv::IoFailed{.path = "peer_cluster", .reason = "log 读超时"});
     }
 
-    [[nodiscard]] tinykv::result<std::optional<std::string>> read_index_mode(Peer& p,
-                                                                            const std::string& key) {
+    [[nodiscard]] tinykv::result<std::optional<std::string>> read_index_mode(
+        Peer& p, const std::string& key) {
         if (!p.begin_read_index().has_value()) {
-            return std::unexpected(
+            return tinykv::unexpected(
                 tinykv::NotLeader{.region_id = tinykv::RegionId{0}, .leader_hint = std::nullopt});
         }
         std::uint64_t confirmed = 0;
@@ -243,7 +244,7 @@ private:
             }
         }
         if (!have) {
-            return std::unexpected(
+            return tinykv::unexpected(
                 tinykv::IoFailed{.path = "peer_cluster", .reason = "ReadIndex 未确认"});
         }
         for (int i = 0; i < 200 && !p.applied_at_least(confirmed); ++i) {

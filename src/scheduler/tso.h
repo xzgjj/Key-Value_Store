@@ -38,7 +38,7 @@ public:
 
     [[nodiscard]] result<std::vector<Ts>> get_timestamps(std::size_t n) override {
         if (n == 0) {
-            return std::unexpected(InvalidArgument{"批量授时 n 必须 > 0"});
+            return tinykv::unexpected(InvalidArgument{"批量授时 n 必须 > 0"});
         }
         std::lock_guard lock(mu_);
         std::vector<Ts> out;
@@ -65,7 +65,7 @@ public:
     }
 
 private:
-    static constexpr int kLogicalBits = 18;   // 低 18 位逻辑计数（Percolator：每毫秒 26 万个）
+    static constexpr int kLogicalBits = 18;  // 低 18 位逻辑计数（Percolator：每毫秒 26 万个）
 
     [[nodiscard]] std::uint64_t next_locked() {
         std::uint64_t base = counter_ + 1;

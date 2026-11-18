@@ -10,34 +10,35 @@
 
 #pragma once
 
-#include <cstdint>
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <map>
-#include <optional>
-#include <utility>
-#include <vector>
 #include <memory>
-#include <span>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include <raft_cmdpb.pb.h>
 
+#include <kv.pb.h>
+#include "common/compat.h"
 #include "common/error.h"
 #include "raft/raft.h"
-#include <kv.pb.h>
 #include "raftstore/region.h"
+#include "storage/storage.h"
 #include "txn/latch.h"
 #include "txn/mvcc.h"
-#include "storage/storage.h"
 
 namespace tinykv::raftstore {
 
 class Peer {
 public:
     // cfg 的 voters 决定集群规模；storage 同时承载 raft log 与业务数据（M2 简化）
-    [[nodiscard]] static result<std::unique_ptr<Peer>> open(const raft::Config& cfg, Storage& storage);
+    [[nodiscard]] static result<std::unique_ptr<Peer>> open(const raft::Config& cfg,
+                                                            Storage& storage);
 
     // 提交一条 RaftCmdRequest；重复的 (client_id, seq) 直接返回 false 而不产生新提案。
     // 为什么把"是否真的入队"返回给调用方：去重命中意味着该请求早就 apply 过了，
@@ -105,7 +106,7 @@ public:
     // apply 时把结果按 (client_id, seq) 存进回执表，调用方泵若干轮后取走。
     // 不提供阻塞版本：Peer 不持有传输层，阻塞就得在状态机里起线程。
     [[nodiscard]] std::optional<cmdpb::RaftCmdResponse> take_reply(std::uint64_t client_id,
-                                                                  std::uint64_t seq);
+                                                                   std::uint64_t seq);
     // 组合根轮询 applied 位点、不取回执时必须显式丢弃，否则常驻进程的回执表无界增长
     void drop_reply(std::uint64_t client_id, std::uint64_t seq) {
         replies_.erase(std::pair{client_id, seq});
@@ -152,7 +153,7 @@ public:
             return std::nullopt;
         }
         auto out = std::move(it->second);
-        txn_errors_.erase(it);   // 常驻进程：错误按位点取走即回收，不得只增不删
+        txn_errors_.erase(it);  // 常驻进程：错误按位点取走即回收，不得只增不删
         return out;
     }
     // 只读事务操作直接走 leader 本地 MVCC（M2 leader 本地读同款偏差，记 notes-m5）
@@ -195,8 +196,8 @@ private:
         std::uint64_t term{0};
         std::shared_ptr<const std::string> blob;
         std::uint32_t total{0};
-        std::uint32_t next{0};   // 下一个待发 chunk_seq
-        std::uint32_t ack{0};    // 已确认的最大 chunk_seq（含）
+        std::uint32_t next{0};  // 下一个待发 chunk_seq
+        std::uint32_t ack{0};   // 已确认的最大 chunk_seq（含）
     };
     // 接收状态：按 (from) 缓存块，逐块 CRC；收齐后重组安装
     struct SnapshotRecv {
@@ -219,18 +220,18 @@ private:
     // 收齐后：按 seq 重组 blob → 解析 SnapshotData → 整表安装 → 重置日志指针
     [[nodiscard]] result<void> finish_snapshot_recv(PeerId from, SnapshotRecv& recv);
 
-    std::map<std::uint64_t, SnapshotSend> snapshot_sends_;   // peer_id → 发送游标
-    std::map<std::uint64_t, SnapshotRecv> snapshot_recvs_;   // from peer_id → 接收缓存
-    std::size_t snapshot_chunk_bytes_{4U * 1024U * 1024U};   // 默认 4MB（SPEC-3 D3-3）
+    std::map<std::uint64_t, SnapshotSend> snapshot_sends_;  // peer_id → 发送游标
+    std::map<std::uint64_t, SnapshotRecv> snapshot_recvs_;  // from peer_id → 接收缓存
+    std::size_t snapshot_chunk_bytes_{4U * 1024U * 1024U};  // 默认 4MB（SPEC-3 D3-3）
 
     std::unique_ptr<raft::RaftLog> log_;
     std::unique_ptr<raft::Raft> raft_;
     Storage& storage_;
-    std::map<std::uint64_t, std::uint64_t> last_seq_;   // client_id → 已 apply 的最大 seq
+    std::map<std::uint64_t, std::uint64_t> last_seq_;  // client_id → 已 apply 的最大 seq
     std::vector<raftpb::Message> outbox_;
     std::vector<std::uint64_t> confirmed_reads_;
     std::map<std::pair<std::uint64_t, std::uint64_t>, cmdpb::RaftCmdResponse> replies_;
-    std::uint64_t applied_{0};   // 已 apply 到的日志位点
+    std::uint64_t applied_{0};  // 已 apply 到的日志位点
     std::uint64_t read_index_calls_{0};
     std::uint64_t apply_errors_{0};
     std::string last_apply_error_;
@@ -244,8 +245,8 @@ private:
     std::optional<Region> my_region_;
     StoreMeta* store_meta_{nullptr};
     SplitObserver split_observer_;
-    txn::LatchManager txn_latches_;                                   // M5 ⑤：key 粒度闩（红线4）
-    std::map<std::uint64_t, KvError> txn_errors_;                  // apply 位点 → 错误描述
+    txn::LatchManager txn_latches_;                // M5 ⑤：key 粒度闩（红线4）
+    std::map<std::uint64_t, KvError> txn_errors_;  // apply 位点 → 错误描述
 };
 
 }  // namespace tinykv::raftstore

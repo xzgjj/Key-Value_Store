@@ -11,11 +11,11 @@
 #include <utility>
 #include <vector>
 
-#include "common/error.h"
+#include <cstddef>
 #include "cli/http_client.h"
+#include "common/error.h"
 #include "common/error_format.h"
 #include "config/config.h"
-#include <cstddef>
 #include "server/raw.h"
 #include "storage/engine.h"
 #include "storage/storage.h"
@@ -31,39 +31,38 @@ constexpr const char* kDefaultConfig = "demo.yaml";
 // 已解析的全局参数
 struct Globals {
     std::string config{kDefaultConfig};
-    std::string endpoint;     // 非空 = 集群模式
-    std::string read_mode{"read_index"};   // read_index / lease / log
+    std::string endpoint;                 // 非空 = 集群模式
+    std::string read_mode{"read_index"};  // read_index / lease / log
     Cf cf{Cf::Default};
     std::size_t limit{10};
 };
 
 std::string_view usage() {
-    return
-        "用法: tinykv-cli [--config <path>] <命令> [参数]\n"
-        "\n"
-        "命令:\n"
-        "  put <key> <value>        写入（同 key 覆盖）\n"
-        "  get <key>                读取；key 不存在时退出码 3\n"
-        "  del <key>                删除（删除不存在的 key 视为成功）\n"
-        "  scan [start]             按升序扫描，默认 limit 10\n"
-        "  status                   打印配置与引擎统计\n"
-        "  txn <子命令>             事务（M5；详见 txn --help）\n"
-        "\n"
-        "集群观测命令（需 --endpoint，docs/cli.md §10）：\n"
-        "  regions                        列出该 store 全部 region\n"
-        "  region <id>                    单个 region 详情\n"
-        "  region peers <id>              副本分布\n"
-        "  region split <id> <key>        手动触发 split（调试）\n"
-        "  scheduler status               调度器状态\n"
-        "  trace region <id> on|off       region 级 trace 开关\n"
-        "\n"
-        "选项:\n"
-        "  --config <path>          配置文件路径（默认 demo.yaml）\n"
-        "  --endpoint <host:port>   集群模式：status/get/put/del（scan 暂未开放）\n"
-        "  --read-mode <m>          read_index（默认）/ lease / log，仅集群 get 生效\n"
-        "  --cf <default|write|lock> 列族（默认 default）\n"
-        "  --limit <n>              scan 返回条数上限\n"
-        "  --help                   显示本帮助\n";
+    return "用法: tinykv-cli [--config <path>] <命令> [参数]\n"
+           "\n"
+           "命令:\n"
+           "  put <key> <value>        写入（同 key 覆盖）\n"
+           "  get <key>                读取；key 不存在时退出码 3\n"
+           "  del <key>                删除（删除不存在的 key 视为成功）\n"
+           "  scan [start]             按升序扫描，默认 limit 10\n"
+           "  status                   打印配置与引擎统计\n"
+           "  txn <子命令>             事务（M5；详见 txn --help）\n"
+           "\n"
+           "集群观测命令（需 --endpoint，docs/cli.md §10）：\n"
+           "  regions                        列出该 store 全部 region\n"
+           "  region <id>                    单个 region 详情\n"
+           "  region peers <id>              副本分布\n"
+           "  region split <id> <key>        手动触发 split（调试）\n"
+           "  scheduler status               调度器状态\n"
+           "  trace region <id> on|off       region 级 trace 开关\n"
+           "\n"
+           "选项:\n"
+           "  --config <path>          配置文件路径（默认 demo.yaml）\n"
+           "  --endpoint <host:port>   集群模式：status/get/put/del（scan 暂未开放）\n"
+           "  --read-mode <m>          read_index（默认）/ lease / log，仅集群 get 生效\n"
+           "  --cf <default|write|lock> 列族（默认 default）\n"
+           "  --limit <n>              scan 返回条数上限\n"
+           "  --help                   显示本帮助\n";
 }
 
 std::optional<Cf> parse_cf(std::string_view name) {
@@ -88,14 +87,14 @@ result<void> apply_global(Globals& g, const std::string& name, const std::string
     } else if (name == "--cf") {
         const auto cf = parse_cf(value);
         if (!cf) {
-            return std::unexpected(InvalidArgument{"未知列族 '" + value + "'"});
+            return tinykv::unexpected(InvalidArgument{"未知列族 '" + value + "'"});
         }
         g.cf = *cf;
     } else if (name == "--limit") {
         g.limit = static_cast<std::size_t>(std::stoul(value));
     } else if (name == "--read-mode") {
         if (value != "read_index" && value != "lease" && value != "log") {
-            return std::unexpected(InvalidArgument{"--read-mode 只能是 read_index/lease/log"});
+            return tinykv::unexpected(InvalidArgument{"--read-mode 只能是 read_index/lease/log"});
         }
         g.read_mode = value;
     }
@@ -110,10 +109,10 @@ result<std::vector<std::string>> split_globals(std::vector<std::string> args, Gl
         if (a == "--cf" || a == "--limit" || a == "--config" || a == "--endpoint" ||
             a == "--read-mode") {
             if (i + 1 >= args.size()) {
-                return std::unexpected(InvalidArgument{"选项 " + a + " 缺少取值"});
+                return tinykv::unexpected(InvalidArgument{"选项 " + a + " 缺少取值"});
             }
             if (auto r = apply_global(g, a, args[++i]); !r) {
-                return std::unexpected(r.error());
+                return tinykv::unexpected(r.error());
             }
             continue;
         }
@@ -131,8 +130,8 @@ EngineOptions to_options(const Config& cfg) {
     return opt;
 }
 
-int cmd_put(RawServer& raw, const Globals& g, const std::vector<std::string>& pos, std::ostream& out,
-            std::ostream& err) {
+int cmd_put(RawServer& raw, const Globals& g, const std::vector<std::string>& pos,
+            std::ostream& out, std::ostream& err) {
     if (pos.size() != 3) {
         err << "用法: put <key> <value>\n";
         return kExitUsage;
@@ -146,8 +145,8 @@ int cmd_put(RawServer& raw, const Globals& g, const std::vector<std::string>& po
     return kExitOk;
 }
 
-int cmd_get(RawServer& raw, const Globals& g, const std::vector<std::string>& pos, std::ostream& out,
-            std::ostream& err) {
+int cmd_get(RawServer& raw, const Globals& g, const std::vector<std::string>& pos,
+            std::ostream& out, std::ostream& err) {
     if (pos.size() != 2) {
         err << "用法: get <key>\n";
         return kExitUsage;
@@ -165,8 +164,8 @@ int cmd_get(RawServer& raw, const Globals& g, const std::vector<std::string>& po
     return kExitOk;
 }
 
-int cmd_del(RawServer& raw, const Globals& g, const std::vector<std::string>& pos, std::ostream& out,
-            std::ostream& err) {
+int cmd_del(RawServer& raw, const Globals& g, const std::vector<std::string>& pos,
+            std::ostream& out, std::ostream& err) {
     if (pos.size() != 2) {
         err << "用法: del <key>\n";
         return kExitUsage;
@@ -180,8 +179,8 @@ int cmd_del(RawServer& raw, const Globals& g, const std::vector<std::string>& po
     return kExitOk;
 }
 
-int cmd_scan(RawServer& raw, const Globals& g, const std::vector<std::string>& pos, std::ostream& out,
-             std::ostream& err) {
+int cmd_scan(RawServer& raw, const Globals& g, const std::vector<std::string>& pos,
+             std::ostream& out, std::ostream& err) {
     if (pos.size() > 2) {
         err << "用法: scan [start]\n";
         return kExitUsage;
@@ -210,7 +209,6 @@ int cmd_status(const Config& cfg, const Globals& g, std::ostream& out) {
 
 }  // namespace
 
-
 // 集群模式：目前只开放只读 status；写需提案回调（M3 与 ReadIndex 同链路），明确拒绝而非假成功
 // 集群写：制表符文本协议 → POST /kv；写入必须经共识，回执由服务端 apply 后给出
 int cmd_cluster_write(const std::string& cmd, const std::vector<std::string>& pos,
@@ -221,8 +219,7 @@ int cmd_cluster_write(const std::string& cmd, const std::vector<std::string>& po
         err << "用法: " << cmd << (cmd == "put" ? " <key> <value>\n" : " <key>\n");
         return kExitUsage;
     }
-    const std::string body =
-        cmd == "put" ? "put\t" + pos[1] + "\t" + pos[2] : "del\t" + pos[1];
+    const std::string body = cmd == "put" ? "put\t" + pos[1] + "\t" + pos[2] : "del\t" + pos[1];
     auto resp = http_post(host, port, "/kv", body);
     if (!resp) {
         err << "写入失败：" << describe(resp.error()) << "\n";
@@ -338,8 +335,8 @@ int cmd_region(const Globals& g, const std::vector<std::string>& pos, std::ostre
             err << "用法: region split <id> <key>\n";
             return kExitUsage;
         }
-        return cmd_cluster_admin(g, "/region/split",
-                                 "split\t" + std::to_string(id) + "\t" + pos[3], out, err);
+        return cmd_cluster_admin(g, "/region/split", "split\t" + std::to_string(id) + "\t" + pos[3],
+                                 out, err);
     }
     std::uint64_t id = 0;
     if (pos.size() != 2 || !parse_region_id(pos[1], id)) {
@@ -370,27 +367,25 @@ int cmd_trace_region(const Globals& g, const std::vector<std::string>& pos, std:
         err << "用法: trace region <id> on|off（<id> 须为十进制正整数）\n";
         return kExitUsage;
     }
-    return cmd_cluster_admin(g, "/trace", "trace\t" + std::to_string(id) + "\t" + pos[3],
-                             out, err);
+    return cmd_cluster_admin(g, "/trace", "trace\t" + std::to_string(id) + "\t" + pos[3], out, err);
 }
 
 // ---- M5 ⑥：事务命令（docs/cli.md §11；UX-02(txn) 验收口径 = --help + 示例） ----
 
 std::string_view txn_usage() {
-    return
-        "用法: tinykv-cli --endpoint <host:port> txn <子命令>\n"
-        "\n"
-        "子命令:\n"
-        "  begin                       开启会话（服务端持事务状态），返回 session=<id>\n"
-        "  set <session> <key> <value> 写缓冲\n"
-        "  del <session> <key>         删除缓冲\n"
-        "  get <session> <key>         读（读己之写；他者未过期锁 → BLOCKED）\n"
-        "  commit <session>            prewrite → commit（冲突立即 abort，退出码 2）\n"
-        "  rollback <session>          显式回滚\n"
-        "  gc [safe_point]             旧版本清理（FUNC-17，走共识）\n"
-        "  demo                        打印完整示例脚本\n"
-        "\n"
-        "说明: 会话状态在服务端（M6 会话作用域），故需要 --endpoint；语义见 docs/cli.md §11。\n";
+    return "用法: tinykv-cli --endpoint <host:port> txn <子命令>\n"
+           "\n"
+           "子命令:\n"
+           "  begin                       开启会话（服务端持事务状态），返回 session=<id>\n"
+           "  set <session> <key> <value> 写缓冲\n"
+           "  del <session> <key>         删除缓冲\n"
+           "  get <session> <key>         读（读己之写；他者未过期锁 → BLOCKED）\n"
+           "  commit <session>            prewrite → commit（冲突立即 abort，退出码 2）\n"
+           "  rollback <session>          显式回滚\n"
+           "  gc [safe_point]             旧版本清理（FUNC-17，走共识）\n"
+           "  demo                        打印完整示例脚本\n"
+           "\n"
+           "说明: 会话状态在服务端（M6 会话作用域），故需要 --endpoint；语义见 docs/cli.md §11。\n";
 }
 
 // txn 子命令族的传输助手（拆函数以满足函数行数门禁）
@@ -469,8 +464,8 @@ int cmd_txn(const Globals& g, const std::vector<std::string>& pos, std::ostream&
             err << "用法: txn " << sub << " <session>\n";
             return kExitUsage;
         }
-        return txn_call(g, sub == "commit" ? "/txn/commit" : "/txn/rollback",
-                        sub + "\t" + pos[2], out, err);
+        return txn_call(g, sub == "commit" ? "/txn/commit" : "/txn/rollback", sub + "\t" + pos[2],
+                        out, err);
     }
     if (sub == "gc") {
         return txn_call(g, "/txn/gc", pos.size() == 3 ? "gc\t" + pos[2] : "gc", out, err);
@@ -554,7 +549,7 @@ int cmd_cluster(const Globals& g, const std::string& cmd, const std::vector<std:
     return cmd_cluster_read(g, cmd, pos, out, err);
 }
 
-int run_cli(std::span<const std::string> args, std::ostream& out, std::ostream& err) {
+int run_cli(tinykv::span<const std::string> args, std::ostream& out, std::ostream& err) {
     std::vector<std::string> argv(args.begin(), args.end());
     Globals g;
     auto positional = split_globals(std::move(argv), g);
@@ -574,7 +569,7 @@ int run_cli(std::span<const std::string> args, std::ostream& out, std::ostream& 
         return cmd_txn(g, *positional, out, err);
     }
     if (!g.endpoint.empty()) {
-        return cmd_cluster(g, cmd, *positional, out, err);   // 集群模式不需要本地配置
+        return cmd_cluster(g, cmd, *positional, out, err);  // 集群模式不需要本地配置
     }
 
     auto cfg = load_config(g.config);

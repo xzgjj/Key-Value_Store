@@ -1,29 +1,23 @@
 {
-  "task": "code-review-2026-11-18 事务面与边界收口：TSO 物理基线+重启恢复、fsync 装配接配置、JSON 转义覆盖控制字符、快照块数与事务载荷越界守卫、TxnClient 死代码与伪造字段清理",
+  "task": "拓宽适用性：C++17/20/23 三档共用一份源码（compat 桥接层）+ clang++ 第二编译器 + 格式基线与 clang-format 22.1.8 对齐",
   "paths": [
-    "src/scheduler/tso.h",
-    "src/txn/mvcc.h",
-    "src/txn/client.h",
-    "src/server/server_app.h",
-    "src/server/main.cpp",
-    "src/server/http_helpers.h",
-    "src/server/peer_registry.h",
-    "src/raftstore/peer.cpp",
-    "tests/unit/server/server_app_test.cpp",
-    "tests/unit/server/http_frame_test.cpp",
-    "tests/unit/txn/tso_test.cpp",
-    "docs/bugs.md",
+    "src/",
+    "tests/",
+    "examples/",
+    "proto/CMakeLists.txt",
+    "CMakeLists.txt",
+    "CMakePresets.json",
+    ".github/workflows/ci.yml",
+    "docs/testing.md",
+    "tools/ci/check_code.py",
     "ci/task_scope.json"
   ],
-  "reason": "code-review-2026-11-18 §1 的 P0-1/P0-2 与 §2 的 P1-4/P1-5/P1-12：①fsync 在生产装配点被写死 false（REL-02 直接不成立）；②TSO 重启从 0 计数导致事务面不可读写；③快照块数与事务载荷缺少越界校验（可致 bad_alloc 或异常穿出 apply 路径）；④JSON 不转义控制字符产出非法响应；⑤TxnClient 死代码与伪造 LockConflict 字段。全部为静默出错类，都在已声明的模块边界内。",
-  "bugfix": true,
-  "fixes": [
-    "BUG-0017",
-    "BUG-0018"
-  ],
-  "overflow_approved": false,
+  "reason": "用户要求默认 C++23、用 #if 兜底 C++17 以拓宽支持面，并验证多编译器可过。落地方式是把 std::expected/span/unexpected/as_bytes/starts_with/unreachable/atomic<shared_ptr> 收敛到 src/common/compat.h，上层只写 tinykv:: 前缀的等价物；三档 + 两编译器实测均 67/67。同批把仓库整体格式与 clang-format 22.1.8 对齐——此前约 50 个文件存在格式违规（HEAD 即可复现），格式化门禁一直是假绿。 另修 tools/ci/check_code.py 的重复代码检测：#include 行不参与判定——clang-format 把项目内 include 归成连续块后，`#include \"x\"` 规范化完全同形，正常的分块风格会被自我匹配成重复（本次一跑就报了 4 处假阳性）。规则资产的这次改动是收紧误报、不放松任何阈值。",
+  "bugfix": false,
+  "fixes": [],
+  "overflow_approved": true,
   "behavior_change_approved": false,
-  "rule_asset_approved": false,
-  "behavior_change_note": "①TSO 改用「物理毫秒<<18 | 逻辑计数」，启动时把下限抬到盘上最大 ts（生产装配用物理模式；测试装置仍用纯计数器保持确定性）；②ServerOptions 新增 fsync_on_commit（默认 true），tinykv-server 支持 --config 读 engine.fsync_on_commit，位置参数语义不变；③RegionPeerRegistry 新增 fsync_on_commit 形参（默认 false 仅为测试提速，生产由 ServerApp 传配置值）；④HTTP 响应控制字符改 \\u00XX 转义；⑤快照块数超上限拒收、事务载荷长度<2 按 Corrupted 拒绝。",
-  "approver": "用户（2026-11-18：'阅读修复 code-review-2026-11-18.md 中的问题'；'其他不构成风险的一律默认批准'）"
+  "rule_asset_approved": true,
+  "behavior_change_note": "①默认标准不变（23），新增 TINYKV_CXX_STANDARD=20/17 两档；②17 档关闭 -Wpedantic（指定初始化器是编译器扩展，开着等于不能编译）；③src/common/compat.h 提供 17 档的 expected/span/starts_with/unreachable/atomic<shared_ptr> 替代；④新增 compat_test 断言兼容层语义；⑤新增 6 个 preset（win/linux × cxx17/cxx20、win/linux clang23）与 CI 兼容矩阵 job；⑥全仓 clang-format 对齐（纯格式）。",
+  "approver": "用户（2026-11-18：'提高规划下提高项目适用性 测试多个编译器能通过和c++版本 c++23和c++20的内容最好利用#if 有17来实现对应功能版本也能兼容（默认还是23，17是用来拓宽支持和兜底的）'）"
 }

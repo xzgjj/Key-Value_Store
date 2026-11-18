@@ -7,12 +7,12 @@
 #pragma once
 
 #include <ostream>
-#include <span>
 #include <string>
+#include "common/compat.h"
 
 namespace tinykv::cli {
 
 // 执行一条 CLI 调用；out/err 注入以便测试捕获，缺省由 main 传 std::cout/std::cerr
-int run_cli(std::span<const std::string> args, std::ostream& out, std::ostream& err);
+int run_cli(tinykv::span<const std::string> args, std::ostream& out, std::ostream& err);
 
 }  // namespace tinykv::cli

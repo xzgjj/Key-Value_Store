@@ -20,17 +20,17 @@
 #include <map>
 #include <memory>
 #include <optional>
-#include <span>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include <type_traits>
+#include "common/compat.h"
 #include "common/encode.h"
 #include "common/error.h"
 #include "common/error_format.h"
 #include "common/ids.h"
 #include "raftstore/peer.h"
-#include <type_traits>
 #include "raftstore/region.h"
 #include "storage/engine.h"
 #include "storage/storage.h"
@@ -45,19 +45,21 @@ struct PeerSlot {
 
 class RegionPeerRegistry {
 public:
-    using ObserverFactory = std::function<void(raftstore::Peer&)>;   // 宿主给每个新 peer 挂 split 钩子
+    using ObserverFactory =
+        std::function<void(raftstore::Peer&)>;  // 宿主给每个新 peer 挂 split 钩子
 
     // fsync_on_commit 默认 false：本表主要由测试装置直接构造（每次写都 fsync 会让用例慢一个量级）。
     // 生产装配点（ServerApp）显式传入配置值，默认 true——code-review P0-1 的收口就在这里：
     // 掉电丢已确认写是数据丢失，不能由"测试快一点"的需求决定。
     explicit RegionPeerRegistry(std::filesystem::path data_dir, raftstore::StoreMeta& meta,
-                                std::uint64_t election_timeout = 8,
-                                std::uint64_t heartbeat = 3,
-                                PeerId replica_id = PeerId{1},
-                                std::vector<PeerId> voters = {},
+                                std::uint64_t election_timeout = 8, std::uint64_t heartbeat = 3,
+                                PeerId replica_id = PeerId{1}, std::vector<PeerId> voters = {},
                                 bool fsync_on_commit = false)
-        : data_dir_(std::move(data_dir)), meta_(meta), election_(election_timeout),
-          heartbeat_(heartbeat), replica_id_(replica_id),
+        : data_dir_(std::move(data_dir)),
+          meta_(meta),
+          election_(election_timeout),
+          heartbeat_(heartbeat),
+          replica_id_(replica_id),
           voters_(voters.empty() ? std::vector<PeerId>{replica_id} : std::move(voters)),
           fsync_on_commit_(fsync_on_commit) {}
 
@@ -67,16 +69,15 @@ public:
     [[nodiscard]] result<void> bootstrap(const raftstore::Region& region) {
         auto eng = Engine::open({.dir = data_dir_, .fsync_on_commit = fsync_on_commit_});
         if (!eng.has_value()) {
-            return std::unexpected(eng.error());
+            return tinykv::unexpected(eng.error());
         }
-        auto peer = raftstore::Peer::open(raft::Config{
-                                              .id = replica_id_,
-                                              .voters = voters_,
-                                              .election_timeout = election_,
-                                              .heartbeat_interval = heartbeat_},
+        auto peer = raftstore::Peer::open(raft::Config{.id = replica_id_,
+                                                       .voters = voters_,
+                                                       .election_timeout = election_,
+                                                       .heartbeat_interval = heartbeat_},
                                           **eng);
         if (!peer.has_value()) {
-            return std::unexpected(peer.error());
+            return tinykv::unexpected(peer.error());
         }
         (*peer)->set_region(region);
         (*peer)->set_store_meta(&meta_);
@@ -137,28 +138,27 @@ public:
     [[nodiscard]] result<void> on_split(const raftstore::Region& left,
                                         const raftstore::Region& right) {
         if (slots_.find(right.id) != slots_.end()) {
-            return {};   // 幂等：已建过
+            return {};  // 幂等：已建过
         }
         auto* old_slot = find_slot(left.id);
         if (old_slot == nullptr) {
-            return std::unexpected(InvalidArgument{"split 宿主 slot 不存在"});
+            return tinykv::unexpected(InvalidArgument{"split 宿主 slot 不存在"});
         }
         auto eng = Engine::open({.dir = data_dir_ / "regions" / std::to_string(right.id.value),
                                  .fsync_on_commit = fsync_on_commit_});
         if (!eng.has_value()) {
-            return std::unexpected(eng.error());
+            return tinykv::unexpected(eng.error());
         }
         if (auto r = migrate_range(*old_slot->engine, **eng, right); !r.has_value()) {
-            return std::unexpected(r.error());
+            return tinykv::unexpected(r.error());
         }
-        auto peer = raftstore::Peer::open(raft::Config{
-                                              .id = PeerId{right.id.value},
-                                              .voters = {PeerId{right.id.value}},
-                                              .election_timeout = election_,
-                                              .heartbeat_interval = heartbeat_},
+        auto peer = raftstore::Peer::open(raft::Config{.id = PeerId{right.id.value},
+                                                       .voters = {PeerId{right.id.value}},
+                                                       .election_timeout = election_,
+                                                       .heartbeat_interval = heartbeat_},
                                           **eng);
         if (!peer.has_value()) {
-            return std::unexpected(peer.error());
+            return tinykv::unexpected(peer.error());
         }
         (*peer)->set_region(right);
         (*peer)->set_store_meta(&meta_);
@@ -183,7 +183,7 @@ public:
         }
         slots_.clear();
         if (!first_err.empty()) {
-            return std::unexpected(IoFailed{.path = "peer-registry", .reason = first_err});
+            return tinykv::unexpected(IoFailed{.path = "peer-registry", .reason = first_err});
         }
         return {};
     }
@@ -236,17 +236,17 @@ private:
         std::vector<Modify> removes;
         for (const Cf cf : {Cf::Default, Cf::Write, Cf::Lock}) {
             if (auto r = scan_cf(src, cf, region, copies, removes); !r.has_value()) {
-                return std::unexpected(r.error());
+                return tinykv::unexpected(r.error());
             }
         }
         if (!copies.empty()) {
             if (auto r = dst.write(copies); !r.has_value()) {
-                return std::unexpected(r.error());
+                return tinykv::unexpected(r.error());
             }
         }
         if (!removes.empty()) {
             if (auto r = src.write(removes); !r.has_value()) {
-                return std::unexpected(r.error());
+                return tinykv::unexpected(r.error());
             }
         }
         return {};
@@ -257,11 +257,11 @@ private:
                                        std::vector<Modify>& removes) const {
         auto reader = src.create_reader();
         if (!reader.has_value()) {
-            return std::unexpected(reader.error());
+            return tinykv::unexpected(reader.error());
         }
-        auto it = (*reader)->scan(cf, std::span<const std::byte>{}, kScanLimit);
+        auto it = (*reader)->scan(cf, tinykv::span<const std::byte>{}, kScanLimit);
         if (!it.has_value()) {
-            return std::unexpected(it.error());
+            return tinykv::unexpected(it.error());
         }
         for (; (*it)->valid(); (*it)->next()) {
             const std::string stored((*it)->key());
@@ -271,18 +271,18 @@ private:
             // BUG-0004: raw 键与 MVCC 键在 Default CF 共存，必须先按保留前缀分派，
             // 再判 user key 归属；否则剥掉 8B ts 会把 raw 长键误判到左 region 而静默丢失。
             std::string user;
-            if (stored.starts_with(kRawKeyPrefix)) {
+            if (tinykv::starts_with(stored, kRawKeyPrefix)) {
                 user = stored.substr(kRawKeyPrefix.size());
             } else if (stored[0] != '\0') {
                 user = user_key_of(cf, stored);
             } else {
-                continue;   // raft log 内部键（\0re / \0lm）不迁移
+                continue;  // raft log 内部键（\0re / \0lm）不迁移
             }
             if (!region.contains(user)) {
                 continue;
             }
-            copies.push_back(Modify{Put{.cf = cf, .key = stored,
-                                         .value = std::string((*it)->value())}});
+            copies.push_back(
+                Modify{Put{.cf = cf, .key = stored, .value = std::string((*it)->value())}});
             removes.push_back(Modify{Delete{.cf = cf, .key = stored}});
         }
         return {};
@@ -292,10 +292,10 @@ private:
         if (cf == Cf::Lock || stored.size() < 8) {
             return stored;
         }
-        return stored.substr(0, stored.size() - 8);   // Default/Write：末尾 8B 大端 ts
+        return stored.substr(0, stored.size() - 8);  // Default/Write：末尾 8B 大端 ts
     }
 
-    static constexpr std::size_t kScanLimit = 1U << 20U;   // Admin 低频，全量有界
+    static constexpr std::size_t kScanLimit = 1U << 20U;  // Admin 低频，全量有界
 
     std::filesystem::path data_dir_;
     raftstore::StoreMeta& meta_;

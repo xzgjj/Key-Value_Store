@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include "common/compat.h"
 #include "common/encode.h"
 #include "common/error.h"
 #include "common/ids.h"
@@ -27,7 +28,6 @@
 #include <map>
 #include <optional>
 #include <set>
-#include <span>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -38,7 +38,10 @@ namespace tinykv::txn {
 // 客户端侧变更（与 kvpb::Mutation 对应；server 侧 apply 用同一结构）
 struct Mutation {
     // Op 显式取值对齐 kvpb::Mutation.Op（PUT=0/DELETE=1）
-    enum class Op : std::uint8_t { kPut = 0, kDel = 1 };   // 不用 PUT/DELETE：Windows SDK 宏污染（winnt.h 定义 DELETE）
+    enum class Op : std::uint8_t {
+        kPut = 0,
+        kDel = 1
+    };  // 不用 PUT/DELETE：Windows SDK 宏污染（winnt.h 定义 DELETE）
     Op op{Op::kPut};
     std::string key;
     std::string value;
@@ -47,13 +50,13 @@ struct Mutation {
 // CheckTxnStatus 结果（SPEC-4：committed(commit_ts) | rolled_back | lock_ttl_remaining(ms)）
 struct TxnStatus {
     bool committed{false};
-    Ts commit_ts{0};                        // committed 时 > 0
+    Ts commit_ts{0};                         // committed 时 > 0
     std::uint64_t lock_ttl_remaining_ms{0};  // 未过期时 > 0；过期/已终态 = 0
     bool rolled_back{false};
 };
 
-// Lock CF 值布局：[flag:1B][start_ts:8B BE][ttl_ms:4B BE][created_ms:8B BE][primary_len:4B BE][primary]
-// flag: 0x01 = 活跃锁；0x02 = rollback 墓碑（决议依据之一，prewrite 遇到可覆盖）
+// Lock CF 值布局：[flag:1B][start_ts:8B BE][ttl_ms:4B BE][created_ms:8B BE][primary_len:4B
+// BE][primary] flag: 0x01 = 活跃锁；0x02 = rollback 墓碑（决议依据之一，prewrite 遇到可覆盖）
 inline constexpr std::uint8_t kLockFlagActive = 0x01;
 inline constexpr std::uint8_t kLockFlagRollback = 0x02;
 
@@ -92,7 +95,7 @@ struct LockValue {
 
 [[nodiscard]] inline std::optional<LockValue> decode_lock_value(std::string_view raw) {
     if (raw.size() < 25) {
-        return std::nullopt;   // 损坏（长度下界：1+8+4+8+4）
+        return std::nullopt;  // 损坏（长度下界：1+8+4+8+4）
     }
     LockValue lv;
     auto read_be = [&raw](std::size_t off, int bytes) {
@@ -120,7 +123,9 @@ struct LockValue {
 [[nodiscard]] inline std::string data_key(std::string_view key, Ts start_ts) {
     return std::string(key) + be64_str(start_ts.value);
 }
-[[nodiscard]] inline std::string lock_key(std::string_view key) { return std::string(key); }
+[[nodiscard]] inline std::string lock_key(std::string_view key) {
+    return std::string(key);
+}
 [[nodiscard]] inline std::string write_key(std::string_view key, Ts commit_ts) {
     return std::string(key) + be64_str(commit_ts.value);
 }
@@ -135,65 +140,64 @@ public:
         // BUG-0015：IO 失败必须与"没有锁"分开——错误当成空值会让读路径返回幻读结果
         auto lock = load_lock(key);
         if (!lock.has_value()) {
-            return std::unexpected(lock.error());
+            return tinykv::unexpected(lock.error());
         }
         if (lock->has_value() && (*lock)->flag == kLockFlagActive) {
             if ((*lock)->start_ts.value == start_ts.value) {
                 return read_data(key, start_ts);
             }
-            return std::unexpected(LockConflict{.key = std::string(key),
-                                                .primary = (*lock)->primary,
-                                                .lock_start_ts = (*lock)->start_ts.value});
+            return tinykv::unexpected(LockConflict{.key = std::string(key),
+                                                   .primary = (*lock)->primary,
+                                                   .lock_start_ts = (*lock)->start_ts.value});
         }
         // ③ 无锁：Write CF 找 commitTs ≤ start_ts 的最新版本
         auto write = find_write(key, start_ts);
         if (!write.has_value()) {
-            return std::unexpected(write.error());
+            return tinykv::unexpected(write.error());
         }
         if (!write->has_value()) {
-            return std::optional<std::string>{};   // 该时刻无已提交版本
+            return std::optional<std::string>{};  // 该时刻无已提交版本
         }
         return read_data(key, **write);
     }
 
     // ---- prewrite（§4.4：① 写写冲突立即 abort；② 锁冲突交给上层；③ 同一提案写 Default+Lock） ----
-    [[nodiscard]] result<void> prewrite(std::span<const Mutation> mutations,
-                                        std::string_view primary, Ts start_ts,
-                                        std::uint64_t ttl_ms, std::uint64_t now_ms) {
+    [[nodiscard]] result<void> prewrite(tinykv::span<const Mutation> mutations,
+                                        std::string_view primary, Ts start_ts, std::uint64_t ttl_ms,
+                                        std::uint64_t now_ms) {
         if (mutations.empty()) {
-            return std::unexpected(InvalidArgument{"mutations 不得为空"});
+            return tinykv::unexpected(InvalidArgument{"mutations 不得为空"});
         }
-        const bool has_primary = std::any_of(
-            mutations.begin(), mutations.end(),
-            [&](const Mutation& m) { return m.key == primary; });
+        const bool has_primary = std::any_of(mutations.begin(), mutations.end(),
+                                             [&](const Mutation& m) { return m.key == primary; });
         if (!has_primary) {
-            return std::unexpected(InvalidArgument{"primary 必须在 mutations 中（决议锚点）"});
+            return tinykv::unexpected(InvalidArgument{"primary 必须在 mutations 中（决议锚点）"});
         }
         // ①② 检查阶段（先查后写，失败立即 abort 自己——红线1）
         for (const auto& m : mutations) {
             if (m.key.empty()) {
-                return std::unexpected(InvalidArgument{"空 key"});
+                return tinykv::unexpected(InvalidArgument{"空 key"});
             }
             // 写写冲突判据 = 该 key 最新 Write.commitTs > start_ts（本事务启动后有人提交过）；
             // 命中即立即 abort 自己，绝不等待他者（REL-06 无死锁的结构性保证）
             auto latest = latest_commit_bound(m.key);
             if (!latest.has_value()) {
-                return std::unexpected(latest.error());   // 查不到 ≠ 无冲突（BUG-0015）
+                return tinykv::unexpected(latest.error());  // 查不到 ≠ 无冲突（BUG-0015）
             }
             if (latest->has_value() && (*latest)->value > start_ts.value) {
-                return std::unexpected(WriteConflict{.key = m.key,
-                                                     .start_ts = start_ts.value,
-                                                     .conflict_commit_ts = (*latest)->value});
+                return tinykv::unexpected(WriteConflict{.key = m.key,
+                                                        .start_ts = start_ts.value,
+                                                        .conflict_commit_ts = (*latest)->value});
             }
             auto lock = load_lock(m.key);
             if (!lock.has_value()) {
-                return std::unexpected(lock.error());
+                return tinykv::unexpected(lock.error());
             }
             if (lock->has_value() && (*lock)->flag == kLockFlagActive &&
                 (*lock)->start_ts.value != start_ts.value) {
-                return std::unexpected(LockConflict{.key = m.key,
-                                                    .primary = (*lock)->primary,
-                                                    .lock_start_ts = (*lock)->start_ts.value});
+                return tinykv::unexpected(LockConflict{.key = m.key,
+                                                       .primary = (*lock)->primary,
+                                                       .lock_start_ts = (*lock)->start_ts.value});
             }
         }
         // 精确的冲突 commitTs 需要二次定位（上面检查阶段已拦截，这里补字段供诊断）
@@ -208,14 +212,12 @@ public:
         const std::string lock_raw = encode_lock_value(lv);
         for (const auto& m : mutations) {
             if (m.op == Mutation::Op::kPut) {
-                batch.push_back(Modify{Put{.cf = Cf::Default,
-                                           .key = data_key(m.key, start_ts),
-                                           .value = m.value}});
+                batch.push_back(Modify{
+                    Put{.cf = Cf::Default, .key = data_key(m.key, start_ts), .value = m.value}});
             } else {
                 // Delete 的 prewrite：Default 写墓碑（空值）占位，commit 后 Write 指向它
-                batch.push_back(Modify{Put{.cf = Cf::Default,
-                                           .key = data_key(m.key, start_ts),
-                                           .value = std::string{}}});
+                batch.push_back(Modify{Put{
+                    .cf = Cf::Default, .key = data_key(m.key, start_ts), .value = std::string{}}});
             }
             batch.push_back(Modify{Put{.cf = Cf::Lock, .key = lock_key(m.key), .value = lock_raw}});
         }
@@ -223,32 +225,32 @@ public:
     }
 
     // ---- commit（§4.4：校验 Lock 归属 → 写 Write → 删 Lock，同一提案） ----
-    [[nodiscard]] result<void> commit(std::span<const std::string> keys, Ts start_ts,
+    [[nodiscard]] result<void> commit(tinykv::span<const std::string> keys, Ts start_ts,
                                       Ts commit_ts) {
         if (keys.empty()) {
-            return std::unexpected(InvalidArgument{"keys 不得为空"});
+            return tinykv::unexpected(InvalidArgument{"keys 不得为空"});
         }
         if (commit_ts.value <= start_ts.value) {
-            return std::unexpected(InvalidArgument{"commit_ts 必须 > start_ts"});
+            return tinykv::unexpected(InvalidArgument{"commit_ts 必须 > start_ts"});
         }
         std::vector<Modify> batch;
         batch.reserve(keys.size() * 2);
         for (const auto& key : keys) {
             auto lock = load_lock(key);
             if (!lock.has_value()) {
-                return std::unexpected(lock.error());
+                return tinykv::unexpected(lock.error());
             }
             if (!lock->has_value() || (*lock)->flag != kLockFlagActive ||
                 (*lock)->start_ts.value != start_ts.value) {
                 // 幂等重试：Write 已存在（同 commit_ts）→ 视为成功
                 auto done = find_write_exact(key, commit_ts);
                 if (!done.has_value()) {
-                    return std::unexpected(done.error());
+                    return tinykv::unexpected(done.error());
                 }
                 if (done->has_value()) {
                     continue;
                 }
-                return std::unexpected(InvalidArgument{"commit: 锁不存在或归属不符（已终态）"});
+                return tinykv::unexpected(InvalidArgument{"commit: 锁不存在或归属不符（已终态）"});
             }
             batch.push_back(Modify{Put{.cf = Cf::Write,
                                        .key = write_key(key, commit_ts),
@@ -256,39 +258,38 @@ public:
             batch.push_back(Modify{Delete{.cf = Cf::Lock, .key = lock_key(key)}});
         }
         if (batch.empty()) {
-            return {};   // 全部幂等命中
+            return {};  // 全部幂等命中
         }
         return storage_.write(batch);
     }
 
     // ---- rollback（§4.2.1：Put 墓碑到 Lock CF + 清 Default 未提交数据；幂等） ----
-    [[nodiscard]] result<void> rollback(std::span<const std::string> keys, Ts start_ts) {
+    [[nodiscard]] result<void> rollback(tinykv::span<const std::string> keys, Ts start_ts) {
         if (keys.empty()) {
-            return std::unexpected(InvalidArgument{"keys 不得为空"});
+            return tinykv::unexpected(InvalidArgument{"keys 不得为空"});
         }
         std::vector<Modify> batch;
         for (const auto& key : keys) {
             auto lock = load_lock(key);
             if (!lock.has_value()) {
-                return std::unexpected(lock.error());   // IO 失败不等于"无锁"（BUG-0015）
+                return tinykv::unexpected(lock.error());  // IO 失败不等于"无锁"（BUG-0015）
             }
             if (!lock->has_value()) {
-                continue;   // 幂等：无锁（已终态或从未 prewrite）
+                continue;  // 幂等：无锁（已终态或从未 prewrite）
             }
             if ((*lock)->flag == kLockFlagActive && (*lock)->start_ts.value != start_ts.value) {
-                continue;   // 他者之锁，不动（primary 决议唯一，红线2）
+                continue;  // 他者之锁，不动（primary 决议唯一，红线2）
             }
             if ((*lock)->flag == kLockFlagActive) {
-                batch.push_back(Modify{Delete{.cf = Cf::Default,
-                                              .key = data_key(key, start_ts)}});
+                batch.push_back(Modify{Delete{.cf = Cf::Default, .key = data_key(key, start_ts)}});
             }
             LockValue tombstone{.flag = kLockFlagRollback,
                                 .start_ts = start_ts,
                                 .ttl_ms = 0,
                                 .created_ms = 0,
                                 .primary = (*lock)->primary};
-            batch.push_back(
-                Modify{Put{.cf = Cf::Lock, .key = lock_key(key), .value = encode_lock_value(tombstone)}});
+            batch.push_back(Modify{
+                Put{.cf = Cf::Lock, .key = lock_key(key), .value = encode_lock_value(tombstone)}});
         }
         if (batch.empty()) {
             return {};
@@ -302,11 +303,11 @@ public:
         std::vector<std::string> victims;
         auto reader = storage_.create_reader();
         if (!reader.has_value()) {
-            return std::unexpected(reader.error());
+            return tinykv::unexpected(reader.error());
         }
-        auto it = (*reader)->scan(Cf::Lock, std::span<const std::byte>{}, kScanLimit + 1);
+        auto it = (*reader)->scan(Cf::Lock, tinykv::span<const std::byte>{}, kScanLimit + 1);
         if (!it.has_value()) {
-            return std::unexpected(it.error());
+            return tinykv::unexpected(it.error());
         }
         for (; (*it)->valid(); (*it)->next()) {
             auto lv = decode_lock_value((*it)->value());
@@ -318,9 +319,9 @@ public:
         // code-review P1-6：扫描上限命中必须显式报错。旧实现静默截断，>4096 个 key 的大事务
         // 会永久遗留锁（清不完又不报错），后续同 key 写全被锁住。
         if (victims.size() > kScanLimit) {
-            return std::unexpected(InvalidArgument{
-                "同一事务的活跃锁超过扫描上限 " + std::to_string(kScanLimit) +
-                "，决议需分批（拒绝静默遗留锁）"});
+            return tinykv::unexpected(InvalidArgument{"同一事务的活跃锁超过扫描上限 " +
+                                                      std::to_string(kScanLimit) +
+                                                      "，决议需分批（拒绝静默遗留锁）"});
         }
         return victims;
     }
@@ -332,7 +333,7 @@ public:
                                                        std::optional<Ts> commit_to) {
         auto found = locks_of(primary, lock_start_ts);
         if (!found.has_value()) {
-            return std::unexpected(found.error());
+            return tinykv::unexpected(found.error());
         }
         std::vector<std::string> victims = std::move(*found);
         if (victims.empty()) {
@@ -353,14 +354,15 @@ public:
     [[nodiscard]] result<std::pair<std::uint64_t, std::uint64_t>> gc(Ts safe_point) {
         auto reader = storage_.create_reader();
         if (!reader.has_value()) {
-            return std::unexpected(IoFailed{.path = "txn:gc", .reason = "reader 创建失败"});
+            return tinykv::unexpected(IoFailed{.path = "txn:gc", .reason = "reader 创建失败"});
         }
-        auto it = (*reader)->scan(Cf::Write, std::span<const std::byte>{}, kGcScanLimit);
+        auto it = (*reader)->scan(Cf::Write, tinykv::span<const std::byte>{}, kGcScanLimit);
         if (!it.has_value()) {
-            return std::unexpected(IoFailed{.path = "txn:gc", .reason = "版本扫描失败"});
+            return tinykv::unexpected(IoFailed{.path = "txn:gc", .reason = "版本扫描失败"});
         }
         std::vector<std::string> users;
-        std::map<std::string, std::vector<std::pair<Ts, Ts>>> by_user;   // user → (commit_ts, data_start)
+        std::map<std::string, std::vector<std::pair<Ts, Ts>>>
+            by_user;  // user → (commit_ts, data_start)
         for (; (*it)->valid(); (*it)->next()) {
             const std::string stored((*it)->key());
             if (stored.size() < 8) {
@@ -382,7 +384,7 @@ public:
             return counters;
         }
         if (auto r = storage_.write(batch); !r.has_value()) {
-            return std::unexpected(r.error());
+            return tinykv::unexpected(r.error());
         }
         return counters;
     }
@@ -395,12 +397,12 @@ public:
         Ts best{0};
         auto reader = storage_.create_reader();
         if (!reader.has_value()) {
-            return std::unexpected(reader.error());
+            return tinykv::unexpected(reader.error());
         }
         for (const Cf cf : {Cf::Write, Cf::Lock}) {
-            auto it = (*reader)->scan(cf, std::span<const std::byte>{}, kGcScanLimit);
+            auto it = (*reader)->scan(cf, tinykv::span<const std::byte>{}, kGcScanLimit);
             if (!it.has_value()) {
-                return std::unexpected(it.error());
+                return tinykv::unexpected(it.error());
             }
             for (; (*it)->valid(); (*it)->next()) {
                 const std::string stored((*it)->key());
@@ -432,7 +434,7 @@ public:
         // 已提交？
         auto committed_at = find_commit_ts_of(primary, lock_start_ts);
         if (!committed_at.has_value()) {
-            return std::unexpected(committed_at.error());
+            return tinykv::unexpected(committed_at.error());
         }
         if (committed_at->has_value()) {
             out.committed = true;
@@ -441,7 +443,7 @@ public:
         }
         auto lock = load_lock(primary);
         if (!lock.has_value()) {
-            return std::unexpected(lock.error());
+            return tinykv::unexpected(lock.error());
         }
         if (lock->has_value() && (*lock)->flag == kLockFlagActive &&
             (*lock)->start_ts.value == lock_start_ts.value) {
@@ -449,11 +451,11 @@ public:
             const auto elapsed = now_ms >= created ? now_ms - created : 0;
             if (elapsed < (*lock)->ttl_ms) {
                 out.lock_ttl_remaining_ms = (*lock)->ttl_ms - elapsed;
-                return out;   // 未过期：调用方继续等待
+                return out;  // 未过期：调用方继续等待
             }
-            return out;   // 过期：全零 = 可回滚（调用方执行 BatchRollback）
+            return out;  // 过期：全零 = 可回滚（调用方执行 BatchRollback）
         }
-        out.rolled_back = true;   // 无锁（墓碑或从未存在）→ 判回滚
+        out.rolled_back = true;  // 无锁（墓碑或从未存在）→ 判回滚
         return out;
     }
 
@@ -471,7 +473,7 @@ private:
     [[nodiscard]] result<std::optional<LockValue>> load_lock(std::string_view key) const {
         auto r = storage_.get(Cf::Lock, as_bytes(key));
         if (!r.has_value()) {
-            return std::unexpected(r.error());
+            return tinykv::unexpected(r.error());
         }
         if (!r->value.has_value()) {
             return std::optional<LockValue>{};
@@ -487,12 +489,12 @@ private:
         bool has_keep = false;
         for (const auto& [cts, dts] : versions) {
             if (cts.value <= safe_point.value) {
-                keep = cts;   // 升序：最后命中 = ≤ safe_point 的最大者
+                keep = cts;  // 升序：最后命中 = ≤ safe_point 的最大者
                 has_keep = true;
             }
         }
         if (!has_keep) {
-            return;   // safe_point 之前无提交：不动（活跃事务数据）
+            return;  // safe_point 之前无提交：不动（活跃事务数据）
         }
         std::set<std::uint64_t> kept_starts;
         for (const auto& [cts, dts] : versions) {
@@ -520,10 +522,10 @@ private:
                                                                Ts version_ts) const {
         auto r = storage_.get(Cf::Default, as_bytes_bytes(data_key(key, version_ts)));
         if (!r.has_value()) {
-            return std::unexpected(r.error());   // IO 失败不得折叠成"空值"（BUG-0015）
+            return tinykv::unexpected(r.error());  // IO 失败不得折叠成"空值"（BUG-0015）
         }
         if (!r->value.has_value() || r->value->empty()) {
-            return std::optional<std::string>{};   // 不存在 / Delete 墓碑
+            return std::optional<std::string>{};  // 不存在 / Delete 墓碑
         }
         return std::optional<std::string>{std::move(*r->value)};
     }
@@ -535,23 +537,23 @@ private:
     [[nodiscard]] result<void> for_each_write_version(std::string_view key, Fn&& fn) const {
         auto reader = storage_.create_reader();
         if (!reader.has_value()) {
-            return std::unexpected(reader.error());
+            return tinykv::unexpected(reader.error());
         }
         auto it = (*reader)->scan(Cf::Write, as_bytes_bytes(std::string(key)), kScanLimit);
         if (!it.has_value()) {
-            return std::unexpected(it.error());
+            return tinykv::unexpected(it.error());
         }
         for (; (*it)->valid(); (*it)->next()) {
-            const std::string stored((*it)->key());   // = user_key + ts 后缀（CF 前缀已剥）
+            const std::string stored((*it)->key());  // = user_key + ts 后缀（CF 前缀已剥）
             if (stored.size() < 8) {
                 return {};
             }
             const auto user = stored.substr(0, stored.size() - 8);
             if (user > key) {
-                return {};   // 升序迭代：已越过本 key 的版本区间
+                return {};  // 升序迭代：已越过本 key 的版本区间
             }
             if (user != key) {
-                continue;   // user < key：别的 key（key 是另一 key 的前缀时）
+                continue;  // user < key：别的 key（key 是另一 key 的前缀时）
             }
             std::forward<Fn>(fn)(Ts{read_be64(stored.substr(stored.size() - 8))});
         }
@@ -562,27 +564,30 @@ private:
     [[nodiscard]] result<std::optional<Ts>> find_write(std::string_view key, Ts start_ts) const {
         auto reader = storage_.create_reader();
         if (!reader.has_value()) {
-            return std::unexpected(reader.error());
+            return tinykv::unexpected(reader.error());
         }
         std::optional<Ts> best;
-        if (auto r = for_each_write_version(key, [&](Ts commit_ts) {
-                if (commit_ts.value <= start_ts.value) {
-                    best = commit_ts;   // 升序扫：不断覆盖 → 最终即 ≤ start_ts 的最大者
-                }
-            });
+        if (auto r = for_each_write_version(
+                key,
+                [&](Ts commit_ts) {
+                    if (commit_ts.value <= start_ts.value) {
+                        best = commit_ts;  // 升序扫：不断覆盖 → 最终即 ≤ start_ts 的最大者
+                    }
+                });
             !r.has_value()) {
-            return std::unexpected(r.error());
+            return tinykv::unexpected(r.error());
         }
         if (!best.has_value()) {
             return std::optional<Ts>{};
         }
         auto rec = (*reader)->get(Cf::Write, as_bytes_bytes(write_key(key, *best)));
         if (!rec.has_value()) {
-            return std::unexpected(rec.error());
+            return tinykv::unexpected(rec.error());
         }
         if (!rec->value.has_value() || rec->value->size() < 8) {
             // Write 键存在但值不完整：数据损坏，不能当成"无版本"
-            return std::unexpected(Corrupted{.where = "mvcc:find_write", .reason = "Write 记录不完整"});
+            return tinykv::unexpected(
+                Corrupted{.where = "mvcc:find_write", .reason = "Write 记录不完整"});
         }
         return std::optional<Ts>{Ts{read_be64(*rec->value)}};
     }
@@ -592,14 +597,14 @@ private:
                                                              Ts commit_ts) const {
         auto r = storage_.get(Cf::Write, as_bytes_bytes(write_key(key, commit_ts)));
         if (!r.has_value()) {
-            return std::unexpected(r.error());
+            return tinykv::unexpected(r.error());
         }
         if (!r->value.has_value()) {
             return std::optional<Ts>{};
         }
         if (r->value->size() < 8) {
-            return std::unexpected(Corrupted{.where = "mvcc:find_write_exact",
-                                             .reason = "Write 记录不完整"});
+            return tinykv::unexpected(
+                Corrupted{.where = "mvcc:find_write_exact", .reason = "Write 记录不完整"});
         }
         return std::optional<Ts>{Ts{read_be64(*r->value)}};
     }
@@ -609,21 +614,23 @@ private:
                                                               Ts lock_start_ts) const {
         auto reader = storage_.create_reader();
         if (!reader.has_value()) {
-            return std::unexpected(reader.error());
+            return tinykv::unexpected(reader.error());
         }
         std::optional<Ts> hit;
-        if (auto r = for_each_write_version(key, [&](Ts commit_ts) {
-                if (hit.has_value()) {
-                    return;
-                }
-                auto rec = (*reader)->get(Cf::Write, as_bytes_bytes(write_key(key, commit_ts)));
-                if (rec.has_value() && rec->value.has_value() && rec->value->size() >= 8 &&
-                    read_be64(*rec->value) == lock_start_ts.value) {
-                    hit = commit_ts;
-                }
-            });
+        if (auto r = for_each_write_version(
+                key,
+                [&](Ts commit_ts) {
+                    if (hit.has_value()) {
+                        return;
+                    }
+                    auto rec = (*reader)->get(Cf::Write, as_bytes_bytes(write_key(key, commit_ts)));
+                    if (rec.has_value() && rec->value.has_value() && rec->value->size() >= 8 &&
+                        read_be64(*rec->value) == lock_start_ts.value) {
+                        hit = commit_ts;
+                    }
+                });
             !r.has_value()) {
-            return std::unexpected(r.error());
+            return tinykv::unexpected(r.error());
         }
         return hit;
     }
@@ -633,11 +640,11 @@ private:
     [[nodiscard]] result<std::optional<Ts>> latest_commit_bound(std::string_view key) const {
         auto reader = storage_.create_reader();
         if (!reader.has_value()) {
-            return std::unexpected(reader.error());
+            return tinykv::unexpected(reader.error());
         }
         auto it = (*reader)->scan(Cf::Write, as_bytes_bytes(std::string(key)), kScanLimit);
         if (!it.has_value()) {
-            return std::unexpected(it.error());
+            return tinykv::unexpected(it.error());
         }
         std::optional<Ts> best;
         for (; (*it)->valid(); (*it)->next()) {
@@ -657,15 +664,15 @@ private:
         return best;
     }
 
-    [[nodiscard]] static std::span<const std::byte> as_bytes(std::string_view s) {
-        return std::span(reinterpret_cast<const std::byte*>(s.data()), s.size());
+    [[nodiscard]] static tinykv::span<const std::byte> as_bytes(std::string_view s) {
+        return tinykv::span(reinterpret_cast<const std::byte*>(s.data()), s.size());
     }
-    [[nodiscard]] static std::span<const std::byte> as_bytes_bytes(const std::string& s) {
-        return std::span(reinterpret_cast<const std::byte*>(s.data()), s.size());
+    [[nodiscard]] static tinykv::span<const std::byte> as_bytes_bytes(const std::string& s) {
+        return tinykv::span(reinterpret_cast<const std::byte*>(s.data()), s.size());
     }
 
-    static constexpr std::size_t kScanLimit = 4096;   // 版本数课程级，GC 前有界
-    static constexpr std::size_t kGcScanLimit = 1 << 20;   // GC 全量扫（Admin 低频）
+    static constexpr std::size_t kScanLimit = 4096;       // 版本数课程级，GC 前有界
+    static constexpr std::size_t kGcScanLimit = 1 << 20;  // GC 全量扫（Admin 低频）
     Storage& storage_;
 };
 

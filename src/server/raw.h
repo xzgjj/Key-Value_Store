@@ -7,12 +7,12 @@
 #pragma once
 
 #include <cstddef>
-#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
+#include "common/compat.h"
 #include "common/error.h"
 #include "storage/storage.h"
 
@@ -27,7 +27,8 @@ public:
     }
 
     [[nodiscard]] result<void> put(Cf cf, std::string_view key, std::string_view value) {
-        ModifyVec batch{Modify{Put{.cf = cf, .key = std::string(key), .value = std::string(value)}}};
+        ModifyVec batch{
+            Modify{Put{.cf = cf, .key = std::string(key), .value = std::string(value)}}};
         return storage_.write(batch);
     }
 
@@ -41,11 +42,11 @@ public:
         Cf cf, std::string_view start, std::size_t limit) const {
         auto reader = storage_.create_reader();
         if (!reader) {
-            return std::unexpected(reader.error());
+            return tinykv::unexpected(reader.error());
         }
         auto it = (*reader)->scan(cf, view(start), limit);
         if (!it) {
-            return std::unexpected(it.error());
+            return tinykv::unexpected(it.error());
         }
         std::vector<std::pair<std::string, std::string>> rows;
         for (; (**it).valid(); (**it).next()) {
@@ -55,8 +56,8 @@ public:
     }
 
 private:
-    [[nodiscard]] static std::span<const std::byte> view(std::string_view s) {
-        return std::as_bytes(std::span{s.data(), s.size()});
+    [[nodiscard]] static tinykv::span<const std::byte> view(std::string_view s) {
+        return tinykv::as_bytes(tinykv::span{s.data(), s.size()});
     }
 
     Storage& storage_;

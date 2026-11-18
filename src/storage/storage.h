@@ -14,12 +14,12 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
-#include <span>
 #include <string>
 #include <string_view>
 #include <variant>
 #include <vector>
 
+#include "common/compat.h"
 #include "common/encode.h"
 #include "common/error.h"
 
@@ -41,7 +41,7 @@ struct Modify {
     std::variant<Put, Delete> op;
 };
 
-using ModifyVec = std::vector<Modify>;   // 批量是一等公民：一次 write 一次落盘
+using ModifyVec = std::vector<Modify>;  // 批量是一等公民：一次 write 一次落盘
 
 // Get 结果：用 optional 区分"值不存在"与"值为空串"
 struct GetResult {
@@ -75,10 +75,9 @@ public:
     Reader& operator=(Reader&&) = delete;
     virtual ~Reader() = default;
 
-    [[nodiscard]] virtual result<GetResult> get(Cf cf,
-                                                std::span<const std::byte> key) const = 0;
+    [[nodiscard]] virtual result<GetResult> get(Cf cf, tinykv::span<const std::byte> key) const = 0;
     [[nodiscard]] virtual result<std::unique_ptr<Iterator>> scan(
-        Cf cf, std::span<const std::byte> start, std::size_t limit) const = 0;
+        Cf cf, tinykv::span<const std::byte> start, std::size_t limit) const = 0;
 };
 
 class Storage {
@@ -90,8 +89,8 @@ public:
     Storage& operator=(Storage&&) = delete;
     virtual ~Storage() = default;
 
-    [[nodiscard]] virtual result<GetResult> get(Cf cf, std::span<const std::byte> key) = 0;
-    [[nodiscard]] virtual result<void> write(std::span<const Modify> batch) = 0;
+    [[nodiscard]] virtual result<GetResult> get(Cf cf, tinykv::span<const std::byte> key) = 0;
+    [[nodiscard]] virtual result<void> write(tinykv::span<const Modify> batch) = 0;
     [[nodiscard]] virtual result<std::unique_ptr<Reader>> create_reader() = 0;
 };
 

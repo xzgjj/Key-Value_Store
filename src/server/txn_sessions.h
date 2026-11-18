@@ -31,7 +31,7 @@ public:
         auto client = std::make_unique<tinykv::txn::TxnClient>(executor_, tso_);
         auto r = client->begin();
         if (!r.has_value()) {
-            return std::unexpected(r.error());
+            return tinykv::unexpected(r.error());
         }
         const auto sid = "t" + std::to_string(++next_id_);
         clients_[sid] = std::move(client);
@@ -70,7 +70,7 @@ public:
                                            const std::string& value) {
         auto client = take(sid);
         if (!client.has_value()) {
-            return std::unexpected(session_missing(sid));
+            return tinykv::unexpected(session_missing(sid));
         }
         auto r = (*client)->set(key, value);
         if (r.has_value()) {
@@ -84,7 +84,7 @@ public:
     [[nodiscard]] tinykv::result<void> del(const std::string& sid, const std::string& key) {
         auto client = take(sid);
         if (!client.has_value()) {
-            return std::unexpected(session_missing(sid));
+            return tinykv::unexpected(session_missing(sid));
         }
         auto r = (*client)->del(key);
         put_back(sid, std::move(*client));
@@ -96,7 +96,7 @@ public:
                                                                  std::uint64_t now_ms) {
         auto r = get_full(sid, key, now_ms);
         if (!r.has_value()) {
-            return std::unexpected(r.error());
+            return tinykv::unexpected(r.error());
         }
         return r->value;
     }
@@ -107,7 +107,7 @@ public:
                                                           std::uint64_t now_ms) {
         auto r = get_full(sid, key, now_ms);
         if (!r.has_value()) {
-            return std::unexpected(r.error());
+            return tinykv::unexpected(r.error());
         }
         if (r->blocked) {
             return std::string("BLOCKED");
@@ -118,12 +118,12 @@ public:
     [[nodiscard]] tinykv::result<Ts> commit(const std::string& sid, std::uint64_t now_ms) {
         auto client = take(sid);
         if (!client.has_value()) {
-            return std::unexpected(session_missing(sid));
+            return tinykv::unexpected(session_missing(sid));
         }
         auto r = (*client)->commit(now_ms);
         if (r.has_value()) {
             std::lock_guard lock(mu_);
-            clients_.erase(sid);   // 提交即关闭会话
+            clients_.erase(sid);  // 提交即关闭会话
             created_ms_.erase(sid);
         } else {
             put_back(sid, std::move(*client));
@@ -134,11 +134,11 @@ public:
     [[nodiscard]] tinykv::result<void> rollback(const std::string& sid) {
         auto client = take(sid);
         if (!client.has_value()) {
-            return std::unexpected(session_missing(sid));
+            return tinykv::unexpected(session_missing(sid));
         }
         auto r = (*client)->rollback();
         std::lock_guard lock(mu_);
-        clients_.erase(sid);   // 回滚即关闭会话
+        clients_.erase(sid);  // 回滚即关闭会话
         created_ms_.erase(sid);
         return r;
     }
@@ -147,7 +147,7 @@ public:
         std::lock_guard lock(mu_);
         auto it = clients_.find(sid);
         if (it == clients_.end()) {
-            return std::unexpected(session_missing(sid));
+            return tinykv::unexpected(session_missing(sid));
         }
         return it->second->start_ts();
     }
@@ -174,7 +174,7 @@ private:
                                                                      std::uint64_t now_ms) {
         auto client = take(sid);
         if (!client.has_value()) {
-            return std::unexpected(session_missing(sid));
+            return tinykv::unexpected(session_missing(sid));
         }
         auto r = (*client)->get(key, now_ms);
         put_back(sid, std::move(*client));
@@ -206,7 +206,7 @@ private:
     tinykv::tso::TsProvider& tso_;
     mutable std::mutex mu_;
     std::map<std::string, std::unique_ptr<tinykv::txn::TxnClient>> clients_;
-    std::map<std::string, std::uint64_t> created_ms_;   // sid → 创建时刻（空闲回收用）
+    std::map<std::string, std::uint64_t> created_ms_;  // sid → 创建时刻（空闲回收用）
     std::uint64_t next_id_{0};
 };
 

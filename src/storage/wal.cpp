@@ -21,8 +21,8 @@
 namespace tinykv {
 namespace {
 
-constexpr std::size_t kHeaderBytes = 8;                  // [u32 len][u32 crc]
-constexpr std::uint32_t kMaxRecordBytes = 64U << 20U;    // 单条上限：防坏长度触发巨量分配
+constexpr std::size_t kHeaderBytes = 8;                // [u32 len][u32 crc]
+constexpr std::uint32_t kMaxRecordBytes = 64U << 20U;  // 单条上限：防坏长度触发巨量分配
 constexpr std::size_t kSegmentNameWidth = 6;
 
 void put_u32(std::string& out, std::uint32_t v) {
@@ -40,11 +40,11 @@ std::uint32_t get_u32(const char* p) {
 }
 
 // 载荷布局：[varint 条数] 后逐条 [kind][cf][varint klen][key][varint vlen][value(仅 put)]
-void encode_batch(std::span<const Modify> batch, std::string& out) {
+void encode_batch(tinykv::span<const Modify> batch, std::string& out) {
     put_varint(out, batch.size());
     for (const Modify& m : batch) {
         if (const auto* p = std::get_if<Put>(&m.op); p != nullptr) {
-            out.push_back(0);                                    // kind: put
+            out.push_back(0);  // kind: put
             out.push_back(static_cast<char>(p->cf));
             put_varint(out, p->key.size());
             out.append(p->key);
@@ -52,11 +52,11 @@ void encode_batch(std::span<const Modify> batch, std::string& out) {
             out.append(p->value);
         } else {
             const auto& d = std::get<Delete>(m.op);
-            out.push_back(1);                                    // kind: delete（墓碑）
+            out.push_back(1);  // kind: delete（墓碑）
             out.push_back(static_cast<char>(d.cf));
             put_varint(out, d.key.size());
             out.append(d.key);
-            put_varint(out, 0);                                  // 墓碑无 value
+            put_varint(out, 0);  // 墓碑无 value
         }
     }
 }
@@ -153,20 +153,21 @@ Wal::Wal(std::filesystem::path dir, bool fsync_on_commit, std::size_t segment_by
     : dir_(std::move(dir)),
       fsync_on_commit_(fsync_on_commit),
       segment_bytes_(segment_bytes),
-      commit_window_(commit_window) {}
+      commit_window_(commit_window) {
+}
 
 Wal::~Wal() {
     // 先停后台提交者并等待其退出（绝不 detach），再把窗口内残留的写强制刷盘
     stop_.store(true, std::memory_order_release);
     {
-        std::lock_guard<std::mutex> lock(commit_mu_);   // 与提交者的 wait 用同一把锁，唤醒不丢
+        std::lock_guard<std::mutex> lock(commit_mu_);  // 与提交者的 wait 用同一把锁，唤醒不丢
     }
     cv_.notify_all();
     if (committer_.joinable()) {
         committer_.join();
     }
     if (file_ != nullptr) {
-        (void)sync_locked();   // 析构尽力落盘；错误无法向调用者报告，但不影响 fclose
+        (void)sync_locked();  // 析构尽力落盘；错误无法向调用者报告，但不影响 fclose
         std::fclose(file_);
         file_ = nullptr;
     }
@@ -179,15 +180,15 @@ void Wal::commit_loop() {
         {
             std::unique_lock<std::mutex> lock(commit_mu_);
             cv_.wait(lock, [this] {
-                return dirty_.load(std::memory_order_acquire) || stop_.load(std::memory_order_acquire);
+                return dirty_.load(std::memory_order_acquire) ||
+                       stop_.load(std::memory_order_acquire);
             });
             if (stop_.load(std::memory_order_acquire) && !dirty_.load(std::memory_order_acquire)) {
-                return;   // 停止且无残留：退出
+                return;  // 停止且无残留：退出
             }
             if (!stop_.load(std::memory_order_acquire)) {
-                cv_.wait_for(lock, commit_window_, [this] {
-                    return stop_.load(std::memory_order_acquire);
-                });
+                cv_.wait_for(lock, commit_window_,
+                             [this] { return stop_.load(std::memory_order_acquire); });
             }
         }
         if (!dirty_.load(std::memory_order_acquire)) {
@@ -216,7 +217,7 @@ void Wal::mark_failed_locked(std::string_view reason) {
     if (!failed_.exchange(true, std::memory_order_acq_rel)) {
         fail_reason_ = std::string(reason);
     }
-    dirty_.store(false, std::memory_order_release);   // 停止空转重试（错误已粘住，重试无意义）
+    dirty_.store(false, std::memory_order_release);  // 停止空转重试（错误已粘住，重试无意义）
 }
 
 result<void> Wal::open_new_segment() {
@@ -228,7 +229,7 @@ result<void> Wal::open_new_segment() {
     current_ = dir_ / segment_name(next_index_);
     file_ = std::fopen(current_.string().c_str(), "ab");
     if (file_ == nullptr) {
-        return std::unexpected(IoFailed{.path = current_.string(), .reason = "fopen(ab) 失败"});
+        return tinykv::unexpected(IoFailed{.path = current_.string(), .reason = "fopen(ab) 失败"});
     }
     std::error_code ec;
     current_size_ = std::filesystem::file_size(current_, ec);
@@ -242,7 +243,7 @@ result<std::unique_ptr<Wal>> Wal::open(const WalOptions& opt) {
     std::error_code ec;
     std::filesystem::create_directories(opt.dir, ec);
     if (ec) {
-        return std::unexpected(
+        return tinykv::unexpected(
             IoFailed{.path = opt.dir.string(), .reason = "create_directories: " + ec.message()});
     }
     auto wal = std::unique_ptr<Wal>(
@@ -251,7 +252,7 @@ result<std::unique_ptr<Wal>> Wal::open(const WalOptions& opt) {
     if (segs.empty()) {
         wal->next_index_ = 1;
         if (auto r = wal->open_new_segment(); !r) {
-            return std::unexpected(r.error());
+            return tinykv::unexpected(r.error());
         }
     } else {
         // 续写到最新段：不新建、不改写既有内容
@@ -259,7 +260,7 @@ result<std::unique_ptr<Wal>> Wal::open(const WalOptions& opt) {
         wal->current_ = segs.back().second;
         wal->file_ = std::fopen(wal->current_.string().c_str(), "ab");
         if (wal->file_ == nullptr) {
-            return std::unexpected(
+            return tinykv::unexpected(
                 IoFailed{.path = wal->current_.string(), .reason = "fopen(ab) 失败"});
         }
         wal->current_size_ = std::filesystem::file_size(wal->current_, ec);
@@ -274,7 +275,7 @@ result<WalReplayResult> Wal::replay(const std::filesystem::path& dir) {
         (void)index;
         std::FILE* f = std::fopen(path.string().c_str(), "rb");
         if (f == nullptr) {
-            return std::unexpected(IoFailed{.path = path.string(), .reason = "fopen(rb) 失败"});
+            return tinykv::unexpected(IoFailed{.path = path.string(), .reason = "fopen(rb) 失败"});
         }
         std::uint64_t offset = 0;
         std::string payload;
@@ -302,7 +303,7 @@ result<WalReplayResult> Wal::replay(const std::filesystem::path& dir) {
                 out.reason = "载荷不完整（掉电窗口）";
                 break;
             }
-            if (crc32c(std::as_bytes(std::span{payload})) != crc) {
+            if (crc32c(tinykv::as_bytes(tinykv::span{payload})) != crc) {
                 out.stopped = true;
                 out.reason = "CRC32C 不匹配";
                 break;
@@ -331,7 +332,8 @@ result<void> Wal::clear_all(const std::filesystem::path& dir) {
         std::error_code ec;
         std::filesystem::remove(path, ec);
         if (ec) {
-            return std::unexpected(IoFailed{.path = path.string(), .reason = "删除段失败: " + ec.message()});
+            return tinykv::unexpected(
+                IoFailed{.path = path.string(), .reason = "删除段失败: " + ec.message()});
         }
     }
     return {};
@@ -339,44 +341,44 @@ result<void> Wal::clear_all(const std::filesystem::path& dir) {
 
 result<void> Wal::sync_locked() {
     if (file_ == nullptr) {
-        return std::unexpected(IoFailed{.path = dir_.string(), .reason = "段文件未打开"});
+        return tinykv::unexpected(IoFailed{.path = dir_.string(), .reason = "段文件未打开"});
     }
     if (std::fflush(file_) != 0) {
-        return std::unexpected(IoFailed{.path = current_.string(), .reason = "fflush 失败"});
+        return tinykv::unexpected(IoFailed{.path = current_.string(), .reason = "fflush 失败"});
     }
     if (raw_fsync(file_) != 0) {
-        return std::unexpected(IoFailed{.path = current_.string(), .reason = "fsync 失败"});
+        return tinykv::unexpected(IoFailed{.path = current_.string(), .reason = "fsync 失败"});
     }
     fsync_count_.fetch_add(1, std::memory_order_relaxed);
     dirty_.store(false, std::memory_order_release);
     return {};
 }
 
-result<void> Wal::append(std::span<const Modify> batch) {
+result<void> Wal::append(tinykv::span<const Modify> batch) {
     std::string payload;
     encode_batch(batch, payload);
     if (payload.size() > kMaxRecordBytes) {
-        return std::unexpected(InvalidArgument{"单个写入批次编码后超过 64MB 上限"});
+        return tinykv::unexpected(InvalidArgument{"单个写入批次编码后超过 64MB 上限"});
     }
     std::string record;
     record.reserve(kHeaderBytes + payload.size());
     put_u32(record, static_cast<std::uint32_t>(payload.size()));
-    put_u32(record, crc32c(std::as_bytes(std::span{payload})));
+    put_u32(record, crc32c(tinykv::as_bytes(tinykv::span{payload})));
     record.append(payload);
 
     std::lock_guard<std::mutex> lock(mu_);
     if (file_ == nullptr) {
-        return std::unexpected(IoFailed{.path = dir_.string(), .reason = "段文件未打开"});
+        return tinykv::unexpected(IoFailed{.path = dir_.string(), .reason = "段文件未打开"});
     }
     // code-review P1-1：后台提交者已判定落盘失败 → 继续接受写入等于向调用方撒谎
     if (failed_.load(std::memory_order_acquire)) {
-        return std::unexpected(IoFailed{.path = current_.string(),
-                                        .reason = "WAL 已进入失败态: " + fail_reason_});
+        return tinykv::unexpected(
+            IoFailed{.path = current_.string(), .reason = "WAL 已进入失败态: " + fail_reason_});
     }
     // 仅在段内已有数据时考虑切换：空段上直接写，避免"单条记录超上限"造成段号跳号
     if (current_size_ > 0 && current_size_ + record.size() > segment_bytes_) {
         if (dirty_.load(std::memory_order_acquire)) {
-            if (auto r = sync_locked(); !r) {   // 切段前先把旧段落盘
+            if (auto r = sync_locked(); !r) {  // 切段前先把旧段落盘
                 return r;
             }
         }
@@ -385,11 +387,11 @@ result<void> Wal::append(std::span<const Modify> batch) {
         }
     }
     if (std::fwrite(record.data(), 1, record.size(), file_) != record.size()) {
-        return std::unexpected(IoFailed{.path = current_.string(), .reason = "fwrite 失败"});
+        return tinykv::unexpected(IoFailed{.path = current_.string(), .reason = "fwrite 失败"});
     }
     // 立即 fflush 推进内核页缓存：进程级崩溃不丢；fsync 延后到后台批量窗口
     if (std::fflush(file_) != 0) {
-        return std::unexpected(IoFailed{.path = current_.string(), .reason = "fflush 失败"});
+        return tinykv::unexpected(IoFailed{.path = current_.string(), .reason = "fflush 失败"});
     }
     current_size_ += record.size();
     dirty_.store(true, std::memory_order_release);

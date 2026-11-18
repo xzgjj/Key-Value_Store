@@ -20,7 +20,7 @@ constexpr const char* kManifestTmp = "MANIFEST.tmp";
 
 // 用户 key + CF → 编码 key（非空校验由 encode_key 负责）
 result<std::string> encode_user(Cf cf, std::string_view user) {
-    return encode_key(cf, std::as_bytes(std::span{user.data(), user.size()}));
+    return encode_key(cf, tinykv::as_bytes(tinykv::span{user.data(), user.size()}));
 }
 
 std::string sst_name(std::uint32_t seq) {
@@ -34,7 +34,7 @@ std::string sst_name(std::uint32_t seq) {
 // 从文件名取序号：合并后名字不再连续，恢复时必须按最大序号而不是表数量续号
 std::uint32_t sst_seq(const std::string& name) {
     constexpr std::string_view prefix = "sst-";
-    if (!name.starts_with(prefix) || name.size() <= prefix.size()) {
+    if (!tinykv::starts_with(name, prefix) || name.size() <= prefix.size()) {
         return 0;
     }
     const char* first = name.data() + prefix.size();
@@ -72,10 +72,10 @@ public:
                    std::vector<std::shared_ptr<SstReader>> ssts)
         : mem_(std::move(mem)), ssts_(std::move(ssts)) {}
 
-    [[nodiscard]] result<GetResult> get(Cf cf, std::span<const std::byte> key) const override {
+    [[nodiscard]] result<GetResult> get(Cf cf, tinykv::span<const std::byte> key) const override {
         auto encoded = encode_key(cf, key);
         if (!encoded) {
-            return std::unexpected(encoded.error());
+            return tinykv::unexpected(encoded.error());
         }
         const auto hit = lookup(*encoded);
         if (!hit.has_value()) {
@@ -84,14 +84,14 @@ public:
         return GetResult{.value = *hit};
     }
 
-    [[nodiscard]] result<std::unique_ptr<Iterator>> scan(
-        Cf cf, std::span<const std::byte> start, std::size_t limit) const override {
+    [[nodiscard]] result<std::unique_ptr<Iterator>> scan(Cf cf, tinykv::span<const std::byte> start,
+                                                         std::size_t limit) const override {
         if (limit == 0) {
-            return std::unexpected(InvalidArgument{"scan 的 limit 必须 > 0"});
+            return tinykv::unexpected(InvalidArgument{"scan 的 limit 必须 > 0"});
         }
         auto lower = scan_lower_bound(cf, start);
         if (!lower) {
-            return std::unexpected(lower.error());
+            return tinykv::unexpected(lower.error());
         }
         // 流式归并：k 路游标取最小 key，命中 limit 即停，不再把全量数据 materialize 成 map。
         auto rows = merge_stream(cf, *lower, limit);
@@ -100,9 +100,9 @@ public:
 
 private:
     [[nodiscard]] result<std::string> scan_lower_bound(Cf cf,
-                                                       std::span<const std::byte> start) const {
+                                                       tinykv::span<const std::byte> start) const {
         if (start.empty()) {
-            return std::string(1, static_cast<char>(cf));   // 该 CF 的起点
+            return std::string(1, static_cast<char>(cf));  // 该 CF 的起点
         }
         return encode_key(cf, start);
     }
@@ -119,10 +119,9 @@ private:
                const std::function<bool(std::string_view)>& in_range)
             : sst_(&sst), sst_count_(sst.entries().size()), from_mem_(false), source_(source) {
             const auto& entries = sst.entries();
-            auto it = std::lower_bound(entries.begin(), entries.end(), lower,
-                                       [](const SstEntry& e, const std::string& k) {
-                                           return e.key < k;
-                                       });
+            auto it =
+                std::lower_bound(entries.begin(), entries.end(), lower,
+                                 [](const SstEntry& e, const std::string& k) { return e.key < k; });
             sst_index_ = static_cast<std::size_t>(it - entries.begin());
             while (valid() && !in_range(key())) {
                 ++sst_index_;
@@ -201,7 +200,7 @@ private:
                 }
             }
             if (best_key.empty()) {
-                break;   // 所有源耗尽
+                break;  // 所有源耗尽
             }
             // 第二遍：同 key 取最新源（下标越大越新）；命中该 key 的源一起前移
             std::optional<std::string> chosen;
@@ -209,7 +208,7 @@ private:
                 if (!c.valid() || c.key() != best_key) {
                     continue;
                 }
-                chosen = c.value();   // 从小到大覆盖，最后（最新）胜出
+                chosen = c.value();  // 从小到大覆盖，最后（最新）胜出
                 c.advance(in_range);
             }
             if (chosen.has_value()) {
@@ -219,8 +218,7 @@ private:
         return rows;
     }
 
-    [[nodiscard]] std::optional<std::optional<std::string>> lookup(
-        std::string_view encoded) const {
+    [[nodiscard]] std::optional<std::optional<std::string>> lookup(std::string_view encoded) const {
         if (const MemValue* v = mem_->find(encoded); v != nullptr) {
             return v->value;
         }
@@ -276,14 +274,15 @@ result<void> Engine::write_manifest(const std::vector<std::string>& names) const
     {
         std::ofstream out(tmp, std::ios::trunc);
         if (!out.is_open()) {
-            return std::unexpected(IoFailed{.path = tmp.string(), .reason = "无法写入临时清单"});
+            return tinykv::unexpected(IoFailed{.path = tmp.string(), .reason = "无法写入临时清单"});
         }
         for (const auto& n : names) {
             out << n << '\n';
         }
         out.flush();
         if (!out.good()) {
-            return std::unexpected(IoFailed{.path = tmp.string(), .reason = "清单写入失败（磁盘满？）"});
+            return tinykv::unexpected(
+                IoFailed{.path = tmp.string(), .reason = "清单写入失败（磁盘满？）"});
         }
     }
     // BUG-0012：先删后改名会在中间留一个"清单不存在"的窗口（此前注释称 Windows 必须如此）。
@@ -296,7 +295,8 @@ result<void> Engine::write_manifest(const std::vector<std::string>& names) const
         std::filesystem::rename(tmp, dst, ec);
     }
     if (ec) {
-        return std::unexpected(IoFailed{.path = dst.string(), .reason = "rename 清单失败: " + ec.message()});
+        return tinykv::unexpected(
+            IoFailed{.path = dst.string(), .reason = "rename 清单失败: " + ec.message()});
     }
     return {};
 }
@@ -306,17 +306,18 @@ result<void> Engine::recover() {
     std::filesystem::create_directories(sst_dir_, ec);
     std::filesystem::create_directories(wal_dir_, ec);
     if (ec) {
-        return std::unexpected(IoFailed{.path = opt_.dir.string(), .reason = "创建数据目录失败"});
+        return tinykv::unexpected(
+            IoFailed{.path = opt_.dir.string(), .reason = "创建数据目录失败"});
     }
 
     auto names = load_manifest();
     if (!names) {
-        return std::unexpected(names.error());
+        return tinykv::unexpected(names.error());
     }
     for (const auto& name : *names) {
         auto reader = SstReader::open(sst_dir_ / name);
         if (!reader) {
-            return std::unexpected(reader.error());
+            return tinykv::unexpected(reader.error());
         }
         ssts_.push_back(std::shared_ptr<SstReader>(std::move(*reader)));
         sst_names_.push_back(name);
@@ -326,7 +327,7 @@ result<void> Engine::recover() {
     // 重放 WAL：只读，绝不 truncate（红线 1）
     auto replay = Wal::replay(wal_dir_);
     if (!replay) {
-        return std::unexpected(replay.error());
+        return tinykv::unexpected(replay.error());
     }
     for (const auto& batch : replay->batches) {
         if (auto r = apply_batch(batch); !r) {
@@ -339,26 +340,26 @@ result<void> Engine::recover() {
                                     .fsync_on_commit = opt_.fsync_on_commit,
                                     .segment_bytes = opt_.wal_segment_bytes});
     if (!wal) {
-        return std::unexpected(wal.error());
+        return tinykv::unexpected(wal.error());
     }
     wal_ = std::move(*wal);
     return {};
 }
 
-result<void> Engine::apply_batch(std::span<const Modify> batch) {
+result<void> Engine::apply_batch(tinykv::span<const Modify> batch) {
     MemTable& mem = mutable_mem_locked();
     for (const Modify& m : batch) {
         if (const auto* p = std::get_if<Put>(&m.op); p != nullptr) {
             auto enc = encode_user(p->cf, p->key);
             if (!enc) {
-                return std::unexpected(enc.error());
+                return tinykv::unexpected(enc.error());
             }
             mem.put(std::move(*enc), p->value);
         } else {
             const auto& d = std::get<Delete>(m.op);
             auto enc = encode_user(d.cf, d.key);
             if (!enc) {
-                return std::unexpected(enc.error());
+                return tinykv::unexpected(enc.error());
             }
             mem.put(std::move(*enc), std::nullopt);
         }
@@ -378,19 +379,19 @@ MemTable& Engine::mutable_mem_locked() {
 result<std::unique_ptr<Engine>> Engine::open(const EngineOptions& opt) {
     auto engine = std::unique_ptr<Engine>(new Engine(opt));  // NOLINT：私有构造，立即接管
     if (auto r = engine->recover(); !r) {
-        return std::unexpected(r.error());
+        return tinykv::unexpected(r.error());
     }
     return engine;
 }
 
-result<GetResult> Engine::get(Cf cf, std::span<const std::byte> key) {
+result<GetResult> Engine::get(Cf cf, tinykv::span<const std::byte> key) {
     auto encoded = encode_key(cf, key);
     if (!encoded) {
-        return std::unexpected(encoded.error());
+        return tinykv::unexpected(encoded.error());
     }
     std::lock_guard lock(mu_);
     if (closed_) {
-        return std::unexpected(IoFailed{.path = opt_.dir.string(), .reason = "引擎已关闭"});
+        return tinykv::unexpected(IoFailed{.path = opt_.dir.string(), .reason = "引擎已关闭"});
     }
     // 此处直接查内存表与 SST：与 Engine::lookup 语义一致，但按成员访问以避免额外拷贝
     if (const MemValue* v = mem_->find(*encoded); v != nullptr) {
@@ -404,19 +405,19 @@ result<GetResult> Engine::get(Cf cf, std::span<const std::byte> key) {
     return GetResult{.value = std::nullopt};
 }
 
-result<void> Engine::write(std::span<const Modify> batch) {
+result<void> Engine::write(tinykv::span<const Modify> batch) {
     if (batch.empty()) {
-        return std::unexpected(InvalidArgument{"写入批次为空"});
+        return tinykv::unexpected(InvalidArgument{"写入批次为空"});
     }
     std::lock_guard lock(mu_);
     if (closed_) {
-        return std::unexpected(IoFailed{.path = opt_.dir.string(), .reason = "引擎已关闭"});
+        return tinykv::unexpected(IoFailed{.path = opt_.dir.string(), .reason = "引擎已关闭"});
     }
     // code-review P0-5 第二道防线：flush 的换段窗口里 WAL 可能暂时为空（磁盘满/文件被占用）。
     // 没有这一行，一次失败的 flush 之后每次写都会解引用空指针，进程直接崩。
     if (wal_ == nullptr) {
-        return std::unexpected(IoFailed{.path = opt_.dir.string(),
-                                        .reason = "WAL 不可用（上次换段失败，需重开引擎）"});
+        return tinykv::unexpected(IoFailed{.path = opt_.dir.string(),
+                                           .reason = "WAL 不可用（上次换段失败，需重开引擎）"});
     }
     // 先落 WAL 再改内存表：WAL 失败时内存表未被污染（REL-02）
     if (auto r = wal_->append(batch); !r) {
@@ -446,7 +447,7 @@ result<void> Engine::flush_locked() {
     const auto path = sst_dir_ / name;
     auto writer = SstWriter::create(path);
     if (!writer) {
-        return std::unexpected(writer.error());
+        return tinykv::unexpected(writer.error());
     }
     for (const auto& [key, value] : mem_->entries()) {
         if (auto r = (*writer)->add(key, value.value); !r) {
@@ -458,10 +459,10 @@ result<void> Engine::flush_locked() {
     }
     auto reader = SstReader::open(path);
     if (!reader) {
-        return std::unexpected(reader.error());
+        return tinykv::unexpected(reader.error());
     }
     ssts_.push_back(std::shared_ptr<SstReader>(std::move(*reader)));
-    sst_names_.push_back(name);   // 名字与表一一对应，不能按序号重建（合并后序号不连续）
+    sst_names_.push_back(name);  // 名字与表一一对应，不能按序号重建（合并后序号不连续）
     ++next_sst_seq_;
 
     if (auto r = write_manifest(sst_names_); !r) {
@@ -491,7 +492,7 @@ result<void> Engine::flush_locked() {
 result<void> Engine::rotate_wal_locked() {
     wal_.reset();
     if (auto r = Wal::clear_all(wal_dir_); !r) {
-        (void)reopen_wal_locked();   // 尽力恢复；失败则留给 write() 的判空兜底
+        (void)reopen_wal_locked();  // 尽力恢复；失败则留给 write() 的判空兜底
         return r;
     }
     return reopen_wal_locked();
@@ -503,7 +504,7 @@ result<void> Engine::reopen_wal_locked() {
                                     .segment_bytes = opt_.wal_segment_bytes});
     if (!wal) {
         wal_ = nullptr;
-        return std::unexpected(wal.error());
+        return tinykv::unexpected(wal.error());
     }
     wal_ = std::move(*wal);
     return {};
@@ -528,11 +529,11 @@ result<void> Engine::compact_ssts_locked() {
     const std::string name = sst_name(next_sst_seq_);
     auto writer = SstWriter::create(sst_dir_ / name);
     if (!writer) {
-        return std::unexpected(writer.error());
+        return tinykv::unexpected(writer.error());
     }
     for (const auto& [key, value] : merged) {
         if (!value.has_value()) {
-            continue;   // 没有更老的表，墓碑无需保留
+            continue;  // 没有更老的表，墓碑无需保留
         }
         if (auto r = (*writer)->add(key, value); !r) {
             return r;
@@ -543,7 +544,7 @@ result<void> Engine::compact_ssts_locked() {
     }
     auto reader = SstReader::open(sst_dir_ / name);
     if (!reader) {
-        return std::unexpected(reader.error());
+        return tinykv::unexpected(reader.error());
     }
     ssts_.assign(1, std::shared_ptr<SstReader>(std::move(*reader)));
     sst_names_.assign(1, name);
@@ -553,7 +554,7 @@ result<void> Engine::compact_ssts_locked() {
     }
     std::error_code ec;
     for (const auto& old : old_names) {
-        std::filesystem::remove(sst_dir_ / old, ec);   // 孤儿文件不影响恢复，删除失败不致命
+        std::filesystem::remove(sst_dir_ / old, ec);  // 孤儿文件不影响恢复，删除失败不致命
     }
     return {};
 }

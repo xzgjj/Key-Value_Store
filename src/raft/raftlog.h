@@ -1,5 +1,5 @@
-// 文件用途：Raft 日志——四指针模型（first/last/committed + dummy entry）与冲突截断（SPEC-2 §2.3.1）。
-// 归属：TinyKV-CPP（M2 Raft 共识，FUNC-03）。
+// 文件用途：Raft 日志——四指针模型（first/last/committed + dummy entry）与冲突截断（SPEC-2
+// §2.3.1）。 归属：TinyKV-CPP（M2 Raft 共识，FUNC-03）。
 //
 // 存储承载方式（决策，见 implementation-notes §3）：
 //   raft log **直接存放在 M1 的 KV 引擎里**，而不是再造一套段文件 WAL。
@@ -21,12 +21,12 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
-#include <span>
 #include <string>
 #include <vector>
 
 #include <raft.pb.h>
 
+#include "common/compat.h"
 #include "common/error.h"
 #include "common/ids.h"
 #include "storage/storage.h"
@@ -65,7 +65,7 @@ public:
     // 取 [lo, hi) 的条目；跨出可读范围返回 InvalidArgument
     [[nodiscard]] result<std::vector<Entry>> slice(LogIndex lo, LogIndex hi) const;
 
-    [[nodiscard]] result<void> append(std::span<const Entry> entries);
+    [[nodiscard]] result<void> append(tinykv::span<const Entry> entries);
     // 删除 index >= idx 的条目（冲突覆盖）；idx 必须 > committed
     [[nodiscard]] result<void> truncate_from(LogIndex idx);
     // 压缩 index <= upto 的条目（已被快照覆盖）
@@ -85,7 +85,7 @@ private:
         std::uint64_t term{0};
         std::uint64_t vote{0};
         std::uint64_t dummy_term{0};
-        std::uint64_t applied{0};   // 单独键持久化，不在 6×u64 的 "\0lm" blob 内
+        std::uint64_t applied{0};  // 单独键持久化，不在 6×u64 的 "\0lm" blob 内
     };
 
     explicit RaftLog(Storage& storage) : storage_(storage) {}
@@ -97,7 +97,7 @@ private:
     // 落盘失败时内存仍与盘上一致，不会出现"内存说 last_index=5、盘上只到 3"的幻影状态。
     [[nodiscard]] result<void> write_with_meta(ModifyVec batch, const Meta& next);
     [[nodiscard]] static ModifyVec range_modifies(LogIndex lo, LogIndex hi);  // [lo, hi) 的删除项
-    [[nodiscard]] result<void> remove_range(LogIndex lo, LogIndex hi);  // 删 [lo, hi]
+    [[nodiscard]] result<void> remove_range(LogIndex lo, LogIndex hi);        // 删 [lo, hi]
 
     Storage& storage_;
     Meta meta_;

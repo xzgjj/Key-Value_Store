@@ -77,6 +77,74 @@
             "displayName": "Linux · vcpkg 依赖 · Debug",
             "description": "依赖走 vcpkg 清单（vcpkg.json）；要求已设置 VCPKG_ROOT",
             "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+        },
+        {
+            "name": "win-cxx20",
+            "inherits": "win-debug",
+            "displayName": "Windows · g++ · Debug（C++20）",
+            "description": "原生 std::expected 可用，验证 20 档兼容",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "TINYKV_CXX_STANDARD": "20"
+            }
+        },
+        {
+            "name": "win-cxx17",
+            "inherits": "win-debug",
+            "displayName": "Windows · g++ · Debug（C++17）",
+            "description": "compat.h 兜底档：验证 expected/span/starts_with 替代实现",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "TINYKV_CXX_STANDARD": "17"
+            }
+        },
+        {
+            "name": "linux-cxx20",
+            "inherits": "linux-debug",
+            "displayName": "Linux · g++ · Debug（C++20）",
+            "description": "原生 std::expected 可用，验证 20 档兼容",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "TINYKV_CXX_STANDARD": "20"
+            }
+        },
+        {
+            "name": "linux-cxx17",
+            "inherits": "linux-debug",
+            "displayName": "Linux · g++ · Debug（C++17）",
+            "description": "compat.h 兜底档：验证 expected/span/starts_with 替代实现",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "TINYKV_CXX_STANDARD": "17"
+            }
+        },
+        {
+            "name": "win-clang23",
+            "inherits": "base",
+            "displayName": "Windows · clang++ · Debug（C++23）",
+            "description": "第二编译器：验证 MSYS2 clang++ 下同一套源码与告警基线",
+            "environment": {
+                "CC": "clang",
+                "CXX": "clang++"
+            },
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "TINYKV_CXX_STANDARD": "23"
+            }
+        },
+        {
+            "name": "linux-clang23",
+            "inherits": "base",
+            "displayName": "Linux · clang++ · Debug（C++23）",
+            "description": "第二编译器：验证 clang++ 下同一套源码与告警基线",
+            "environment": {
+                "CC": "clang",
+                "CXX": "clang++"
+            },
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "TINYKV_CXX_STANDARD": "23"
+            }
         }
     ],
     "buildPresets": [
@@ -107,6 +175,30 @@
         {
             "name": "linux-vcpkg",
             "configurePreset": "linux-vcpkg"
+        },
+        {
+            "name": "win-cxx20",
+            "configurePreset": "win-cxx20"
+        },
+        {
+            "name": "win-cxx17",
+            "configurePreset": "win-cxx17"
+        },
+        {
+            "name": "linux-cxx20",
+            "configurePreset": "linux-cxx20"
+        },
+        {
+            "name": "linux-cxx17",
+            "configurePreset": "linux-cxx17"
+        },
+        {
+            "name": "win-clang23",
+            "configurePreset": "win-clang23"
+        },
+        {
+            "name": "linux-clang23",
+            "configurePreset": "linux-clang23"
         }
     ],
     "testPresets": [
@@ -155,6 +247,48 @@
         {
             "name": "linux-vcpkg",
             "configurePreset": "linux-vcpkg",
+            "output": {
+                "outputOnFailure": true
+            }
+        },
+        {
+            "name": "win-cxx20",
+            "configurePreset": "win-cxx20",
+            "output": {
+                "outputOnFailure": true
+            }
+        },
+        {
+            "name": "win-cxx17",
+            "configurePreset": "win-cxx17",
+            "output": {
+                "outputOnFailure": true
+            }
+        },
+        {
+            "name": "linux-cxx20",
+            "configurePreset": "linux-cxx20",
+            "output": {
+                "outputOnFailure": true
+            }
+        },
+        {
+            "name": "linux-cxx17",
+            "configurePreset": "linux-cxx17",
+            "output": {
+                "outputOnFailure": true
+            }
+        },
+        {
+            "name": "win-clang23",
+            "configurePreset": "win-clang23",
+            "output": {
+                "outputOnFailure": true
+            }
+        },
+        {
+            "name": "linux-clang23",
+            "configurePreset": "linux-clang23",
             "output": {
                 "outputOnFailure": true
             }

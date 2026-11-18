@@ -16,10 +16,10 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
-#include <span>
 #include <string>
 #include <vector>
 
+#include "common/compat.h"
 #include "raft/raftlog.h"
 #include "storage/engine.h"
 #include "temp_dir.h"
@@ -42,18 +42,18 @@ using tinykv::Put;
 using tinykv::Reader;
 using tinykv::result;
 using tinykv::Storage;
-using tinykv::testlib::TempDir;
 using tinykv::Ts;
+using tinykv::testlib::TempDir;
 
 // 记录每批写的 key 集合，用来断言"条目变更与 meta 在同一批"
 class RecordingStorage final : public Storage {
 public:
     explicit RecordingStorage(Engine& inner) : inner_(inner) {}
 
-    [[nodiscard]] result<GetResult> get(Cf cf, std::span<const std::byte> key) override {
+    [[nodiscard]] result<GetResult> get(Cf cf, tinykv::span<const std::byte> key) override {
         return inner_.get(cf, key);
     }
-    [[nodiscard]] result<void> write(std::span<const Modify> batch) override {
+    [[nodiscard]] result<void> write(tinykv::span<const Modify> batch) override {
         std::vector<std::string> keys;
         keys.reserve(batch.size());
         for (const auto& m : batch) {
@@ -167,7 +167,8 @@ TEST(DurabilityGuard, FlushLeavesNoTempFilesAndManifestSurvivesRewrite) {
         ASSERT_TRUE(eng.has_value());
         for (int i = 0; i < 40; ++i) {
             const std::string key = "k" + std::to_string(i);
-            const std::vector<Modify> batch{Modify{Put{.cf = Cf::Default, .key = key, .value = "v"}}};
+            const std::vector<Modify> batch{
+                Modify{Put{.cf = Cf::Default, .key = key, .value = "v"}}};
             auto r = (*eng)->write(batch);
             ASSERT_TRUE(r.has_value()) << i;
         }
@@ -184,7 +185,8 @@ TEST(DurabilityGuard, FlushLeavesNoTempFilesAndManifestSurvivesRewrite) {
     ASSERT_TRUE(reopened.has_value()) << "清单/表不一致导致重开失败";
     for (int i = 0; i < 40; ++i) {
         const std::string key = "k" + std::to_string(i);
-        auto got = (*reopened)->get(Cf::Default, std::as_bytes(std::span{key.data(), key.size()}));
+        auto got =
+            (*reopened)->get(Cf::Default, tinykv::as_bytes(tinykv::span{key.data(), key.size()}));
         ASSERT_TRUE(got.has_value()) << key;
         ASSERT_TRUE(got->value.has_value()) << key << " 丢失";
         EXPECT_EQ(*got->value, "v");

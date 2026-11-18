@@ -15,12 +15,12 @@
 #include <cstddef>
 #include <map>
 #include <memory>
-#include <span>
 #include <string>
 #include <thread>
 #include <variant>
 #include <vector>
 
+#include "common/compat.h"
 #include "raft_test_base.h"
 #include "raftstore/peer.h"
 #include "tcp_test_base.h"
@@ -28,7 +28,7 @@
 namespace {
 
 using namespace tinykv::testlib;   // NOLINT(google-build-using-namespace)
-constexpr int kSpinPerTick = 300;   // 每 300 次自旋推进一拍（约 30ms/tick）
+constexpr int kSpinPerTick = 300;  // 每 300 次自旋推进一拍（约 30ms/tick）
 
 // 自旋等待条件成立（不 sleep；上限内未满足即判失败，避免挂死）
 template <typename Pred>
@@ -46,7 +46,7 @@ bool wait_until(Pred pred, int max_spins = 100000) {
 class TcpCluster {
 public:
     void start() {
-        (void)start_transports(kNodes, transports_);   // 端口自动分配并互相 set_peers
+        (void)start_transports(kNodes, transports_);  // 端口自动分配并互相 set_peers
 
         std::vector<PeerId> voters;
         for (int i = 0; i < kNodes; ++i) {
@@ -178,13 +178,13 @@ TEST(TcpTransport, MultipleFramesDoNotCoalesce) {
         }
         return seen->size() >= 3;
     }));
-    EXPECT_EQ(seen->size(), 3U);   // 三条各自成帧，没有被粘成一条
+    EXPECT_EQ(seen->size(), 3U);  // 三条各自成帧，没有被粘成一条
 }
 
 TEST(TcpCluster, ElectsLeaderAndReplicatesOverRealSockets) {
     TcpCluster cluster;
     cluster.start();
-    ASSERT_EQ(cluster.leader_index(), -1);   // 起手无 leader
+    ASSERT_EQ(cluster.leader_index(), -1);  // 起手无 leader
 
     ASSERT_TRUE(wait_until([&] {
         cluster.pump(true);
@@ -197,7 +197,7 @@ TEST(TcpCluster, ElectsLeaderAndReplicatesOverRealSockets) {
     cmdpb::RaftCmdRequest req;
     req.mutable_header()->set_client_id(1);
     req.mutable_header()->set_sequence_id(1);
-    auto* one = req.add_requests();   // 一条命令设全字段；调两次会造出"只有 value 的空 key"
+    auto* one = req.add_requests();  // 一条命令设全字段；调两次会造出"只有 value 的空 key"
     one->mutable_put()->set_key("net-key");
     one->mutable_put()->set_value("net-value");
     ASSERT_TRUE(cluster.peer(leader).propose(req).has_value());
@@ -213,7 +213,7 @@ TEST(TcpCluster, ElectsLeaderAndReplicatesOverRealSockets) {
     // 直接查各节点存储：apply 在每个节点都会发生，绕开"读必须找当前 leader"的约束，
     // 断言也更硬——三个节点的状态机都得有这条数据。
     const std::string key = "net-key";
-    const auto key_bytes = std::as_bytes(std::span{key.data(), key.size()});
+    const auto key_bytes = tinykv::as_bytes(tinykv::span{key.data(), key.size()});
     for (int i = 0; i < kNodes; ++i) {
         auto got = cluster.engine(i).get(tinykv::Cf::Default, key_bytes);
         ASSERT_TRUE(got.has_value());

@@ -4,14 +4,14 @@
 #pragma once
 
 #include <cstddef>
-#include <span>
 #include <string_view>
+#include "common/compat.h"
 
 namespace tinykv::testlib {
 
 // 生命周期跟随入参：调用方保证 s 在 span 使用期间有效
-[[nodiscard]] inline std::span<const std::byte> bytes(std::string_view s) {
-    return std::as_bytes(std::span{s.data(), s.size()});
+[[nodiscard]] inline tinykv::span<const std::byte> bytes(std::string_view s) {
+    return tinykv::as_bytes(tinykv::span{s.data(), s.size()});
 }
 
 }  // namespace tinykv::testlib

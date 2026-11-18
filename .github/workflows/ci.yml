@@ -142,6 +142,49 @@ jobs:
           path: build/evidence/
           if-no-files-found: ignore
 
+  # 支持面矩阵：{g++, clang++} × {17, 20, 23}
+  # 为什么单列一个 job：主 job 证明"主工具链 + 默认标准"可用，本 job 证明"换标准/换编译器
+  # 仍可用"。只跑 fast（单元/模拟），把时间压在分钟级；nightly 仍由 nightly job 承担。
+  compat:
+    name: 兼容矩阵 · ${{ matrix.cxx }} · C++${{ matrix.standard }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { compiler: gcc, cxx: g++,     standard: "17" }
+          - { compiler: gcc, cxx: g++,     standard: "20" }
+          - { compiler: gcc, cxx: g++,     standard: "23" }
+          - { compiler: clang, cxx: clang++, standard: "17" }
+          - { compiler: clang, cxx: clang++, standard: "20" }
+          - { compiler: clang, cxx: clang++, standard: "23" }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build g++ clang libprotobuf-dev protobuf-compiler libspdlog-dev
+
+      - name: 配置（指定编译器与标准）
+        env:
+          CC: ${{ matrix.compiler }}
+          CXX: ${{ matrix.cxx }}
+        run: |
+          cmake -S . -B build/compat -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DTINYKV_CXX_STANDARD=${{ matrix.standard }}
+
+      - name: 构建
+        env:
+          CC: ${{ matrix.compiler }}
+          CXX: ${{ matrix.cxx }}
+        run: cmake --build build/compat --parallel 4
+
+      - name: fast 测试
+        run: ctest --test-dir build/compat -L fast --output-on-failure
+
   nightly:
     name: 夜跑骨架（nightly）
     runs-on: ubuntu-24.04

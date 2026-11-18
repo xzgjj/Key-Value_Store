@@ -28,7 +28,7 @@ namespace tinykv::txn {
 // get 的结果（含锁等待语义：blocked=遇未过期锁，调用方稍后重试）
 struct TxnGetResult {
     std::optional<std::string> value;
-    bool blocked{false};   // true = 遇未过期他者锁（value 必空）
+    bool blocked{false};  // true = 遇未过期他者锁（value 必空）
 };
 
 class TxnClient {
@@ -43,8 +43,8 @@ public:
     [[nodiscard]] result<Ts> begin() {
         auto r = tso_.get_timestamps(1);
         if (!r.has_value() || r->empty()) {
-            return std::unexpected(NotLeader{.region_id = RegionId{0},
-                                             .leader_hint = std::nullopt});   // TSO 不可用
+            return tinykv::unexpected(
+                NotLeader{.region_id = RegionId{0}, .leader_hint = std::nullopt});  // TSO 不可用
         }
         start_ts_ = r->front();
         writes_.clear();
@@ -53,20 +53,18 @@ public:
 
     result<void> set(std::string key, std::string value) {
         if (key.empty()) {
-            return std::unexpected(InvalidArgument{"空 key"});
+            return tinykv::unexpected(InvalidArgument{"空 key"});
         }
-        writes_.push_back(Mutation{.op = Mutation::Op::kPut,
-                                   .key = std::move(key),
-                                   .value = std::move(value)});
+        writes_.push_back(
+            Mutation{.op = Mutation::Op::kPut, .key = std::move(key), .value = std::move(value)});
         return {};
     }
 
     result<void> del(std::string key) {
         if (key.empty()) {
-            return std::unexpected(InvalidArgument{"空 key"});
+            return tinykv::unexpected(InvalidArgument{"空 key"});
         }
-        writes_.push_back(
-            Mutation{.op = Mutation::Op::kDel, .key = std::move(key), .value = {}});
+        writes_.push_back(Mutation{.op = Mutation::Op::kDel, .key = std::move(key), .value = {}});
         return {};
     }
 
@@ -84,15 +82,15 @@ public:
         }
         auto locked = resolve_blocking(std::move(r.error()), now_ms);
         if (!locked.has_value()) {
-            return std::unexpected(locked.error());
+            return tinykv::unexpected(locked.error());
         }
         if (*locked) {
-            return TxnGetResult{.value = std::nullopt, .blocked = true};   // 未过期锁，稍后重试
+            return TxnGetResult{.value = std::nullopt, .blocked = true};  // 未过期锁，稍后重试
         }
         // 决议完成 → 重试一次
         auto retry = exec_.get(key, start_ts_);
         if (!retry.has_value()) {
-            return std::unexpected(retry.error());
+            return tinykv::unexpected(retry.error());
         }
         return TxnGetResult{.value = std::move(*retry), .blocked = false};
     }
@@ -101,7 +99,7 @@ public:
     // 写写冲突原样上抛（SPEC：client 换 ts 重试或报用户，D4-5 重试策略在调用方）。
     [[nodiscard]] result<Ts> commit(std::uint64_t now_ms) {
         if (writes_.empty()) {
-            return std::unexpected(InvalidArgument{"空事务无 mutations 可提交"});
+            return tinykv::unexpected(InvalidArgument{"空事务无 mutations 可提交"});
         }
         primary_ = writes_.front().key;
         for (const auto& m : writes_) {
@@ -114,26 +112,26 @@ public:
             const KvError conflict = pre.error();
             auto locked = resolve_blocking(std::move(pre.error()), now_ms);
             if (!locked.has_value()) {
-                return std::unexpected(locked.error());
+                return tinykv::unexpected(locked.error());
             }
             if (*locked) {
-                return std::unexpected(conflict);   // 未过期锁：原样返回，调用方稍后重试
+                return tinykv::unexpected(conflict);  // 未过期锁：原样返回，调用方稍后重试
             }
             pre = exec_.prewrite(writes_, primary_, start_ts_, lock_ttl_ms_, now_ms);
             if (!pre.has_value()) {
-                return std::unexpected(pre.error());
+                return tinykv::unexpected(pre.error());
             }
         }
         auto ts = tso_.get_timestamps(1);
         if (!ts.has_value() || ts->empty()) {
-            return std::unexpected(NotLeader{.region_id = RegionId{0},
-                                             .leader_hint = std::nullopt});
+            return tinykv::unexpected(
+                NotLeader{.region_id = RegionId{0}, .leader_hint = std::nullopt});
         }
         const Ts commit_ts = ts->front();
         // primary 先提交（提交凭证），secondary 并发语义由调用方控制（D4-3 ≤8）
         std::vector<std::string> primary_keys{primary_};
         if (auto r = exec_.commit(primary_keys, start_ts_, commit_ts); !r.has_value()) {
-            return std::unexpected(r.error());
+            return tinykv::unexpected(r.error());
         }
         std::vector<std::string> secondary;
         for (const auto& m : writes_) {
@@ -143,7 +141,7 @@ public:
         }
         if (!secondary.empty()) {
             if (auto r = exec_.commit(secondary, start_ts_, commit_ts); !r.has_value()) {
-                return std::unexpected(r.error());
+                return tinykv::unexpected(r.error());
             }
         }
         writes_.clear();
@@ -158,7 +156,7 @@ public:
         }
         writes_.clear();
         if (keys.empty()) {
-            return {};   // 只读事务无锁可回滚（no-op 成功，不是错误）
+            return {};  // 只读事务无锁可回滚（no-op 成功，不是错误）
         }
         return exec_.rollback(keys, start_ts_);
     }
@@ -170,28 +168,28 @@ private:
     // 返回值：true=仍被未过期锁阻塞（调用方稍后重试）；false=已决议，可重试本操作。
     [[nodiscard]] result<bool> resolve_blocking(KvError&& err, std::uint64_t now_ms) {
         if (!std::holds_alternative<LockConflict>(err)) {
-            return std::unexpected(std::move(err));   // 非锁冲突（如写写冲突）原样上抛
+            return tinykv::unexpected(std::move(err));  // 非锁冲突（如写写冲突）原样上抛
         }
         const auto lc = std::get<LockConflict>(err);
         auto st = exec_.check_txn_status(lc.primary, Ts{lc.lock_start_ts}, now_ms);
         if (!st.has_value()) {
-            return std::unexpected(st.error());
+            return tinykv::unexpected(st.error());
         }
         if (st->committed) {
             // 正向推进：用对方的 commit_ts 补 Write 删 Lock（红线3：不存在永久死锁锁）
             auto r = exec_.resolve_locks_of(lc.primary, Ts{lc.lock_start_ts}, st->commit_ts);
             if (!r.has_value()) {
-                return std::unexpected(r.error());
+                return tinykv::unexpected(r.error());
             }
             return false;
         }
         if (st->lock_ttl_remaining_ms > 0) {
-            return true;   // 未过期：等待（调用方稍后带更新的 now_ms 重试）
+            return true;  // 未过期：等待（调用方稍后带更新的 now_ms 重试）
         }
         // 过期或已回滚 → 清锁
         auto r = exec_.resolve_locks_of(lc.primary, Ts{lc.lock_start_ts}, std::nullopt);
         if (!r.has_value()) {
-            return std::unexpected(r.error());
+            return tinykv::unexpected(r.error());
         }
         return false;
     }

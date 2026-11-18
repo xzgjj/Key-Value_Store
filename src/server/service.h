@@ -43,7 +43,7 @@ public:
     [[nodiscard]] result<void> start_all() {
         for (auto& e : entries_) {
             if (auto r = e.service->start(); !r.has_value()) {
-                auto fail = std::unexpected(std::move(r.error()));
+                auto fail = tinykv::unexpected(std::move(r.error()));
                 rollback_started();
                 return fail;
             }
@@ -71,7 +71,7 @@ public:
             it->started = false;
         }
         if (!first_err.empty()) {
-            return std::unexpected(IoFailed{.path = "lifecycle:stop", .reason = first_err});
+            return tinykv::unexpected(IoFailed{.path = "lifecycle:stop", .reason = first_err});
         }
         return {};
     }

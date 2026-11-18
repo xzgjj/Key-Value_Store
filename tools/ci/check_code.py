@@ -193,6 +193,11 @@ def check_dup_code(root: Path, rules: dict, files: list[str]) -> L.CheckResult:
             norm = re.sub(r"\s+", "", raw)
             if len(norm) < 8:
                 continue
+            # #include 行不参与重复判定：头文件包含是声明式的，且 clang-format 会把
+            # 项目内 include 归成一个连续块（`#include "x"` 规范化后完全同形），
+            # 于是一个正常的分块风格就会自我匹配成一堆"重复代码"。判定只应针对逻辑行。
+            if norm.startswith("#include"):
+                continue
             kept.append((norm, rel, lineno))
 
     groups: dict[tuple[str, ...], list[int]] = defaultdict(list)

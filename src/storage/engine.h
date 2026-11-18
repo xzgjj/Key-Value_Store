@@ -15,10 +15,10 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <span>
 #include <string>
 #include <vector>
 
+#include "common/compat.h"
 #include "common/error.h"
 #include "storage/memtable.h"
 #include "storage/sst.h"
@@ -28,8 +28,8 @@
 namespace tinykv {
 
 struct EngineOptions {
-    std::filesystem::path dir;                  // 数据目录（内含 manifest / wal/ / sst/）
-    bool fsync_on_commit = true;                // REL-02 开关；关掉仅供基准对比
+    std::filesystem::path dir;    // 数据目录（内含 manifest / wal/ / sst/）
+    bool fsync_on_commit = true;  // REL-02 开关；关掉仅供基准对比
     std::size_t memtable_limit_bytes = 64U << 20U;
     std::size_t wal_segment_bytes = 128U << 20U;
     // SST 个数达到该阈值即合并为一张（0 = 关闭，仅用于基准对比）。
@@ -41,8 +41,8 @@ class Engine final : public Storage {
 public:
     [[nodiscard]] static result<std::unique_ptr<Engine>> open(const EngineOptions& opt);
 
-    [[nodiscard]] result<GetResult> get(Cf cf, std::span<const std::byte> key) override;
-    [[nodiscard]] result<void> write(std::span<const Modify> batch) override;
+    [[nodiscard]] result<GetResult> get(Cf cf, tinykv::span<const std::byte> key) override;
+    [[nodiscard]] result<void> write(tinykv::span<const Modify> batch) override;
     [[nodiscard]] result<std::unique_ptr<Reader>> create_reader() override;
 
     // 观测用：当前 SST 张数（测试断言合并阈值是否生效）
@@ -65,7 +65,7 @@ private:
     explicit Engine(EngineOptions opt);
 
     [[nodiscard]] result<void> recover();
-    [[nodiscard]] result<void> apply_batch(std::span<const Modify> batch);
+    [[nodiscard]] result<void> apply_batch(tinykv::span<const Modify> batch);
     // 写前调用：若已有 Reader 持有快照（use_count>1）则先写时复制一份，
     // 保证快照不可变；无 Reader 时零拷贝直接原地写。
     [[nodiscard]] MemTable& mutable_mem_locked();

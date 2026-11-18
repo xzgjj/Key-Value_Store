@@ -9,17 +9,17 @@
 
 #include <cstdint>
 #include <set>
-#include <span>
 #include <string>
 #include <variant>
 
+#include "common/compat.h"
 #include "common/crc32c.h"
 #include "common/error.h"
 #include "peer_cluster.h"
 
 namespace {
 
-using namespace tinykv::testlib;   // NOLINT(google-build-using-namespace)
+using namespace tinykv::testlib;  // NOLINT(google-build-using-namespace)
 
 // 用多块路径追平：落后节点在日志压缩后只能靠分块快照追上
 TEST(SnapshotChunk, LaggingFollowerCatchesUpViaChunks) {
@@ -93,8 +93,8 @@ TEST(SnapshotChunk, CorruptChunkRejected) {
     chunk.set_total_chunks(1);
     chunk.set_data("payload");
     // 写入"正确 CRC + 1"作为坏值：与真实 CRC 必不相等，模拟传输篡改
-    const auto good = tinykv::crc32c(
-        std::as_bytes(std::span{chunk.data().data(), chunk.data().size()}));
+    const auto good =
+        tinykv::crc32c(tinykv::as_bytes(tinykv::span{chunk.data().data(), chunk.data().size()}));
     chunk.set_crc32(good + 1);
     std::string blob;
     ASSERT_TRUE(chunk.SerializeToString(&blob));

@@ -1,5 +1,5 @@
-// 文件用途：Region 元数据 + StoreMeta 区间索引 + Router 路由与 epoch 校验（M4 第②层，FUNC-07/REL-05）。
-// 归属：TinyKV-CPP（M4 Multi-Raft 控制面）。
+// 文件用途：Region 元数据 + StoreMeta 区间索引 + Router 路由与 epoch 校验（M4
+// 第②层，FUNC-07/REL-05）。 归属：TinyKV-CPP（M4 Multi-Raft 控制面）。
 //
 // REL-05 不变量：任意时刻每个 key 恰好属于一个 Region。实现为"按 end_key 排序的半开区间
 // [start,end) 首尾相接、无重叠、无空洞"，find_region 用 upper_bound(end_key) 取第一个覆盖者。
@@ -37,7 +37,7 @@ struct Region {
     std::string end_key;
     std::vector<PeerInfo> peers;
     RegionEpoch epoch;
-    std::int64_t size_hint{0};   // 近似字节数（Put/Delete apply 时增减，供 split-check 估计）
+    std::int64_t size_hint{0};  // 近似字节数（Put/Delete apply 时增减，供 split-check 估计）
 
     // key 是否落在本 region：start <= key < end（空 end = 无限）
     [[nodiscard]] bool contains(std::string_view key) const noexcept {
@@ -49,12 +49,13 @@ struct Region {
 
 // Split 校验与切分（SPEC-3 红线1）：split_key 必须落在 (start,end) 开区间。
 // 成功返回左右两个新 region：左继承原 id、右用 new_id；两者 version 各 +1（数据世代推进）。
-[[nodiscard]] inline result<std::pair<Region, Region>> split_region(
-    const Region& r, std::string_view split_key, RegionId new_id) {
+[[nodiscard]] inline result<std::pair<Region, Region>> split_region(const Region& r,
+                                                                    std::string_view split_key,
+                                                                    RegionId new_id) {
     const bool gt_start = r.start_key.empty() || split_key > std::string_view(r.start_key);
     const bool lt_end = r.end_key.empty() || split_key < std::string_view(r.end_key);
     if (!gt_start || !lt_end || split_key.empty()) {
-        return std::unexpected(InvalidArgument{"split_key 必须落在 region 开区间内"});
+        return tinykv::unexpected(InvalidArgument{"split_key 必须落在 region 开区间内"});
     }
     Region left = r;
     left.end_key = std::string(split_key);
@@ -81,7 +82,7 @@ public:
     [[nodiscard]] result<void> add_region(Region region) {
         std::unique_lock lock(mu_);
         if (overlaps_locked(region)) {
-            return std::unexpected(InvalidArgument{"region 区间与既有 region 重叠"});
+            return tinykv::unexpected(InvalidArgument{"region 区间与既有 region 重叠"});
         }
         insert_locked(std::move(region));
         return {};
@@ -93,13 +94,13 @@ public:
         std::unique_lock lock(mu_);
         auto it = regions_.find(old_id);
         if (it == regions_.end()) {
-            return std::unexpected(InvalidArgument{"待 split 的 region 不存在"});
+            return tinykv::unexpected(InvalidArgument{"待 split 的 region 不存在"});
         }
         const std::string old_start = it->second.start_key;
         const std::string old_end = it->second.end_key;
         if (left.start_key != old_start || right.end_key != old_end ||
             left.end_key != right.start_key) {
-            return std::unexpected(InvalidArgument{"split 左右区间未覆盖原区间"});
+            return tinykv::unexpected(InvalidArgument{"split 左右区间未覆盖原区间"});
         }
         regions_.erase(it);
         ranges_.erase(old_end);
@@ -113,9 +114,9 @@ public:
     // 在非空 end 索引里找第一个 end > key 的区间，找不到则落到唯一的 +∞ 区间。
     [[nodiscard]] std::optional<Region> find_region(std::string_view key) const {
         std::shared_lock lock(mu_);
-        auto it = ranges_.find("");   // +∞ 区间（end 为空）
+        auto it = ranges_.find("");  // +∞ 区间（end 为空）
         const bool has_infinite = (it != ranges_.end());
-        auto lit = ranges_.upper_bound(std::string(key));   // 第一个 end > key
+        auto lit = ranges_.upper_bound(std::string(key));  // 第一个 end > key
         if (lit == ranges_.end() || lit->first.empty()) {
             // 没有更近的有界区间 → 若存在 +∞ 区间则命中它
             if (has_infinite) {
@@ -172,13 +173,13 @@ private:
     void insert_locked(Region r) {
         const RegionId id = r.id;
         const std::string end = r.end_key;
-        ranges_[end] = id;   // 空 end（+∞）作为最大 key，upper_bound 永远排在最后
+        ranges_[end] = id;  // 空 end（+∞）作为最大 key，upper_bound 永远排在最后
         regions_.emplace(id, std::move(r));
     }
 
     mutable std::shared_mutex mu_;
     std::map<RegionId, Region> regions_;
-    std::map<std::string, RegionId> ranges_;   // end_key → RegionId（有序）
+    std::map<std::string, RegionId> ranges_;  // end_key → RegionId（有序）
 };
 
 // 路由入口：按 key 找 region 并校验客户端携带的 epoch。
@@ -187,16 +188,17 @@ public:
     explicit Router(const StoreMeta& meta) : meta_(meta) {}
 
     // 成功返回 region；失败返回 StaleEpoch{have,want,hint} 或 KeyNotInRegion
-    [[nodiscard]] result<Region> route(std::string_view key, const RegionEpoch& client_epoch) const {
+    [[nodiscard]] result<Region> route(std::string_view key,
+                                       const RegionEpoch& client_epoch) const {
         auto region = meta_.find_region(key);
         if (!region) {
-            return std::unexpected(KeyNotInRegion{.key = std::string(key), .region_id = RegionId{0}});
+            return tinykv::unexpected(
+                KeyNotInRegion{.key = std::string(key), .region_id = RegionId{0}});
         }
         if (!client_epoch.is_comparable_with(region->epoch) ||
             region->epoch.is_newer_than(client_epoch)) {
-            return std::unexpected(StaleEpoch{.region_id = region->id,
-                                              .have = client_epoch,
-                                              .want = region->epoch});
+            return tinykv::unexpected(
+                StaleEpoch{.region_id = region->id, .have = client_epoch, .want = region->epoch});
         }
         return *region;
     }

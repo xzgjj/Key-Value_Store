@@ -2,10 +2,10 @@
 // 归属：TinyKV-CPP（M2 RaftKV，FUNC-04；M4 第①层批量 propose）。
 
 #include "raftstore/peer.h"
+#include "common/compat.h"
 
 #include <algorithm>
 #include <memory>
-#include <span>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -17,7 +17,7 @@
 
 namespace tinykv::raftstore {
 
-constexpr char kTxnMarker = '\x2B';           // RaftCmdRequest 起始字节只会是 0x0A/0x12/0x1A
+constexpr char kTxnMarker = '\x2B';  // RaftCmdRequest 起始字节只会是 0x0A/0x12/0x1A
 constexpr char kTxnTypePrewrite = '\x01';
 constexpr char kTxnTypeCommit = '\x02';
 constexpr char kTxnTypeRollback = '\x03';
@@ -29,7 +29,7 @@ namespace {
 constexpr std::uint32_t kSnapshotWindow = 4;
 
 // 单次快照的接收上限：块数 × 块长不得越过它（拒收而非尝试分配）
-constexpr std::size_t kMaxSnapshotBytes = 512U * 1024U * 1024U;   // 512MB
+constexpr std::size_t kMaxSnapshotBytes = 512U * 1024U * 1024U;  // 512MB
 
 // proto 列族 → 存储层列族（唯一转换点；两侧定义见 proto/common.proto 与 common/encode.h）
 Cf to_cf(commonpb::CfName name) {
@@ -47,7 +47,7 @@ Cf to_cf(commonpb::CfName name) {
 }  // namespace
 
 Peer::Peer(std::unique_ptr<raft::RaftLog> log, Storage& storage, const raft::Config& cfg)
-    : self_(cfg.id), log_(std::move(log)), storage_(storage) {   // 顺序须与声明一致
+    : self_(cfg.id), log_(std::move(log)), storage_(storage) {  // 顺序须与声明一致
     // INV-16 / ARCH-1 P0-4：状态机游标必须从持久化位点播种，不能默认 0。
     // 崩溃重启且 applied == committed 时，Raft 的 dispatch 游标已是 N，collect_apply()
     // 无条目可灌 → 没有任何 apply 批次会把这里的 applied_ 推到 N → ReadIndex 永远等不到
@@ -59,7 +59,7 @@ Peer::Peer(std::unique_ptr<raft::RaftLog> log, Storage& storage, const raft::Con
 result<std::unique_ptr<Peer>> Peer::open(const raft::Config& cfg, Storage& storage) {
     auto log = raft::RaftLog::open(storage);
     if (!log) {
-        return std::unexpected(log.error());
+        return tinykv::unexpected(log.error());
     }
     // 构造函数私有：用 unique_ptr 立即接管（非数组 new，ENG-04 只禁裸数组）
     return std::unique_ptr<Peer>(new Peer(std::move(*log), storage, cfg));
@@ -82,21 +82,21 @@ result<bool> Peer::propose(const cmdpb::RaftCmdRequest& req) {
     }
     std::string payload;
     if (!req.SerializeToString(&payload)) {
-        return std::unexpected(Corrupted{.where = "peer:propose", .reason = "请求序列化失败"});
+        return tinykv::unexpected(Corrupted{.where = "peer:propose", .reason = "请求序列化失败"});
     }
     if (batching_) {
         // M4 第①层：攒批，等 on_ready 时合并成一次共识往返（Envelope）。
         // 必须先查 role：入队绕过了 raft_->propose 的 NotLeader 检查，非 leader 要在此挡住，
         // 否则非 leader 会"假成功"接收提案（raft_kv_test 的非 leader 拒绝语义会被破坏）。
         if (!raft_->is_leader()) {
-            return std::unexpected(
+            return tinykv::unexpected(
                 NotLeader{.region_id = RegionId{0}, .leader_hint = std::nullopt});
         }
         pending_proposals_.push_back(std::move(payload));
         return true;
     }
     if (auto r = raft_->propose(std::move(payload)); !r) {
-        return std::unexpected(r.error());
+        return tinykv::unexpected(r.error());
     }
     return true;
 }
@@ -109,19 +109,21 @@ result<bool> Peer::flush_proposals() {
     batch.swap(pending_proposals_);
     // 单条也走 Envelope（格式统一、解包路径单一）；仅一条时不额外增加往返
     if (auto r = raft_->propose(raft::pack_entries(batch)); !r) {
-        return std::unexpected(r.error());
+        return tinykv::unexpected(r.error());
     }
     return true;
 }
 
 result<GetResult> Peer::get(Cf cf, std::string_view key) const {
     if (!raft_->is_leader()) {
-        return std::unexpected(NotLeader{.region_id = RegionId{0}, .leader_hint = std::nullopt});
+        return tinykv::unexpected(NotLeader{.region_id = RegionId{0}, .leader_hint = std::nullopt});
     }
-    return storage_.get(cf, std::as_bytes(std::span{key.data(), key.size()}));
+    return storage_.get(cf, tinykv::as_bytes(tinykv::span{key.data(), key.size()}));
 }
 
-void Peer::tick() { raft_->tick(); }
+void Peer::tick() {
+    raft_->tick();
+}
 
 std::vector<raftpb::Message> Peer::take_messages() {
     // 只取 outbox，**不要**再调用 take_ready()：那会顺手清掉待 apply 队列与已确认读位点，
@@ -145,11 +147,12 @@ result<void> Peer::step_message(const raftpb::Message& msg) {
     }
     // 快照安装是应用层动作（要写存储），状态机只负责重置日志指针
     if (msg.term() < raft_->term().value) {
-        return {};   // 过期快照直接丢弃
+        return {};  // 过期快照直接丢弃
     }
     raftpb::SnapshotData data;
     if (!data.ParseFromString(msg.snapshot_data())) {
-        return std::unexpected(Corrupted{.where = "peer:snapshot", .reason = "快照载荷解析失败"});
+        return tinykv::unexpected(
+            Corrupted{.where = "peer:snapshot", .reason = "快照载荷解析失败"});
     }
     if (auto r = install_snapshot(data); !r) {
         return r;
@@ -170,15 +173,15 @@ result<void> Peer::step_message(const raftpb::Message& msg) {
 
 result<void> Peer::for_each_entry(
     const std::function<void(Cf, const std::string&, const std::string&)>& fn) const {
-    constexpr std::size_t kAll = 1U << 24U;   // 单 region 全量；超限属 M4 分块范畴
+    constexpr std::size_t kAll = 1U << 24U;  // 单 region 全量；超限属 M4 分块范畴
     for (const Cf cf : {Cf::Default, Cf::Write, Cf::Lock}) {
         auto reader = storage_.create_reader();
         if (!reader) {
-            return std::unexpected(reader.error());
+            return tinykv::unexpected(reader.error());
         }
         auto it = (*reader)->scan(cf, {}, kAll);
         if (!it) {
-            return std::unexpected(it.error());
+            return tinykv::unexpected(it.error());
         }
         for (; (**it).valid(); (**it).next()) {
             fn(cf, std::string((**it).key()), std::string((**it).value()));
@@ -196,7 +199,7 @@ result<raftpb::SnapshotData> Peer::dump_snapshot() const {
         kv->set_value(value);
     });
     if (!walk) {
-        return std::unexpected(walk.error());
+        return tinykv::unexpected(walk.error());
     }
     return data;
 }
@@ -206,9 +209,8 @@ result<void> Peer::install_snapshot(const raftpb::SnapshotData& data) {
     std::map<std::pair<std::uint32_t, std::string>, bool> incoming;
     for (const raftpb::SnapshotKv& kv : data.kvs()) {
         incoming[{kv.cf(), kv.key()}] = true;
-        batch.push_back(Modify{Put{.cf = static_cast<Cf>(kv.cf()),
-                                   .key = kv.key(),
-                                   .value = kv.value()}});
+        batch.push_back(
+            Modify{Put{.cf = static_cast<Cf>(kv.cf()), .key = kv.key(), .value = kv.value()}});
     }
     // 删除本地有、快照无的键：只覆盖不删除，分叉日志留下的脏键会永久残留
     auto walk = for_each_entry([&](Cf cf, const std::string& key, const std::string&) {
@@ -217,7 +219,7 @@ result<void> Peer::install_snapshot(const raftpb::SnapshotData& data) {
         }
     });
     if (!walk) {
-        return std::unexpected(walk.error());
+        return tinykv::unexpected(walk.error());
     }
     if (batch.empty()) {
         return {};
@@ -231,7 +233,9 @@ std::vector<std::uint64_t> Peer::take_confirmed_reads() {
     return out;
 }
 
-result<std::uint64_t> Peer::begin_read_index() { return raft_->read_index(); }
+result<std::uint64_t> Peer::begin_read_index() {
+    return raft_->read_index();
+}
 
 namespace {
 
@@ -240,9 +244,7 @@ namespace {
 [[nodiscard]] std::optional<std::uint64_t> pump_read_quorum(
     Peer& peer, const std::function<void()>& pump, int max_rounds,
     std::chrono::steady_clock::time_point deadline, bool use_clock) {
-    const auto expired = [&] {
-        return use_clock && std::chrono::steady_clock::now() >= deadline;
-    };
+    const auto expired = [&] { return use_clock && std::chrono::steady_clock::now() >= deadline; };
     std::optional<std::uint64_t> index;
     for (int round = 0; round < max_rounds && !index.has_value(); ++round) {
         if (expired()) {
@@ -283,7 +285,7 @@ result<std::uint64_t> Peer::wait_read_index(const std::function<void()>& pump, i
     ++read_index_calls_;
     auto ctx = raft_->read_index();
     if (!ctx) {
-        return std::unexpected(ctx.error());
+        return tinykv::unexpected(ctx.error());
     }
     // 多副本下心跳回执受对端泵周期约束；纯按轮数自旋可能在响应到达前耗尽。
     // timeout 给墙钟兜底：轮数与墙钟取先到者，两者都不设时行为与旧版一致。
@@ -292,24 +294,28 @@ result<std::uint64_t> Peer::wait_read_index(const std::function<void()>& pump, i
         std::chrono::steady_clock::now() + timeout.value_or(std::chrono::milliseconds{0});
     auto index = pump_read_quorum(*this, pump, max_rounds, deadline, use_clock);
     if (!index.has_value()) {
-        return std::unexpected(IoFailed{.path = "peer:read-index",
-                                        .reason = "quorum 确认超时（分区或不是 leader）"});
+        return tinykv::unexpected(
+            IoFailed{.path = "peer:read-index", .reason = "quorum 确认超时（分区或不是 leader）"});
     }
     // 确认位点只是"多数派认过的日志位置"，还要等状态机真正追上才允许读
     pump_until_applied(*this, pump, *index, max_rounds, deadline, use_clock);
     if (!applied_at_least(*index)) {
-        return std::unexpected(IoFailed{.path = "peer:read-index",
-                                        .reason = "applied 未追上确认位点"});
+        return tinykv::unexpected(
+            IoFailed{.path = "peer:read-index", .reason = "applied 未追上确认位点"});
     }
     return *index;
 }
 
-void Peer::enable_lease(bool on) { raft_->enable_lease(on); }
+void Peer::enable_lease(bool on) {
+    raft_->enable_lease(on);
+}
 
-bool Peer::lease_valid() const { return raft_->lease_valid(); }
+bool Peer::lease_valid() const {
+    return raft_->lease_valid();
+}
 
 result<GetResult> Peer::read_directly(Cf cf, std::string_view key) const {
-    return storage_.get(cf, std::as_bytes(std::span{key.data(), key.size()}));
+    return storage_.get(cf, tinykv::as_bytes(tinykv::span{key.data(), key.size()}));
 }
 
 void Peer::record_apply_error(const KvError& error) {
@@ -321,12 +327,12 @@ result<std::size_t> Peer::on_ready() {
     // M4 第①层：先把窗口内攒批的请求合成一次 propose，再取 Ready 推进共识
     if (batching_) {
         if (auto r = flush_proposals(); !r) {
-            return std::unexpected(r.error());
+            return tinykv::unexpected(r.error());
         }
     }
     auto ready = raft_->take_ready();
     for (auto& m : ready.messages) {
-        outbox_.push_back(std::move(m));   // 交给传输层，不能丢
+        outbox_.push_back(std::move(m));  // 交给传输层，不能丢
     }
     for (const auto idx : ready.confirmed_reads) {
         confirmed_reads_.push_back(idx);
@@ -343,7 +349,7 @@ result<std::size_t> Peer::on_ready() {
     for (const raftpb::Entry& entry : ready.to_apply) {
         if (auto r = apply_entry(entry); !r) {
             record_apply_error(r.error());
-            return std::unexpected(r.error());
+            return tinykv::unexpected(r.error());
         }
         ++applied;
         last = entry.index();
@@ -353,9 +359,9 @@ result<std::size_t> Peer::on_ready() {
         // 持久化位点由 RaftLog 与 meta 同批写入，快照重置也不会留下"meta 新、applied 旧"的窗口。
         if (auto r = raft_->mark_applied(LogIndex{last}); !r) {
             record_apply_error(r.error());
-            return std::unexpected(r.error());
+            return tinykv::unexpected(r.error());
         }
-        applied_ = last;   // ReadIndex 放行判据只在确认后才前移
+        applied_ = last;  // ReadIndex 放行判据只在确认后才前移
         compact_log_if_needed(last);
     }
     return applied;
@@ -378,7 +384,7 @@ void Peer::compact_log_if_needed(std::uint64_t applied_index) {
 
 result<void> Peer::apply_entry(const raftpb::Entry& entry) {
     if (entry.data().empty()) {
-        return {};   // 空条目（leader 占位）无需执行
+        return {};  // 空条目（leader 占位）无需执行
     }
     // M5 ⑤：txn 载荷（[0x2B][type][kvpb]）走独立执行路径——cmdpb 反序列化对它必然失败
     if (entry.data()[0] == kTxnMarker) {
@@ -391,7 +397,7 @@ result<void> Peer::apply_entry(const raftpb::Entry& entry) {
         for (const auto& data : items) {
             cmdpb::RaftCmdRequest req;
             if (!req.ParseFromString(data)) {
-                return std::unexpected(
+                return tinykv::unexpected(
                     Corrupted{.where = "peer:apply-batch", .reason = "批内命令反序列化失败"});
             }
             if (auto r = execute(req); !r) {
@@ -402,7 +408,7 @@ result<void> Peer::apply_entry(const raftpb::Entry& entry) {
     }
     cmdpb::RaftCmdRequest req;
     if (!req.ParseFromString(entry.data())) {
-        return std::unexpected(Corrupted{.where = "peer:apply", .reason = "命令反序列化失败"});
+        return tinykv::unexpected(Corrupted{.where = "peer:apply", .reason = "命令反序列化失败"});
     }
     return execute(req);
 }
@@ -410,7 +416,7 @@ result<void> Peer::apply_entry(const raftpb::Entry& entry) {
 void Peer::fill_get_reply(const cmdpb::GetRequest& get, cmdpb::GetResponse* out) {
     // log 模式读：读也在日志里定序，apply 时才真正取数
     auto got = storage_.get(to_cf(get.cf()),
-                            std::as_bytes(std::span{get.key().data(), get.key().size()}));
+                            tinykv::as_bytes(tinykv::span{get.key().data(), get.key().size()}));
     if (got.has_value() && got->value.has_value()) {
         out->set_found(true);
         out->set_value(*got->value);
@@ -425,10 +431,10 @@ void Peer::fill_scan_reply(const cmdpb::ScanRequest& scan, cmdpb::ScanResponse* 
     if (!reader.has_value()) {
         return;
     }
-    auto it = (*reader)->scan(Cf::Default,
-                              std::as_bytes(std::span{scan.start_key().data(),
-                                                      scan.start_key().size()}),
-                              scan.limit());
+    auto it = (*reader)->scan(
+        Cf::Default,
+        tinykv::as_bytes(tinykv::span{scan.start_key().data(), scan.start_key().size()}),
+        scan.limit());
     if (!it.has_value()) {
         return;
     }
@@ -482,11 +488,11 @@ std::optional<KvError> run_txn_prewrite(Storage& storage, txn::LatchManager& lat
     for (const auto& m : req.mutations()) {
         keys.emplace_back(m.key());
         muts.push_back(txn::Mutation{
-            .op = m.op() == kvpb::Mutation::PUT ? txn::Mutation::Op::kPut
-                                                : txn::Mutation::Op::kDel,
-            .key = m.key(), .value = m.value()});
+            .op = m.op() == kvpb::Mutation::PUT ? txn::Mutation::Op::kPut : txn::Mutation::Op::kDel,
+            .key = m.key(),
+            .value = m.value()});
     }
-    auto guard = latches.acquire(keys);   // 红线4：latch 持有至 apply 完成
+    auto guard = latches.acquire(keys);  // 红线4：latch 持有至 apply 完成
     txn::MvccTxn mvcc(storage);
     // ARCH-1 P0-2：created_ms 随请求到达（旧客户端缺省 0，退化为"出生即过期"的旧行为）
     if (auto r = mvcc.prewrite(muts, req.primary_lock(), Ts{req.start_ts()}, req.lock_ttl(),
@@ -545,7 +551,7 @@ result<void> Peer::execute_txn_payload(const std::string& payload, std::uint64_t
     // code-review P1-5：只有 marker 一个字节的载荷会让 substr(2) 抛 out_of_range，
     // 异常从 apply 路径穿出直接终止进程。长度不足按损坏处理（apply 层不允许抛）。
     if (payload.size() < 2) {
-        return std::unexpected(
+        return tinykv::unexpected(
             Corrupted{.where = "peer:txn-payload", .reason = "事务载荷缺类型字节"});
     }
     const char type = payload[1];
@@ -569,14 +575,14 @@ result<void> Peer::execute_txn_payload(const std::string& payload, std::uint64_t
             break;
     }
     if (err.has_value()) {
-        txn_errors_[index] = std::move(*err);   // nullopt = 成功；client 泵到位点后查询
+        txn_errors_[index] = std::move(*err);  // nullopt = 成功；client 泵到位点后查询
     }
     return {};
 }
 
 result<void> Peer::apply_split_admin(const cmdpb::SplitRequest& split) {
     if (!my_region_.has_value() || store_meta_ == nullptr) {
-        return std::unexpected(InvalidArgument{"split 需要注入 region 元数据与 StoreMeta"});
+        return tinykv::unexpected(InvalidArgument{"split 需要注入 region 元数据与 StoreMeta"});
     }
     // BUG-0005 重放幂等：applied 标记丢失时，这条 split 可能已经切过元数据。
     // 判据取"左半 end == split_key 且 split_key 归新 region"——原 region 的 end 不可能等于
@@ -593,7 +599,7 @@ result<void> Peer::apply_split_admin(const cmdpb::SplitRequest& split) {
     const auto ep = static_cast<std::uint64_t>(split.new_region_id());
     auto parts = split_region(*my_region_, split.split_key(), RegionId{ep});
     if (!parts) {
-        return std::unexpected(parts.error());
+        return tinykv::unexpected(parts.error());
     }
     if (auto r = store_meta_->replace_region(my_region_->id, parts->first, parts->second); !r) {
         return r;
@@ -610,18 +616,18 @@ result<void> Peer::execute(const cmdpb::RaftCmdRequest& req) {
     // M4 第③层：admin 与 requests 互斥（proto 约定）；有 admin 时先执行它
     if (req.has_admin()) {
         if (req.requests_size() != 0) {
-            return std::unexpected(InvalidArgument{"admin 与 requests 互斥，不得共存"});
+            return tinykv::unexpected(InvalidArgument{"admin 与 requests 互斥，不得共存"});
         }
         if (req.admin().cmd_case() == cmdpb::AdminRequest::kSplit) {
             if (auto r = apply_split_admin(req.admin().split()); !r) {
                 return r;
             }
         } else {
-            return std::unexpected(InvalidArgument{"该 admin 命令本阶段未实现"});
+            return tinykv::unexpected(InvalidArgument{"该 admin 命令本阶段未实现"});
         }
     }
     ModifyVec batch;
-    cmdpb::RaftCmdResponse resp;   // 与 requests 顺序一一对应的回执
+    cmdpb::RaftCmdResponse resp;  // 与 requests 顺序一一对应的回执
     resp.mutable_header()->set_region_id(req.header().region_id());
     batch.reserve(static_cast<std::size_t>(req.requests_size()));
 
@@ -629,8 +635,8 @@ result<void> Peer::execute(const cmdpb::RaftCmdRequest& req) {
         switch (one.cmd_case()) {
             case cmdpb::Request::kPut: {
                 const auto& put = one.put();
-                batch.push_back(Modify{Put{.cf = to_cf(put.cf()),
-                                           .key = put.key(), .value = put.value()}});
+                batch.push_back(
+                    Modify{Put{.cf = to_cf(put.cf()), .key = put.key(), .value = put.value()}});
                 resp.add_cmd_responses()->mutable_put();
                 break;
             }
@@ -648,9 +654,10 @@ result<void> Peer::execute(const cmdpb::RaftCmdRequest& req) {
                 break;
             case cmdpb::Request::kReadIndex:
             case cmdpb::Request::CMD_NOT_SET:
-                return std::unexpected(InvalidArgument{"ReadIndex 不进日志；空命令视为契约误用"});
+                return tinykv::unexpected(
+                    InvalidArgument{"ReadIndex 不进日志；空命令视为契约误用"});
             default:
-                return std::unexpected(InvalidArgument{"未知命令类型"});
+                return tinykv::unexpected(InvalidArgument{"未知命令类型"});
         }
     }
     if (!batch.empty()) {
@@ -666,8 +673,7 @@ result<void> Peer::execute(const cmdpb::RaftCmdRequest& req) {
     return {};
 }
 
-std::optional<cmdpb::RaftCmdResponse> Peer::take_reply(std::uint64_t client_id,
-                                                      std::uint64_t seq) {
+std::optional<cmdpb::RaftCmdResponse> Peer::take_reply(std::uint64_t client_id, std::uint64_t seq) {
     const auto it = replies_.find({client_id, seq});
     if (it == replies_.end()) {
         return std::nullopt;
@@ -679,7 +685,7 @@ std::optional<cmdpb::RaftCmdResponse> Peer::take_reply(std::uint64_t client_id,
 
 std::optional<cmdpb::RaftCmdResponse> Peer::take_read_reply(std::uint64_t client_id,
                                                             std::uint64_t seq) {
-    return take_reply(client_id, seq);   // log 模式读与写共用回执表，语义一致
+    return take_reply(client_id, seq);  // log 模式读与写共用回执表，语义一致
 }
 
 // ---- M4 第⑤层：快照分块流 ----
@@ -715,7 +721,7 @@ void Peer::pump_snapshot_sends() {
         while (s.next < s.total && (s.next - s.ack) < kSnapshotWindow) {
             send_snapshot_chunk(PeerId{it->first}, s);
         }
-        if (s.ack >= s.total) {   // 全部确认：清理
+        if (s.ack >= s.total) {  // 全部确认：清理
             it = snapshot_sends_.erase(it);
         } else {
             ++it;
@@ -735,7 +741,7 @@ void Peer::send_snapshot_chunk(PeerId target, SnapshotSend& s) {
     chunk.set_chunk_seq(seq);
     chunk.set_total_chunks(s.total);
     chunk.set_data(std::string(piece));
-    chunk.set_crc32(crc32c(std::as_bytes(std::span{piece.data(), piece.size()})));
+    chunk.set_crc32(crc32c(tinykv::as_bytes(tinykv::span{piece.data(), piece.size()})));
 
     std::string payload;
     if (!chunk.SerializeToString(&payload)) {
@@ -754,14 +760,15 @@ void Peer::send_snapshot_chunk(PeerId target, SnapshotSend& s) {
 result<void> Peer::handle_snapshot_chunk(const raftpb::Message& msg) {
     raftpb::SnapshotChunk chunk;
     if (!chunk.ParseFromString(msg.snapshot_data())) {
-        return std::unexpected(
+        return tinykv::unexpected(
             Corrupted{.where = "peer:snapshot-chunk", .reason = "分块载荷解析失败"});
     }
     // 红线：逐块 CRC 校验——坏块直接拒绝，绝不把半截/脏数据安装进存储
     const std::string& d = chunk.data();
-    const auto got = crc32c(std::as_bytes(std::span{d.data(), d.size()}));
+    const auto got = crc32c(tinykv::as_bytes(tinykv::span{d.data(), d.size()}));
     if (got != chunk.crc32()) {
-        return std::unexpected(Corrupted{.where = "peer:snapshot-chunk", .reason = "块 CRC 不匹配"});
+        return tinykv::unexpected(
+            Corrupted{.where = "peer:snapshot-chunk", .reason = "块 CRC 不匹配"});
     }
     const PeerId from{msg.from()};
     auto& recv = snapshot_recvs_[from.value];
@@ -769,10 +776,10 @@ result<void> Peer::handle_snapshot_chunk(const raftpb::Message& msg) {
     // 恶意/损坏的 leader 可以让接收端一次分配数 GB（bad_alloc 直接终止进程）。
     const auto max_chunks = static_cast<std::uint32_t>(kMaxSnapshotBytes / snapshot_chunk_bytes_);
     if (chunk.total_chunks() == 0 || chunk.total_chunks() > max_chunks + 1) {
-        return std::unexpected(InvalidArgument{"快照块数越界（total_chunks 超出上限）"});
+        return tinykv::unexpected(InvalidArgument{"快照块数越界（total_chunks 超出上限）"});
     }
     if (recv.index != chunk.snapshot_index() || recv.total != chunk.total_chunks()) {
-        recv.index = chunk.snapshot_index();   // 新快照：重置缓存
+        recv.index = chunk.snapshot_index();  // 新快照：重置缓存
         recv.term = chunk.snapshot_term();
         recv.total = chunk.total_chunks();
         recv.received = 0;
@@ -781,8 +788,7 @@ result<void> Peer::handle_snapshot_chunk(const raftpb::Message& msg) {
     }
     const std::uint32_t seq = chunk.chunk_seq();
     if (seq >= recv.total) {
-        return std::unexpected(
-            InvalidArgument{"快照块序号越界（seq >= total_chunks）"});
+        return tinykv::unexpected(InvalidArgument{"快照块序号越界（seq >= total_chunks）"});
     }
     if (!recv.have[seq]) {
         recv.chunks[seq] = chunk.data();
@@ -811,7 +817,7 @@ result<void> Peer::handle_snapshot_chunk(const raftpb::Message& msg) {
 void Peer::handle_snapshot_ack(const raftpb::Message& msg) {
     const auto it = snapshot_sends_.find(msg.from());
     if (it == snapshot_sends_.end() || it->second.index != msg.snapshot().index()) {
-        return;   // 无发送状态或快照代号不符（旧 ACK）
+        return;  // 无发送状态或快照代号不符（旧 ACK）
     }
     const auto ack = static_cast<std::uint32_t>(msg.index()) + 1;
     if (ack > it->second.ack) {
@@ -827,7 +833,7 @@ result<void> Peer::finish_snapshot_recv(PeerId from, SnapshotRecv& recv) {
     }
     raftpb::SnapshotData data;
     if (!data.ParseFromString(blob)) {
-        return std::unexpected(
+        return tinykv::unexpected(
             Corrupted{.where = "peer:snapshot-chunk", .reason = "重组快照解析失败"});
     }
     if (auto r = install_snapshot(data); !r) {

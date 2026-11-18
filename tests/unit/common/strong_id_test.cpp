@@ -8,7 +8,6 @@
 #include <gtest/gtest.h>
 
 #include <array>
-#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -21,6 +20,28 @@ namespace {
 using tinykv::LogIndex;
 using tinykv::RegionId;
 using tinykv::Term;
+
+// ---------- 可移植的编译期探针（C++17/20/23 同义） ----------
+// 为什么不用 std::concepts：17 档没有 <concepts>，而"负例测试"要表达的是
+// "这个表达式能不能编译"，用 void_t 探测比概念更直接、三档语义完全一致。
+template <typename A, typename B, typename = void>
+struct has_eq : std::false_type {};
+template <typename A, typename B>
+struct has_eq<A, B, std::void_t<decltype(std::declval<A>() == std::declval<B>())>>
+    : std::true_type {};
+
+template <typename A, typename B, typename = void>
+struct has_lt : std::false_type {};
+template <typename A, typename B>
+struct has_lt<A, B, std::void_t<decltype(std::declval<A>() < std::declval<B>())>> : std::true_type {
+};
+
+template <typename Op, typename A, typename B, typename = void>
+struct can_invoke : std::false_type {};
+template <typename Op, typename A, typename B>
+struct can_invoke<Op, A, B,
+                  std::void_t<decltype(std::declval<Op>()(std::declval<A>(), std::declval<B>()))>>
+    : std::true_type {};
 
 // ---------- 行为断言：同 Tag 可比较、可排序 ----------
 
@@ -51,32 +72,32 @@ TEST(StrongId, HashableForUnorderedUse) {
 
 TEST(StrongId, CrossTagComparisonForbidden) {
     // 不同 Tag 的 StrongId 不可比较（清单 #2：交换实参编译报错）
-    static_assert(!std::equality_comparable_with<Term, LogIndex>);
-    static_assert(!std::totally_ordered_with<Term, LogIndex>);
-    static_assert(std::equality_comparable<Term>);  // 同 Tag 全序可用
-    static_assert(std::totally_ordered<Term>);
+    static_assert(!has_eq<Term, LogIndex>::value, "跨 Tag 相等比较必须编译失败");
+    static_assert(!has_lt<Term, LogIndex>::value, "跨 Tag 序比较必须编译失败");
+    static_assert(has_eq<Term, Term>::value);  // 同 Tag 可用
+    static_assert(has_lt<Term, Term>::value);
 }
 
 TEST(StrongId, NoImplicitIntegerConversion) {
     // 禁 uint64 → StrongId 隐式转换（必须显式构造）与反向隐式转换（红线 2）
-    static_assert(!std::convertible_to<uint64_t, Term>);
-    static_assert(!std::convertible_to<Term, uint64_t>);
-    static_assert(std::constructible_from<Term, uint64_t>);  // 显式构造必须可用
+    static_assert(!std::is_convertible_v<uint64_t, Term>);
+    static_assert(!std::is_convertible_v<Term, uint64_t>);
+    static_assert(std::is_constructible_v<Term, uint64_t>);  // 显式构造必须可用
 }
 
 TEST(StrongId, NoArithmeticOperators) {
     // ID 无算术语义：+/-/* 均不可用（SPEC-0 §0.3.1 注释）
-    static_assert(!std::invocable<std::plus<>, Term, Term>);
-    static_assert(!std::invocable<std::minus<>, Term, Term>);
-    static_assert(!std::invocable<std::multiplies<>, Term, int>);
+    static_assert(!can_invoke<std::plus<>, Term, Term>::value);
+    static_assert(!can_invoke<std::minus<>, Term, Term>::value);
+    static_assert(!can_invoke<std::multiplies<>, Term, int>::value);
 }
 
 TEST(StrongId, EightAliasesAreDistinctTypes) {
     // 八个别名两两互异：任取三组验证"同值不同型"（完整八组由模板保证）
-    static_assert(!std::same_as<tinykv::Term, tinykv::LogIndex>);
-    static_assert(!std::same_as<tinykv::RegionId, tinykv::PeerId>);
-    static_assert(!std::same_as<tinykv::SeqNo, tinykv::Ts>);
-    static_assert(!std::same_as<tinykv::StoreId, tinykv::ClientId>);
+    static_assert(!std::is_same_v<tinykv::Term, tinykv::LogIndex>);
+    static_assert(!std::is_same_v<tinykv::RegionId, tinykv::PeerId>);
+    static_assert(!std::is_same_v<tinykv::SeqNo, tinykv::Ts>);
+    static_assert(!std::is_same_v<tinykv::StoreId, tinykv::ClientId>);
 }
 
 // ---------- 可用性：值初始化、无效值、单调推进、零开销 ----------
@@ -86,7 +107,7 @@ TEST(StrongId, EightAliasesAreDistinctTypes) {
 TEST(StrongId, ValueInitializableForContainers) {
     // 回归点：M0 版无默认构造 → 不满足 DefaultInsertable → vector<LogIndex>(n) 编译失败。
     // Raft 里按键值下标建定长数组是常态，这条必须可用。
-    static_assert(std::default_initializable<Term>);
+    static_assert(std::is_default_constructible_v<Term>);
     std::vector<LogIndex> by_index(4);
     std::array<Term, 3> terms{};
     for (const auto& idx : by_index) {

@@ -1,10 +1,11 @@
 // 文件用途：PD-lite 调度器（进程内 C++ 对象，M4 第⑥层，FUNC-12）。只动元数据，数据面走独立通道
-//          （Mooncake 控制面/数据面分离，复用台账 M-1）。不生成 service stub、不开新 RPC（用户 A1）。
+//          （Mooncake 控制面/数据面分离，复用台账 M-1）。不生成 service stub、不开新 RPC（用户
+//          A1）。
 // 归属：TinyKV-CPP（M4 Multi-Raft 控制面）。
 //
-// 职责：收集 store/region 心跳 → 按 size 差产生 MovePeer 建议（限速）→ AskSplit 预分配 region/peer id。
-// 均衡只在"建议层"：真正迁移由 store 侧按建议走 AddLearner→AddVoter→RemoveNode（复用④层机制），
-// 调度器不直接改数据，也不阻塞数据通道。
+// 职责：收集 store/region 心跳 → 按 size 差产生 MovePeer 建议（限速）→ AskSplit 预分配 region/peer
+// id。 均衡只在"建议层"：真正迁移由 store 侧按建议走
+// AddLearner→AddVoter→RemoveNode（复用④层机制）， 调度器不直接改数据，也不阻塞数据通道。
 
 #pragma once
 
@@ -33,7 +34,7 @@ struct StoreStat {
 struct RegionStat {
     std::uint64_t region_id{0};
     std::uint64_t approximate_size{0};
-    std::vector<std::uint64_t> store_ids;   // 各副本所在 store
+    std::vector<std::uint64_t> store_ids;  // 各副本所在 store
     tinykv::RegionEpoch epoch;
 };
 
@@ -47,7 +48,7 @@ struct MovePeer {
 // 均衡参数（SPEC-3 D3-2：size 差 >20% 触发 MovePeer）
 struct BalanceConfig {
     double trigger_diff{0.2};
-    std::size_t max_moves_per_round{1};   // 限速：每轮最多迁移数（1 迁移/分钟的量级）
+    std::size_t max_moves_per_round{1};  // 限速：每轮最多迁移数（1 迁移/分钟的量级）
 };
 
 class Scheduler {
@@ -89,7 +90,7 @@ public:
         schedulerpb::AskSplitResp resp;
         const auto it = regions_.find(req.region_id());
         if (req.region_id() > next_region_id_) {
-            next_region_id_ = req.region_id();   // 父 region 未登记过时也不撞号
+            next_region_id_ = req.region_id();  // 父 region 未登记过时也不撞号
         }
         const std::uint64_t new_region = ++next_region_id_;
         resp.set_new_region_id(new_region);
@@ -98,7 +99,7 @@ public:
             stores = it->second.store_ids;
         }
         if (max_peer_id_ > next_peer_id_) {
-            next_peer_id_ = max_peer_id_;   // 首次分配前先对齐已见最大 peer id
+            next_peer_id_ = max_peer_id_;  // 首次分配前先对齐已见最大 peer id
         }
         for (std::uint32_t i = 0; i < peer_count; ++i) {
             resp.add_new_peer_ids(++next_peer_id_);
@@ -129,15 +130,15 @@ public:
         const double avg = average_size();
         if (avg <= 0.0 ||
             static_cast<double>(hi->total_size - lo->total_size) / avg <= cfg.trigger_diff) {
-            return out;   // 差异未超阈值
+            return out;  // 差异未超阈值
         }
         // 从大 store 上挑一个 region 迁到小 store（跳过已在小 store 有副本的 region）
         for (const auto& [id, r] : regions_) {
             const bool on_hi = contains_store(r.store_ids, hi->store_id);
             const bool on_lo = contains_store(r.store_ids, lo->store_id);
             if (on_hi && !on_lo) {
-                out.push_back(MovePeer{.region_id = id, .from_store = hi->store_id,
-                                       .to_store = lo->store_id});
+                out.push_back(MovePeer{
+                    .region_id = id, .from_store = hi->store_id, .to_store = lo->store_id});
                 if (out.size() >= cfg.max_moves_per_round) {
                     break;
                 }
@@ -155,7 +156,8 @@ public:
     [[nodiscard]] const std::map<std::uint64_t, RegionStat>& regions() const { return regions_; }
 
 private:
-    [[nodiscard]] static bool contains_store(const std::vector<std::uint64_t>& v, std::uint64_t id) {
+    [[nodiscard]] static bool contains_store(const std::vector<std::uint64_t>& v,
+                                             std::uint64_t id) {
         for (const auto s : v) {
             if (s == id) {
                 return true;
@@ -197,9 +199,9 @@ private:
 
     std::map<std::uint64_t, StoreStat> stores_;
     std::map<std::uint64_t, RegionStat> regions_;
-    std::uint64_t next_region_id_{0};      // 已分配/已见的最大 region id
-    std::uint64_t next_peer_id_{0};        // 已分配/已见的最大 peer id
-    std::uint64_t max_peer_id_{0};         // 心跳里见过的最大 peer id（抬升分配基线）
+    std::uint64_t next_region_id_{0};  // 已分配/已见的最大 region id
+    std::uint64_t next_peer_id_{0};    // 已分配/已见的最大 peer id
+    std::uint64_t max_peer_id_{0};     // 心跳里见过的最大 peer id（抬升分配基线）
     std::uint64_t split_count_{0};
 };
 
@@ -210,7 +212,7 @@ public:
 
     [[nodiscard]] result<std::vector<Ts>> get_timestamps(std::size_t n) override {
         if (n == 0) {
-            return std::unexpected(InvalidArgument{"批量授时 n 必须 > 0"});
+            return tinykv::unexpected(InvalidArgument{"批量授时 n 必须 > 0"});
         }
         std::lock_guard lock(mu_);
         std::vector<Ts> out;
@@ -222,7 +224,9 @@ public:
     }
 
 private:
-    Scheduler& owner_;   // 预留：ts 分配与调度决策同生命周期（当前只挂计数器）
+    // 预留：ts 分配与调度决策同生命周期（当前只挂计数器）。
+    // [[maybe_unused]]：这个"暂未读取"是有意的契约位，不该被 -Wunused-private-field 判红。
+    [[maybe_unused]] Scheduler& owner_;
     mutable std::mutex mu_;
     std::uint64_t ts_counter_{0};
 };

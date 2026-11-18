@@ -14,3 +14,13 @@ protobuf_generate(
 target_include_directories(tinykv_proto PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
 target_link_libraries(tinykv_proto PUBLIC protobuf::libprotobuf)
 
+
+# 生成代码不属于本项目的代码质量责任：-Wall -Werror 会被 protoc 产物里的
+# clang 特有写法（_Nullable/_Nonnull 等）判红。这里只对"生成库"关掉这几条，
+# 项目自身代码仍走全量告警（多编译器支持的前提，见 docs/testing.md 编译器矩阵）。
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(tinykv_proto PRIVATE
+        -Wno-nullability-extension
+        -Wno-unknown-warning-option
+        -Wno-unused-parameter)
+endif()

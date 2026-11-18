@@ -24,7 +24,7 @@ public:
     [[nodiscard]] std::string_view name() const override { return name_; }
     [[nodiscard]] tinykv::result<void> start() override {
         if (fail_start_) {
-            return std::unexpected(tinykv::InvalidArgument{"启动失败: " + name_});
+            return tinykv::unexpected(tinykv::InvalidArgument{"启动失败: " + name_});
         }
         log_->push_back("start:" + name_);
         started_ = true;
@@ -65,7 +65,7 @@ TEST(LifecycleTest, StartFailureRollsBackStarted) {
     std::vector<std::string> log;
     LifecycleManager lc;
     lc.register_service(std::make_unique<Stub>("a", &log));
-    lc.register_service(std::make_unique<Stub>("bad", &log, true));   // start 必败
+    lc.register_service(std::make_unique<Stub>("bad", &log, true));  // start 必败
     lc.register_service(std::make_unique<Stub>("c", &log));
 
     auto r = lc.start_all();
@@ -83,7 +83,7 @@ TEST(LifecycleTest, StopIsIdempotent) {
     ASSERT_TRUE(lc.start_all().has_value());
     ASSERT_TRUE(lc.stop_all().has_value());
     const auto after_first = log.size();
-    ASSERT_TRUE(lc.stop_all().has_value());   // 二次 stop：幂等
+    ASSERT_TRUE(lc.stop_all().has_value());  // 二次 stop：幂等
     EXPECT_EQ(log.size(), after_first);
 }
 

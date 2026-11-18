@@ -41,8 +41,21 @@ struct StrongId {
     [[nodiscard]] constexpr StrongId next() const noexcept { return StrongId{value + 1}; }
     [[nodiscard]] constexpr StrongId prev() const noexcept { return StrongId{value - 1}; }
 
+#if defined(__cpp_impl_three_way_comparison) && __cpp_impl_three_way_comparison >= 201907L
     friend constexpr bool operator==(StrongId, StrongId) = default;
+#else
+    friend constexpr bool operator==(StrongId a, StrongId b) noexcept { return a.value == b.value; }
+#endif
+#if defined(__cpp_impl_three_way_comparison) && __cpp_impl_three_way_comparison >= 201907L
     friend constexpr auto operator<=>(StrongId, StrongId) = default;
+#else
+    // C++17 兜底：显式六个比较（不写 <=> 的等价展开，避免与默认实现产生语义分歧）
+    friend constexpr bool operator!=(StrongId a, StrongId b) noexcept { return !(a == b); }
+    friend constexpr bool operator<(StrongId a, StrongId b) noexcept { return a.value < b.value; }
+    friend constexpr bool operator>(StrongId a, StrongId b) noexcept { return b < a; }
+    friend constexpr bool operator<=(StrongId a, StrongId b) noexcept { return !(b < a); }
+    friend constexpr bool operator>=(StrongId a, StrongId b) noexcept { return !(a < b); }
+#endif
 };
 
 // 八类 ID 的 Tag：空类型仅用于实例化出互异类型

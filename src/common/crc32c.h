@@ -9,7 +9,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <span>
+#include "common/compat.h"
 
 namespace tinykv {
 namespace detail {
@@ -32,7 +32,7 @@ inline constexpr auto kCrc32cTable = make_crc32c_table();
 }  // namespace detail
 
 // 一次性计算整段字节的 CRC32C（seed 供分片续算，本项目单段调用时传 0）
-[[nodiscard]] inline std::uint32_t crc32c(std::span<const std::byte> data,
+[[nodiscard]] inline std::uint32_t crc32c(tinykv::span<const std::byte> data,
                                           std::uint32_t seed = 0) {
     std::uint32_t crc = ~seed;
     for (const std::byte b : data) {

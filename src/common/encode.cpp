@@ -16,9 +16,9 @@ void append_be64(std::string& out, uint64_t v) {
 }  // namespace
 
 // CF 前缀编码：[cf_id:1B][user_key]；空 key 拒绝（InvalidArgument，SPEC-0 §0.3.1 矩阵）
-result<std::string> encode_key(Cf cf, std::span<const std::byte> user_key) {
+result<std::string> encode_key(Cf cf, tinykv::span<const std::byte> user_key) {
     if (user_key.empty()) {
-        return std::unexpected(InvalidArgument{"user_key 为空"});
+        return tinykv::unexpected(InvalidArgument{"user_key 为空"});
     }
     std::string out;
     out.reserve(user_key.size() + 1);
@@ -29,10 +29,10 @@ result<std::string> encode_key(Cf cf, std::span<const std::byte> user_key) {
 
 // 事务时间戳编码：[cf_id:1B][user_key][ts:8B]；复用 encode_key 完成前缀与空 key 校验，
 // 避免"两处各写一遍前缀"——前缀格式一旦分叉，MVCC 扫描会静默读错列族。
-result<std::string> encode_ts_key(Cf cf, std::span<const std::byte> user_key, Ts ts) {
+result<std::string> encode_ts_key(Cf cf, tinykv::span<const std::byte> user_key, Ts ts) {
     auto base = encode_key(cf, user_key);
     if (!base) {
-        return std::unexpected(base.error());
+        return tinykv::unexpected(base.error());
     }
     base->reserve(base->size() + 8);
     append_be64(*base, ts.value);

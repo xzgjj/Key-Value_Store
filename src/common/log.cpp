@@ -26,8 +26,38 @@ constexpr char kPattern[] = "[%Y-%m-%d %H:%M:%S.%e] [%l] %v";  // 文件与控�
 // 只保护装配（init/shutdown）；输出路径不碰这把锁
 std::mutex g_init_mutex;
 
-// 发布点：原子持有的 logger 句柄。读者 acquire 一次即可，无需全局互斥。
+// 发布点：logger 句柄。20+ 用 atomic<shared_ptr>（读者 acquire 一次，零锁）；
+// 17 档没有 atomic<shared_ptr>，退化为"短持锁拷一个 shared_ptr"——锁只在指针拷贝期间持有，
+// 不覆盖日志 I/O，所以不会把多线程输出串行化。
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
 std::atomic<std::shared_ptr<spdlog::logger>> g_logger{};
+
+[[nodiscard]] std::shared_ptr<spdlog::logger> load_logger() {
+    return g_logger.load(std::memory_order_acquire);
+}
+void store_logger(std::shared_ptr<spdlog::logger> logger) {
+    g_logger.store(std::move(logger), std::memory_order_release);
+}
+[[nodiscard]] std::shared_ptr<spdlog::logger> take_logger() {
+    return g_logger.exchange(nullptr, std::memory_order_acq_rel);
+}
+#else
+std::mutex g_logger_mu;
+std::shared_ptr<spdlog::logger> g_logger;
+
+[[nodiscard]] std::shared_ptr<spdlog::logger> load_logger() {
+    std::lock_guard lock(g_logger_mu);
+    return g_logger;
+}
+void store_logger(std::shared_ptr<spdlog::logger> logger) {
+    std::lock_guard lock(g_logger_mu);
+    g_logger = std::move(logger);
+}
+[[nodiscard]] std::shared_ptr<spdlog::logger> take_logger() {
+    std::lock_guard lock(g_logger_mu);
+    return std::move(g_logger);  // NOLINT：移动后源为空，等价于 exchange(nullptr)
+}
+#endif
 
 // 级别阈值镜像：enabled() 用它做无锁短路，避免为了一次判断去碰 logger 内部状态
 std::atomic<int> g_threshold{static_cast<int>(spdlog::level::info)};
@@ -50,7 +80,7 @@ spdlog::level::level_enum to_spdlog(Level level) {
     }
     // 枚举已全覆盖：此处不可达。用 unreachable 而非兜底 return，保住编译器对
     // "新增枚举成员未处理"的穷尽性告警（兜底 return 会把它静默掉）。
-    std::unreachable();
+    tinykv::unreachable();
 }
 
 }  // namespace
@@ -59,7 +89,7 @@ namespace detail {
 
 // 惰性入口的落地：text 已由调用方在级别放行后格式化好
 void write_text(Level level, std::string text) {
-    auto logger = g_logger.load(std::memory_order_acquire);
+    auto logger = load_logger();
     if (logger == nullptr) {
         return;  // 未初始化：安全丢弃（进程早期/测试态）
     }
@@ -75,13 +105,13 @@ result<void> init(const std::filesystem::path& log_dir, const std::string& file_
     std::error_code ec;
     std::filesystem::create_directories(log_dir, ec);
     if (ec) {
-        return std::unexpected(
+        return tinykv::unexpected(
             IoFailed{.path = log_dir.string(), .reason = "create_directories: " + ec.message()});
     }
 
     try {
         // 重入语义：先关停旧实例（释放文件句柄、腾出注册名），再装配新实例
-        if (auto old = g_logger.exchange(nullptr); old != nullptr) {
+        if (auto old = take_logger(); old != nullptr) {
             old->flush();
             spdlog::drop(kLoggerName);
         }
@@ -107,28 +137,28 @@ result<void> init(const std::filesystem::path& log_dir, const std::string& file_
         // 发布顺序：先阈值后句柄。读者以句柄非空作为"已初始化"判据，
         // 因此必须先让阈值就位，否则可能出现"已初始化但阈值仍是默认值"的窗口。
         g_threshold.store(static_cast<int>(spdlog::level::info), std::memory_order_relaxed);
-        g_logger.store(std::move(logger), std::memory_order_release);
+        store_logger(std::move(logger));
     } catch (const spdlog::spdlog_ex& ex) {
-        return std::unexpected(
+        return tinykv::unexpected(
             IoFailed{.path = (log_dir / file_base).string(), .reason = ex.what()});
     }
     return {};
 }
 
 bool initialized() {
-    return g_logger.load(std::memory_order_acquire) != nullptr;
+    return load_logger() != nullptr;
 }
 
 void set_level(Level level) {
     std::lock_guard lock(g_init_mutex);
-    if (auto logger = g_logger.load(std::memory_order_relaxed); logger != nullptr) {
+    if (auto logger = load_logger(); logger != nullptr) {
         logger->set_level(to_spdlog(level));
         g_threshold.store(static_cast<int>(to_spdlog(level)), std::memory_order_relaxed);
     }
 }
 
 bool enabled(Level level) {
-    if (g_logger.load(std::memory_order_acquire) == nullptr) {
+    if (load_logger() == nullptr) {
         return false;  // 未初始化：连格式化都不做
     }
     return static_cast<int>(to_spdlog(level)) >= g_threshold.load(std::memory_order_relaxed);
@@ -152,7 +182,7 @@ void error(const std::string& msg) {
 
 void shutdown() {
     std::lock_guard lock(g_init_mutex);
-    if (auto logger = g_logger.exchange(nullptr); logger != nullptr) {
+    if (auto logger = take_logger(); logger != nullptr) {
         logger->flush();
         spdlog::drop(kLoggerName);
     }

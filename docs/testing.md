@@ -129,6 +129,7 @@ CI 用 `ctest -L unit|simulation|integration|bench` 选择，无需解析本页�
 | tests/unit/common/strong_id_test.cpp | unit | `strong_id_test` | - | fast |
 | tests/unit/common/encode_test.cpp | unit | `encode_test` | - | fast |
 | tests/unit/common/common_log_test.cpp | unit | `common_log_test` | - | fast |
+| tests/unit/common/compat_test.cpp | unit | `compat_test` | - | fast |
 | tests/unit/proto/proto_roundtrip_test.cpp | unit | `proto_roundtrip_test` | - | fast |
 | tests/unit/common/kv_error_test.cpp | unit | `kv_error_test` | - | fast |
 | tests/unit/storage/memtable_test.cpp | unit | `memtable_test` | - | fast |
@@ -315,9 +316,41 @@ FAIL: 登记表与仓库不一致 (docs/testing.md §4)
 
 ---
 
+## 9a. 编译器与语言标准矩阵（支持面）
+
+默认档是 **C++23 + g++**（`win-debug` / `linux-debug`）。兼容档的存在不是为了"多支持几个标准"，
+而是为了暴露两类只在换工具链时才出现的问题：标准库设施是否存在（`std::expected`/`std::span`）、
+以及不同编译器对同一段代码的告警判定是否一致。
+
+| 档位 | 配置方式 | 覆盖点 |
+|---|---|---|
+| C++23（默认） | `cmake --preset win-debug` / `linux-debug` | `std::expected`、`std::span`、`std::unreachable`、`<=>` 原生可用；`-Wpedantic` 全开 |
+| C++20 | `-DTINYKV_CXX_STANDARD=20`（preset `win-cxx20`/`linux-cxx20`） | 无 `std::expected`/`std::unreachable`，走 `src/common/compat.h`；`<=>` 原生可用 |
+| C++17 | `-DTINYKV_CXX_STANDARD=17`（preset `win-cxx17`/`linux-cxx17`） | `expected`/`span`/`unexpected`/`starts_with`/`unreachable` 全部走 compat；`atomic<shared_ptr>` 降级为短锁 |
+| 第二编译器 | `cmake --preset win-clang23` / `linux-clang23`（或 `CC=clang CXX=clang++`） | 告警口径差异（如 `-Wunused-private-field`）；protoc 生成代码单独降噪 |
+
+约定与边界：
+
+1. **源码只有一份**。上层只写 `tinykv::expected` / `tinykv::span` / `tinykv::unexpected` /
+   `tinykv::as_bytes` / `tinykv::starts_with` / `tinykv::unreachable`，由 compat 决定直通 std 还是走兜底。
+2. **17 档关 `-Wpedantic`**：指定初始化器（`.field = v`）在 17 档是编译器扩展，
+   开着它等于把"能编译"改成"不能编译"。这是有意的、写进根 `CMakeLists.txt` 的取舍。
+3. **新增代码不得引入 23/20 独有设施而不走 compat**：CI 的兼容矩阵会在 17 档直接编译失败。
+4. **不允许"只在某个标准下跳过测试"**：三档跑同一份 `ctest`（含 `-L fast` 与 nightly）。
+
+本地三条命令（等价于 CI 的 compat job）：
+
+```bash
+cmake --preset linux-cxx17
+cmake --build --preset linux-cxx17 && ctest --test-dir build/linux-cxx17 -L fast
+```
+
+---
+
 ## 10. 变更记录
 
 | 日期 | 变更 | 依据 |
 |---|---|---|
 | 2026-11-16 | 初版：调研两参考项目测试体系，确立"登记表唯一事实来源 + 双向一致性检查"范式 | KVstorageBaseRaft-cpp `test/` 反例调研 + Mooncake `*/tests/` 机制调研（§1） |
 | 2026-11-16 | 新增 §9 缺陷回归测试：场景 → 用例 → 登记 → CI 四段链，bugfix 阶段强制执行 | 用户指令（修 bug 必须把触发场景留成回归测试）+ `ci/rules.toml [bugfix]` |
+| 2026-11-18 | 新增 §9a 编译器与语言标准矩阵：C++17/20/23 × g++/clang++，兼容层 `src/common/compat.h` | 用户指令（拓宽适用性：默认 23，17 兜底）+ 三档实测 66/66 |

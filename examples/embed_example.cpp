@@ -6,9 +6,9 @@
 
 #include <cassert>
 #include <iostream>
-#include <span>
 #include <string>
 
+#include "common/compat.h"
 #include "storage/engine.h"
 
 int main() {
@@ -21,7 +21,7 @@ int main() {
     ModifyVec batch{Modify{Put{.cf = Cf::Default, .key = key, .value = value}}};
     assert((*engine)->write(batch).has_value());
 
-    const auto bytes = std::as_bytes(std::span{key.data(), key.size()});
+    const auto bytes = tinykv::as_bytes(tinykv::span{key.data(), key.size()});
     auto got = (*engine)->get(Cf::Default, bytes);
     assert(got.has_value() && got->value.has_value());
     std::cout << "read back: " << *got->value << "\n";

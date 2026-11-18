@@ -16,9 +16,9 @@ namespace {
 using tinykv::Cf;
 using tinykv::Ts;
 
-std::span<const std::byte> bytes(std::string_view s) {
+tinykv::span<const std::byte> bytes(std::string_view s) {
     // 测试辅助：字符串视图 → 字节 span（断言场景均为 ASCII，无符号性无歧义）
-    return std::as_bytes(std::span{s.data(), s.size()});
+    return tinykv::as_bytes(tinykv::span{s.data(), s.size()});
 }
 
 TEST(EncodeKey, CfPrefixKeepsOrderWithinCf) {
@@ -76,8 +76,8 @@ TEST(EncodeTsKey, BareKeyIsPrefixOfAllVersions) {
     auto v1 = tinykv::encode_ts_key(Cf::Write, bytes("a"), Ts{100});
     auto v2 = tinykv::encode_ts_key(Cf::Write, bytes("a"), Ts{200});
     ASSERT_TRUE(bare && v1 && v2);
-    EXPECT_TRUE(v1->starts_with(*bare));
-    EXPECT_TRUE(v2->starts_with(*bare));
+    EXPECT_TRUE(tinykv::starts_with(*v1, *bare));
+    EXPECT_TRUE(tinykv::starts_with(*v2, *bare));
     EXPECT_LT(*bare, *v1);
 }
 

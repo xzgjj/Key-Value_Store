@@ -23,61 +23,65 @@
 
 namespace tinykv::server {
 
-class PeerTxnExecutor : public tinykv::txn::TxnExecutor {   // 非 final：测试适配器派生注入收敛策略
+class PeerTxnExecutor : public tinykv::txn::TxnExecutor {  // 非 final：测试适配器派生注入收敛策略
 public:
     using PeerRef = std::function<tinykv::raftstore::Peer&(std::string_view key)>;
     using Pump = std::function<void(std::string_view key)>;
     using Applied = std::function<bool(std::string_view key, std::uint64_t index)>;
-    using PeerList = std::function<std::vector<tinykv::raftstore::Peer*>()>;   // GC 广播用
+    using PeerList = std::function<std::vector<tinykv::raftstore::Peer*>()>;  // GC 广播用
     // key → 所属 region（ARCH-1 P0-1 护栏用）。不注入 = 关闭护栏（单 region / 测试装置）。
     using RegionOf = std::function<std::optional<tinykv::RegionId>(std::string_view key)>;
 
     // gate：daemon 组合根注入的 Peer 串行闸（Worker 泵与 HTTP 共用；泵回调不得重复加锁）
     PeerTxnExecutor(PeerRef peer, Pump pump, Applied applied, std::mutex* gate,
                     int max_rounds = 400, PeerList peers = {}, RegionOf region_of = {})
-        : peer_(std::move(peer)), pump_(std::move(pump)), applied_(std::move(applied)),
-          gate_(gate), max_rounds_(max_rounds), peers_(std::move(peers)),
+        : peer_(std::move(peer)),
+          pump_(std::move(pump)),
+          applied_(std::move(applied)),
+          gate_(gate),
+          max_rounds_(max_rounds),
+          peers_(std::move(peers)),
           region_of_(std::move(region_of)) {}
 
-    [[nodiscard]] tinykv::result<std::optional<std::string>> get(
-        std::string_view key, tinykv::Ts start_ts) override {
+    [[nodiscard]] tinykv::result<std::optional<std::string>> get(std::string_view key,
+                                                                 tinykv::Ts start_ts) override {
         auto gate = hold_gate();
         auto& p = peer_(key);
         const auto ri = p.wait_read_index([&] { pump_(key); });
         if (!ri.has_value()) {
-            return std::unexpected(ri.error());
+            return tinykv::unexpected(ri.error());
         }
         return p.mvcc().get(key, start_ts);
     }
 
-    [[nodiscard]] tinykv::result<void> prewrite(std::span<const tinykv::txn::Mutation> mutations,
+    [[nodiscard]] tinykv::result<void> prewrite(tinykv::span<const tinykv::txn::Mutation> mutations,
                                                 std::string_view primary, tinykv::Ts start_ts,
                                                 std::uint64_t ttl_ms,
                                                 std::uint64_t now_ms) override {
         // ARCH-1 P0-1：护栏必须先于协调器。整批 mutations 会经 primary 所在 peer 一次提案，
         // 而读路径按 key 路由——跨区写入会静默落进 primary 的分区，对外表现"提交成功但数据不见了"。
         if (auto guard = guard_single_region(mutations, primary); !guard.has_value()) {
-            return std::unexpected(guard.error());
+            return tinykv::unexpected(guard.error());
         }
         // ARCH-1 P0-2：加锁时刻必须随请求走完链路。丢掉它，apply 侧只能写 0，
         // check_txn_status 就会把任何运行超过 TTL 的进程新加的锁判成"已过期"。
-        kvpb::TxnPrewriteRequest req;        req.set_primary_lock(std::string(primary));
+        kvpb::TxnPrewriteRequest req;
+        req.set_primary_lock(std::string(primary));
         req.set_start_ts(start_ts.value);
         req.set_lock_ttl(ttl_ms);
         req.set_created_ms(now_ms);
         for (const auto& m : mutations) {
             auto* one = req.add_mutations();
             one->set_op(m.op == tinykv::txn::Mutation::Op::kPut ? kvpb::Mutation::PUT
-                                                               : kvpb::Mutation::DELETE);
+                                                                : kvpb::Mutation::DELETE);
             one->set_key(m.key);
             one->set_value(m.value);
         }
-        return call_through_raft(primary, [&](tinykv::raftstore::Peer& p) {
-            return p.propose_txn_prewrite(req);
-        });
+        return call_through_raft(
+            primary, [&](tinykv::raftstore::Peer& p) { return p.propose_txn_prewrite(req); });
     }
 
-    [[nodiscard]] tinykv::result<void> commit(std::span<const std::string> keys,
+    [[nodiscard]] tinykv::result<void> commit(tinykv::span<const std::string> keys,
                                               tinykv::Ts start_ts, tinykv::Ts commit_ts) override {
         kvpb::TxnCommitRequest req;
         req.set_start_ts(start_ts.value);
@@ -85,19 +89,21 @@ public:
         for (const auto& k : keys) {
             req.add_keys(k);
         }
-        return call_through_raft(keys.empty() ? std::string_view{} : keys.front(),
-                                 [&](tinykv::raftstore::Peer& p) { return p.propose_txn_commit(req); });
+        return call_through_raft(
+            keys.empty() ? std::string_view{} : keys.front(),
+            [&](tinykv::raftstore::Peer& p) { return p.propose_txn_commit(req); });
     }
 
-    [[nodiscard]] tinykv::result<void> rollback(std::span<const std::string> keys,
+    [[nodiscard]] tinykv::result<void> rollback(tinykv::span<const std::string> keys,
                                                 tinykv::Ts start_ts) override {
         kvpb::TxnBatchRollbackRequest req;
         req.set_start_ts(start_ts.value);
         for (const auto& k : keys) {
             req.add_keys(k);
         }
-        return call_through_raft(keys.empty() ? std::string_view{} : keys.front(),
-                                 [&](tinykv::raftstore::Peer& p) { return p.propose_txn_rollback(req); });
+        return call_through_raft(
+            keys.empty() ? std::string_view{} : keys.front(),
+            [&](tinykv::raftstore::Peer& p) { return p.propose_txn_rollback(req); });
     }
 
     [[nodiscard]] tinykv::result<tinykv::txn::TxnStatus> check_txn_status(
@@ -106,7 +112,7 @@ public:
         auto& p = peer_(primary);
         const auto ri = p.wait_read_index([&] { pump_(primary); });
         if (!ri.has_value()) {
-            return std::unexpected(ri.error());
+            return tinykv::unexpected(ri.error());
         }
         return p.mvcc().check_txn_status(primary, lock_start_ts, now_ms);
     }
@@ -118,19 +124,19 @@ public:
         auto& p = peer_(primary);
         const auto ri = p.wait_read_index([&] { pump_(primary); });
         if (!ri.has_value()) {
-            return std::unexpected(ri.error());
+            return tinykv::unexpected(ri.error());
         }
         auto found = p.mvcc().locks_of(primary, lock_start_ts);
         if (!found.has_value()) {
-            return std::unexpected(found.error());   // 扫描失败/超上限：不静默遗留锁
+            return tinykv::unexpected(found.error());  // 扫描失败/超上限：不静默遗留锁
         }
         std::vector<std::string> victims = std::move(*found);
         if (victims.empty()) {
             return std::size_t{0};
         }
-        gate.reset();   // 写路径自己再加闸：同一线程不可对同一 mutex 重复 lock
-        tinykv::result<void> outcome = std::unexpected(
-            tinykv::InvalidArgument{"决议分支未执行"});
+        gate.reset();  // 写路径自己再加闸：同一线程不可对同一 mutex 重复 lock
+        tinykv::result<void> outcome =
+            tinykv::unexpected(tinykv::InvalidArgument{"决议分支未执行"});
         if (commit_to.has_value()) {
             kvpb::TxnCommitRequest req;
             req.set_start_ts(lock_start_ts.value);
@@ -150,7 +156,7 @@ public:
                 primary, [&](tinykv::raftstore::Peer& p) { return p.propose_txn_rollback(req); });
         }
         if (!outcome.has_value()) {
-            return std::unexpected(outcome.error());
+            return tinykv::unexpected(outcome.error());
         }
         return victims.size();
     }
@@ -166,14 +172,14 @@ public:
         // 多 region：Admin 显式广播到每个 peer（每个 region 各自走共识）
         for (auto* p : peers_()) {
             if (p == nullptr || !p->is_leader()) {
-                return std::unexpected(tinykv::NotLeader{
-                    .region_id = tinykv::RegionId{0}, .leader_hint = std::nullopt});
+                return tinykv::unexpected(tinykv::NotLeader{.region_id = tinykv::RegionId{0},
+                                                            .leader_hint = std::nullopt});
             }
             auto gate = hold_gate();
             const auto expect = p->raft().last_index().value + 1;
             if (!p->propose_txn_gc(req)) {
-                return std::unexpected(tinykv::NotLeader{
-                    .region_id = tinykv::RegionId{0}, .leader_hint = std::nullopt});
+                return tinykv::unexpected(tinykv::NotLeader{.region_id = tinykv::RegionId{0},
+                                                            .leader_hint = std::nullopt});
             }
             for (int round = 0; round < max_rounds_; ++round) {
                 p->tick();
@@ -183,11 +189,11 @@ public:
                 }
             }
             if (!p->applied_at_least(expect)) {
-                return std::unexpected(tinykv::IoFailed{.path = "txn:gc",
-                                                        .reason = "apply 未收敛（泵超时）"});
+                return tinykv::unexpected(
+                    tinykv::IoFailed{.path = "txn:gc", .reason = "apply 未收敛（泵超时）"});
             }
             if (auto err = p->take_txn_error(expect); err.has_value()) {
-                return std::unexpected(std::move(*err));
+                return tinykv::unexpected(std::move(*err));
             }
         }
         return {};
@@ -198,23 +204,23 @@ private:
     // 判据：primary 与每个 mutation 必须落在同一 region；任一不成立即结构化拒绝，
     // 绝不允许退回"全写 primary"的旧行为（SPEC-6 §6.5 红线 1）。
     [[nodiscard]] tinykv::result<void> guard_single_region(
-        std::span<const tinykv::txn::Mutation> mutations, std::string_view primary) const {
+        tinykv::span<const tinykv::txn::Mutation> mutations, std::string_view primary) const {
         if (!region_of_) {
-            return {};   // 未注入路由：单 region 装配或测试装置，无跨区可能
+            return {};  // 未注入路由：单 region 装配或测试装置，无跨区可能
         }
         const auto primary_region = region_of_(primary);
         if (!primary_region.has_value()) {
-            return std::unexpected(tinykv::KeyNotInRegion{.key = std::string(primary),
-                                                          .region_id = tinykv::RegionId{0}});
+            return tinykv::unexpected(tinykv::KeyNotInRegion{.key = std::string(primary),
+                                                             .region_id = tinykv::RegionId{0}});
         }
         for (const auto& m : mutations) {
             const auto region = region_of_(m.key);
             if (!region.has_value() || *region != *primary_region) {
-                return std::unexpected(tinykv::InvalidArgument{
-                    "跨区事务未启用（key=" + m.key + " 属 region " +
-                    std::to_string(region.has_value() ? region->value : 0) + "，primary=" +
-                    std::string(primary) + " 属 region " +
-                    std::to_string(primary_region->value) + "）"});
+                return tinykv::unexpected(
+                    tinykv::InvalidArgument{"跨区事务未启用（key=" + m.key + " 属 region " +
+                                            std::to_string(region.has_value() ? region->value : 0) +
+                                            "，primary=" + std::string(primary) + " 属 region " +
+                                            std::to_string(primary_region->value) + "）"});
             }
         }
         return {};
@@ -224,7 +230,7 @@ private:
         if (gate_ != nullptr) {
             return std::unique_lock<std::mutex>(*gate_);
         }
-        return std::nullopt;   // 测试装置无共享泵时可不设闸
+        return std::nullopt;  // 测试装置无共享泵时可不设闸
     }
 
     template <typename ProposeFn>
@@ -233,8 +239,8 @@ private:
         tinykv::raftstore::Peer& p = peer_(key);
         const auto expect = p.raft().last_index().value + 1;
         if (!propose(p)) {
-            return std::unexpected(tinykv::NotLeader{.region_id = tinykv::RegionId{0},
-                                                     .leader_hint = std::nullopt});
+            return tinykv::unexpected(
+                tinykv::NotLeader{.region_id = tinykv::RegionId{0}, .leader_hint = std::nullopt});
         }
         for (int round = 0; round < max_rounds_; ++round) {
             pump_(key);
@@ -243,12 +249,12 @@ private:
             }
         }
         if (!applied_(key, expect)) {
-            return std::unexpected(tinykv::IoFailed{.path = "txn:raft",
-                                                    .reason = "apply 未收敛（泵超时）"});
+            return tinykv::unexpected(
+                tinykv::IoFailed{.path = "txn:raft", .reason = "apply 未收敛（泵超时）"});
         }
         auto err = p.take_txn_error(expect);
         if (err.has_value()) {
-            return std::unexpected(std::move(*err));   // 结构化错误直传（client 编排要字段）
+            return tinykv::unexpected(std::move(*err));  // 结构化错误直传（client 编排要字段）
         }
         return {};
     }
@@ -259,7 +265,7 @@ private:
     std::mutex* gate_{nullptr};
     int max_rounds_;
     PeerList peers_;
-    RegionOf region_of_;   // 空 = 单 region 装配（护栏不生效）
+    RegionOf region_of_;  // 空 = 单 region 装配（护栏不生效）
 };
 
 }  // namespace tinykv::server

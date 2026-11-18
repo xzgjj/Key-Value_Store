@@ -16,7 +16,7 @@
 
 namespace {
 
-using namespace tinykv::testlib;   // NOLINT(google-build-using-namespace)
+using namespace tinykv::testlib;  // NOLINT(google-build-using-namespace)
 
 struct Sample {
     double per_sec{0.0};
@@ -32,7 +32,8 @@ Sample write_one_by_one(PeerCluster& c, int leader, int ops) {
             ++ok;
         }
     }
-    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    const double secs =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     return Sample{.per_sec = static_cast<double>(ok) / secs, .ok = ok};
 }
 
@@ -60,14 +61,15 @@ Sample write_batched(PeerCluster& c, int leader, int batches, int kBatch) {
             }
         }
     }
-    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    const double secs =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     return Sample{.per_sec = static_cast<double>(records) / secs, .ok = records};
 }
 
 // 心跳字节数：强制发一轮心跳，把所有消息序列化后求字节和（PERF-08 的机械度量）
 std::size_t heartbeat_bytes(Cluster& c) {
     const int leader = c.leader_index();
-    for (int i = 0; i < 3; ++i) {   // 心跳间隔 3 拍
+    for (int i = 0; i < 3; ++i) {  // 心跳间隔 3 拍
         c.node(leader).tick();
     }
     auto ready = c.node(leader).take_ready();
@@ -124,10 +126,10 @@ TEST(ClusterBench, RestartRecoveryTime) {
     auto engine = tinykv::Engine::open({.dir = dir});
     ASSERT_TRUE(engine.has_value());
     const std::string key = "r:0";
-    auto got = (*engine)->get(tinykv::Cf::Default,
-                              std::as_bytes(std::span{key.data(), key.size()}));
-    const double ms = std::chrono::duration<double, std::milli>(
-                          std::chrono::steady_clock::now() - t0).count();
+    auto got =
+        (*engine)->get(tinykv::Cf::Default, tinykv::as_bytes(tinykv::span{key.data(), key.size()}));
+    const double ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     std::printf("[bench] 重启恢复 %d 条后首读 : %.1f ms\n", kRecords, ms);
     EXPECT_TRUE(got.has_value());
     EXPECT_LT(ms, 5000.0) << "恢复耗时超过 5s，与 PERF-06 的 S0 目标差距过大";

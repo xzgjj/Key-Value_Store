@@ -33,13 +33,13 @@ public:
     Worker& operator=(const Worker&) = delete;
 
     ~Worker() {
-        (void)stop();   // RAII 兜底：忘了显式 stop 也绝不留下悬空线程
+        (void)stop();  // RAII 兜底：忘了显式 stop 也绝不留下悬空线程
     }
 
     [[nodiscard]] result<void> start() {
         std::lock_guard lock(mu_);
         if (thread_.joinable()) {
-            return std::unexpected(InvalidArgument{"Worker 已启动"});
+            return tinykv::unexpected(InvalidArgument{"Worker 已启动"});
         }
         stop_.store(false);
         thread_ = std::thread([this] { loop(); });
@@ -76,7 +76,7 @@ private:
         while (!stop_.load()) {
             cv_lock.unlock();
             try {
-                pump_();   // 泵函数异常不杀死循环——daemon 的心跳必须比任何单次故障活得久
+                pump_();  // 泵函数异常不杀死循环——daemon 的心跳必须比任何单次故障活得久
             } catch (const std::exception& e) {
                 std::lock_guard el(err_mu_);
                 pump_errors_.fetch_add(1, std::memory_order_relaxed);

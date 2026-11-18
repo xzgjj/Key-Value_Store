@@ -23,12 +23,12 @@ namespace tinykv::cli {
     asio::error_code ec;
     const auto addr = asio::ip::make_address(host, ec);
     if (ec) {
-        return std::unexpected(InvalidArgument{"状态端点地址非法: " + host});
+        return tinykv::unexpected(InvalidArgument{"状态端点地址非法: " + host});
     }
     asio::ip::tcp::socket sock(ctx);
     sock.connect(asio::ip::tcp::endpoint(addr, port), ec);
     if (ec) {
-        return std::unexpected(IoFailed{.path = host, .reason = "连接失败: " + ec.message()});
+        return tinykv::unexpected(IoFailed{.path = host, .reason = "连接失败: " + ec.message()});
     }
     std::string req = verb + " " + path + " HTTP/1.1\r\nHost: " + host;
     if (!body.empty()) {
@@ -37,7 +37,7 @@ namespace tinykv::cli {
     req += "\r\nConnection: close\r\n\r\n" + body;
     asio::write(sock, asio::buffer(req), ec);
     if (ec) {
-        return std::unexpected(IoFailed{.path = host, .reason = "发送失败: " + ec.message()});
+        return tinykv::unexpected(IoFailed{.path = host, .reason = "发送失败: " + ec.message()});
     }
 
     std::string raw;
@@ -48,12 +48,12 @@ namespace tinykv::cli {
                    asio::buffers_begin(buf.data()) + static_cast<std::ptrdiff_t>(n));
         buf.consume(n);
         if (ec) {
-            break;   // EOF 或错误：下面的解析决定成败
+            break;  // EOF 或错误：下面的解析决定成败
         }
     }
     const auto sep = raw.find("\r\n\r\n");
     if (sep == std::string::npos) {
-        return std::unexpected(Corrupted{.where = host, .reason = "响应缺少头部结束标记"});
+        return tinykv::unexpected(Corrupted{.where = host, .reason = "响应缺少头部结束标记"});
     }
     return raw.substr(sep + 4);
 }
