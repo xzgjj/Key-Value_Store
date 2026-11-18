@@ -55,7 +55,15 @@
     "tests/unit/server/worker_test.cpp",
     "tests/unit/server/server_app_test.cpp",
     "tests/unit/txn/gc_test.cpp",
-    "docs/notes-m6.md"
+    "docs/notes-m6.md",
+    "src/server/peer_txn.h",
+    "src/server/status_server.cpp",
+    "src/txn/CMakeLists.txt",
+    "src/scheduler/CMakeLists.txt",
+    "src/raftstore/CMakeLists.txt",
+    "src/CMakeLists.txt",
+    "proto/kv.proto",
+    "README.md"
   ],
   "reason": "用户 2026-11-16 指令『三个 bench补充并 推送；之后M5（事务层）新分支 4 开始 各种方案按要求你走最终交付』——授权按 SPEC-4 全部默认值（D4-1~D4-5）自主落地 M5。每层 TDD、CI 绿、三轮 review、本地 commit（分支 4）。",
   "bugfix": false,

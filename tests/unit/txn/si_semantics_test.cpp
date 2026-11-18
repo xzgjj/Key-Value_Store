@@ -86,7 +86,7 @@ TEST(SiSemantics, NoDirtyReadOfUncommittedWrite) {
     // t1 走 MvccTxn 层 prewrite 后"停住"（未 commit）——未提交数据已落 Default CF
     tinykv::txn::MvccTxn mvcc(*f.engine);
     std::vector<tinykv::txn::Mutation> muts{
-        {.op = tinykv::txn::Mutation::Op::PUT, .key = "k", .value = "dirty"}};
+        {.op = tinykv::txn::Mutation::Op::kPut, .key = "k", .value = "dirty"}};
     f.now_ms += 10;
     const auto t1_start = f.tso.get_timestamps(1)->front();   // 真实分配（占号不消费会被 begin 撞号）
     ASSERT_TRUE(mvcc.prewrite(muts, "k", t1_start, 3000, f.now_ms).has_value());
@@ -119,7 +119,7 @@ TEST(SiSemantics, AbortedTxnLeavesNoTrace) {
     // t2 prewrite 后显式回滚（MvccTxn 层真实锁）
     tinykv::txn::MvccTxn mvcc(*f.engine);
     std::vector<tinykv::txn::Mutation> muts{
-        {.op = tinykv::txn::Mutation::Op::PUT, .key = "k", .value = "aborted"}};
+        {.op = tinykv::txn::Mutation::Op::kPut, .key = "k", .value = "aborted"}};
     f.now_ms += 10;
     const auto t2_start = f.tso.get_timestamps(1)->front();
     ASSERT_TRUE(mvcc.prewrite(muts, "k", t2_start, 3000, f.now_ms).has_value());

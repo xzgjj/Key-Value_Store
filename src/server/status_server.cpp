@@ -39,12 +39,6 @@ constexpr const char* kNotFound =
     return out;
 }
 
-// admin GET 端点表（docs/cli.md §10）：命中即交给 admin_handler_，空串=404
-[[nodiscard]] bool is_admin_get_path(const std::string& path) {
-    return path == "/regions" || path == "/region" || path == "/region/peers" ||
-           path == "/scheduler/status";
-}
-
 }  // namespace
 
 result<std::unique_ptr<StatusServer>> StatusServer::start(
@@ -139,10 +133,12 @@ std::optional<std::string> StatusServer::handle_get(const RequestLine& line) con
     if (kv_handler_ && line.path == "/kv" && !line.query.empty()) {
         return kv_handler_(line.query);
     }
-    if (admin_handler_ && is_admin_get_path(line.path)) {
+    if (admin_handler_) {
+        // M6：admin 兜底任意非保留路径（/status 与 /kv 之外）——txn/观测端点由组合根裁决，
+        // 传输层不再维护端点白名单（空串 = 404）
         auto body = admin_handler_("GET", line.path, line.query, "");
         if (!body.empty()) {
-            return body;   // 空串 = region 不存在 / 无数据（404）
+            return body;
         }
     }
     return std::nullopt;
@@ -165,7 +161,7 @@ void StatusServer::serve(std::shared_ptr<asio::ip::tcp::socket> sock) {
                 serve_write(sock, request);
                 return;
             }
-            if (admin_handler_ && (line->path == "/region/split" || line->path == "/trace")) {
+            if (admin_handler_) {
                 serve_admin_write(sock, request, line->path);
                 return;
             }

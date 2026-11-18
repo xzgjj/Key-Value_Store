@@ -58,7 +58,7 @@ public:
         if (!writes_.empty() && primary_.empty() && key < writes_.front().key) {
             // primary = 字典序最小的 key（确定性决议锚点）
         }
-        writes_.push_back(Mutation{.op = Mutation::Op::PUT,
+        writes_.push_back(Mutation{.op = Mutation::Op::kPut,
                                    .key = std::move(key),
                                    .value = std::move(value)});
         return {};
@@ -69,7 +69,7 @@ public:
             return std::unexpected(InvalidArgument{"空 key"});
         }
         writes_.push_back(
-            Mutation{.op = Mutation::Op::DELETE, .key = std::move(key), .value = {}});
+            Mutation{.op = Mutation::Op::kDel, .key = std::move(key), .value = {}});
         return {};
     }
 
@@ -77,7 +77,7 @@ public:
     [[nodiscard]] result<TxnGetResult> get(const std::string& key, std::uint64_t now_ms) {
         // 读己之写：同一 key 多次 set 时最后一次胜出（与 prewrite 落盘值一致）
         for (auto it = writes_.rbegin(); it != writes_.rend(); ++it) {
-            if (it->key == key && it->op == Mutation::Op::PUT) {
+            if (it->key == key && it->op == Mutation::Op::kPut) {
                 return TxnGetResult{.value = it->value, .blocked = false};
             }
         }
@@ -159,6 +159,9 @@ public:
             keys.push_back(m.key);
         }
         writes_.clear();
+        if (keys.empty()) {
+            return {};   // 只读事务无锁可回滚（no-op 成功，不是错误）
+        }
         return exec_.rollback(keys, start_ts_);
     }
 

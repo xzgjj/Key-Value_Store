@@ -44,7 +44,7 @@ TEST(TxnResolve, CrashedTxnResolvedAfterTtlExpiry) {
         // 直接走 MvccTxn 层模拟崩溃点：prewrite 已落盘、后续编排永不发生
         tinykv::txn::MvccTxn mvcc(*f.engine);
         std::vector<tinykv::txn::Mutation> muts{
-            {.op = tinykv::txn::Mutation::Op::PUT, .key = "k", .value = "new"}};
+            {.op = tinykv::txn::Mutation::Op::kPut, .key = "k", .value = "new"}};
         ASSERT_TRUE(mvcc.prewrite(muts, "k", a.start_ts(), 3000, f.now_ms).has_value());
     }
     // 注意：A 的 client 层并未 commit——锁以 start_ts=a 残留在 Lock CF
@@ -96,8 +96,8 @@ TEST(TxnResolve, ForwardProgressWhenPrimaryCommitted) {
     // A prewrite p+s 后只提交 primary（模拟崩溃在 primary 提交后、secondary 提交前）
     tinykv::txn::MvccTxn mvcc(*f.engine);
     std::vector<tinykv::txn::Mutation> muts{
-        {.op = tinykv::txn::Mutation::Op::PUT, .key = "p", .value = "pv"},
-        {.op = tinykv::txn::Mutation::Op::PUT, .key = "s", .value = "sv"}};
+        {.op = tinykv::txn::Mutation::Op::kPut, .key = "p", .value = "pv"},
+        {.op = tinykv::txn::Mutation::Op::kPut, .key = "s", .value = "sv"}};
     const auto a_start = f.tso.get_timestamps(1)->front();   // 真实分配（防 begin 撞号）
     f.advance(10);
     ASSERT_TRUE(mvcc.prewrite(muts, "p", a_start, 3000, f.now_ms).has_value());

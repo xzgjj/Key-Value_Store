@@ -69,7 +69,7 @@ struct RoundFixture {
 std::string crash_prewrite(RoundFixture& f, const std::string& key, const std::string& value,
                            Ts start_ts, unsigned seed) {
     std::vector<tinykv::txn::Mutation> muts{
-        {.op = tinykv::txn::Mutation::Op::PUT, .key = key, .value = value}};
+        {.op = tinykv::txn::Mutation::Op::kPut, .key = key, .value = value}};
     auto pr = f.exec->prewrite(muts, key, start_ts, 3000, f.now_ms);
     if (!pr.has_value() && std::holds_alternative<tinykv::LockConflict>(pr.error())) {
         const auto& lc = std::get<tinykv::LockConflict>(pr.error());

@@ -381,29 +381,111 @@ std::string_view txn_usage() {
         "用法: tinykv-cli --endpoint <host:port> txn <子命令>\n"
         "\n"
         "子命令:\n"
-        "  demo                  一次性示例：begin → set → get（读己之写）→ commit → 集群读验证\n"
-        "  begin|set|get|commit|rollback  交互式子命令（未接入：CLI 是一次性进程，\n"
-        "                        无法跨调用持有事务状态；随 daemon 化接入，见 docs/cli.md §11）\n"
+        "  begin                       开启会话（服务端持事务状态），返回 session=<id>\n"
+        "  set <session> <key> <value> 写缓冲\n"
+        "  del <session> <key>         删除缓冲\n"
+        "  get <session> <key>         读（读己之写；他者未过期锁 → BLOCKED）\n"
+        "  commit <session>            prewrite → commit（冲突立即 abort，退出码 2）\n"
+        "  rollback <session>          显式回滚\n"
+        "  gc [safe_point]             旧版本清理（FUNC-17，走共识）\n"
+        "  demo                        打印完整示例脚本\n"
         "\n"
-        "说明: 事务语义见 SPEC-4（Percolator SI）。冲突返回 WriteConflict 退出码 2。\n";
+        "说明: 会话状态在服务端（M6 会话作用域），故需要 --endpoint；语义见 docs/cli.md §11。\n";
 }
 
-int cmd_txn(const Globals& /*g*/, const std::vector<std::string>& pos, std::ostream& out,
+// txn 子命令族的传输助手（拆函数以满足函数行数门禁）
+int txn_call(const Globals& g, const char* path, const std::string& body, std::ostream& out,
+             std::ostream& err) {
+    std::string host;
+    std::uint16_t port = 0;
+    if (!parse_endpoint(g, host, port, err)) {
+        err << "txn 子命令需要 --endpoint <host:port>；用法见 txn --help\n";
+        return kExitUsage;
+    }
+    auto resp = http_post(host, port, path, body);
+    if (!resp) {
+        err << path << " 失败：" << describe(resp.error()) << "\n";
+        return kExitRuntime;
+    }
+    out << *resp << "\n";
+    return resp->rfind("OK", 0) == 0 ? kExitOk : kExitRuntime;
+}
+
+// txn get 走 GET 查询串（读路径）
+int txn_get(const Globals& g, const std::vector<std::string>& pos, std::ostream& out,
+            std::ostream& err) {
+    std::string host;
+    std::uint16_t port = 0;
+    if (!parse_endpoint(g, host, port, err)) {
+        err << "txn 子命令需要 --endpoint <host:port>；用法见 txn --help\n";
+        return kExitUsage;
+    }
+    auto body = http_get(host, port, "/txn/get?session=" + pos[2] + "&key=" + pos[3]);
+    if (!body) {
+        err << "get 失败：" << describe(body.error()) << "\n";
+        return kExitRuntime;
+    }
+    out << *body << "\n";
+    return *body == "{}" ? kExitNotFound : kExitOk;
+}
+
+// set/del 的参数校验 + 转发（拆出以降 cmd_txn 复杂度）
+int txn_set_or_del(const Globals& g, const std::string& sub, const std::vector<std::string>& pos,
+                   std::ostream& out, std::ostream& err) {
+    const bool is_set = sub == "set";
+    const std::size_t want = is_set ? 5U : 4U;
+    if (pos.size() != want) {
+        err << "用法: txn " << sub
+            << (is_set ? " <session> <key> <value>\n" : " <session> <key>\n");
+        return kExitUsage;
+    }
+    const std::string body = is_set ? "set\t" + pos[2] + "\t" + pos[3] + "\t" + pos[4]
+                                    : "del\t" + pos[2] + "\t" + pos[3];
+    return txn_call(g, is_set ? "/txn/set" : "/txn/del", body, out, err);
+}
+
+int cmd_txn(const Globals& g, const std::vector<std::string>& pos, std::ostream& out,
             std::ostream& err) {
     if (pos.size() == 1 || pos[1] == "--help") {
         out << txn_usage();
         return kExitOk;
     }
-    if (pos[1] == "demo") {
-        out << "事务示例脚本（需事务服务端在线；当前阶段 CLI 一次性进程无法编排跨调用事务）：\n"
-            << "  1. txn begin            # TSO 分配 start_ts\n"
-            << "  2. txn set k v          # 写缓冲\n"
-            << "  3. txn get k            # 读己之写\n"
-            << "  4. txn commit           # prewrite(冲突立即 abort) → primary 先提交\n"
-            << "  5. get k                # 集群读验证（走 §4 集群命令）\n";
+    const std::string& sub = pos[1];
+    if (sub == "demo") {
+        out << "事务示例（需 tinykv-server 在线，docs/cli.md §11）：\n"
+            << "  tinykv-cli --endpoint H:P txn begin                    # 返回 session=<id>\n"
+            << "  tinykv-cli --endpoint H:P txn set <session> k v\n"
+            << "  tinykv-cli --endpoint H:P txn get <session> k          # 读己之写\n"
+            << "  tinykv-cli --endpoint H:P txn commit <session>         # prewrite→commit\n"
+            << "  tinykv-cli --endpoint H:P txn rollback <session>\n"
+            << "  tinykv-cli --endpoint H:P txn gc [safe_point]          # 旧版本清理（FUNC-17）\n";
         return kExitOk;
     }
-    err << "交互式事务子命令未接入（CLI 是一次性进程）；用法见 txn --help\n";
+    if (sub == "begin") {
+        return txn_call(g, "/txn/begin", "", out, err);
+    }
+    if (sub == "commit" || sub == "rollback") {
+        if (pos.size() != 3) {
+            err << "用法: txn " << sub << " <session>\n";
+            return kExitUsage;
+        }
+        return txn_call(g, sub == "commit" ? "/txn/commit" : "/txn/rollback",
+                        sub + "\t" + pos[2], out, err);
+    }
+    if (sub == "gc") {
+        return txn_call(g, "/txn/gc", pos.size() == 3 ? "gc\t" + pos[2] : "gc", out, err);
+    }
+    if (sub == "set" || sub == "del") {
+        return txn_set_or_del(g, sub, pos, out, err);
+    }
+    if (sub == "get") {
+        if (pos.size() != 4) {
+            err << "用法: txn get <session> <key>\n";
+            return kExitUsage;
+        }
+        return txn_get(g, pos, out, err);
+    }
+    err << "未知 txn 子命令 " << sub << "；用法见 txn --help\n";
     return kExitUsage;
 }
 

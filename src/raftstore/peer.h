@@ -109,6 +109,7 @@ public:
     [[nodiscard]] bool propose_txn_prewrite(const kvpb::TxnPrewriteRequest& req);
     [[nodiscard]] bool propose_txn_commit(const kvpb::TxnCommitRequest& req);
     [[nodiscard]] bool propose_txn_rollback(const kvpb::TxnBatchRollbackRequest& req);
+    [[nodiscard]] bool propose_txn_gc(const kvpb::TxnGCRequest& req);
     // apply 位点到达后取该条目的 txn 执行错误（nullopt = 成功；结构化，client 编排需要字段）
     [[nodiscard]] std::optional<KvError> take_txn_error(std::uint64_t index) {
         auto it = txn_errors_.find(index);

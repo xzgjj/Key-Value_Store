@@ -4,7 +4,9 @@
 add_subdirectory(common)
 add_subdirectory(config)
 add_subdirectory(storage)
-add_subdirectory(server)
 add_subdirectory(raft)
+add_subdirectory(txn)       # header-only 接口库：raftstore(peer)/server/client 依赖
 add_subdirectory(raftstore)
+add_subdirectory(scheduler) # header-only：TSO（M5）
+add_subdirectory(server)
 add_subdirectory(cli)

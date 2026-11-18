@@ -207,21 +207,29 @@ tinykv-cli --endpoint 127.0.0.1:3380 trace region 7 off
 
 ## 11. 事务命令（M5，UX-02(txn)）
 
-> 契约口径：SPEC-4 §4.6。CLI 是一次性进程，无法跨调用持有事务状态（begin 的 start_ts
-> 与 writes_ 都在进程内），故 M5 的 CLI 事务面为 **--help + 一次性示例（demo）**；
-> 交互式事务会话随 daemon 化与长连接客户端接入（记 docs/notes-m5.md）。
+> 契约口径：SPEC-4 §4.6。**M6 起会话状态在服务端**（会话作用域，TxnSessionManager），
+> CLI 每次调用携带 session id——这就是交互式事务的解锁方式。
 
 ### 11.1 命令列表
 
 | 命令 | 作用 | 退出码 |
 |---|---|---|
 | `tinykv-cli --endpoint <host:port> txn --help` | 事务子命令用法 | 0 |
-| `tinykv-cli --endpoint <host:port> txn demo` | 一次性示例：begin → set → get（读己之写）→ commit → 集群读验证 | 0 |
-| `tinykv-cli --endpoint <host:port> txn begin|set|get|commit|rollback` | 交互式子命令（未接入，返回 1 并提示见 --help） | 1 |
+| `txn begin` | 开启会话，打印 `session=<id>` | 0 / 2 |
+| `txn set <session> <key> <value>` | 写缓冲 | 0 / 1 / 2 |
+| `txn del <session> <key>` | 删除缓冲 | 0 / 1 / 2 |
+| `txn get <session> <key>` | 读己之写；他者未过期锁 → `BLOCKED` | 0 / 3 / 2 |
+| `txn commit <session>` | prewrite → commit，打印 `commit_ts=` | 0 / 2 |
+| `txn rollback <session>` | 显式回滚（只读会话为 no-op） | 0 / 2 |
+| `txn gc [safe_point]` | 旧版本清理（FUNC-17，Admin 走共识） | 0 / 2 |
+| `txn demo` | 打印完整示例脚本 | 0 |
 
-### 11.2 示例（实现后可直接复制执行）
+### 11.2 示例（可直接复制执行）
 
 ```bash
-tinykv-cli --endpoint 127.0.0.1:3380 txn --help
-tinykv-cli --endpoint 127.0.0.1:3380 txn demo
+tinykv-server ./data 3380 &
+SID=$(tinykv-cli --endpoint 127.0.0.1:3380 txn begin | sed 's/session=//')
+tinykv-cli --endpoint 127.0.0.1:3380 txn set "$SID" k v
+tinykv-cli --endpoint 127.0.0.1:3380 txn get "$SID" k
+tinykv-cli --endpoint 127.0.0.1:3380 txn commit "$SID"
 ```

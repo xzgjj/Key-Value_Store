@@ -24,7 +24,9 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <map>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -36,8 +38,8 @@ namespace tinykv::txn {
 // 客户端侧变更（与 kvpb::Mutation 对应；server 侧 apply 用同一结构）
 struct Mutation {
     // Op 显式取值对齐 kvpb::Mutation.Op（PUT=0/DELETE=1）
-    enum class Op : std::uint8_t { PUT = 0, DELETE = 1 };
-    Op op{Op::PUT};
+    enum class Op : std::uint8_t { kPut = 0, kDel = 1 };   // 不用 PUT/DELETE：Windows SDK 宏污染（winnt.h 定义 DELETE）
+    Op op{Op::kPut};
     std::string key;
     std::string value;
 };
@@ -192,7 +194,7 @@ public:
                      .primary = std::string(primary)};
         const std::string lock_raw = encode_lock_value(lv);
         for (const auto& m : mutations) {
-            if (m.op == Mutation::Op::PUT) {
+            if (m.op == Mutation::Op::kPut) {
                 batch.push_back(Modify{Put{.cf = Cf::Default,
                                            .key = data_key(m.key, start_ts),
                                            .value = m.value}});
@@ -311,6 +313,48 @@ public:
         return rollback(victims, lock_start_ts).has_value() ? victims.size() : std::size_t{0};
     }
 
+    // ---- GC（FUNC-17，SPEC-4 §4.4）：safe_point 以下旧版本清理 ----
+    // 规则（Percolator GC）：每个 key 保留"commitTs ≤ safe_point 的最新版本"及其数据；
+    // 更旧的 Write 记录删除，其 Default 数据（若不被任何保留 Write 引用）一并删除。
+    // 活跃读不受影响：start_ts ≥ safe_point 的快照路径完整。
+    // 返回 (删除的 Write 版本数, 删除的 Default 条目数)。
+    [[nodiscard]] result<std::pair<std::uint64_t, std::uint64_t>> gc(Ts safe_point) {
+        auto reader = storage_.create_reader();
+        if (!reader.has_value()) {
+            return std::unexpected(IoFailed{.path = "txn:gc", .reason = "reader 创建失败"});
+        }
+        auto it = (*reader)->scan(Cf::Write, std::span<const std::byte>{}, kGcScanLimit);
+        if (!it.has_value()) {
+            return std::unexpected(IoFailed{.path = "txn:gc", .reason = "版本扫描失败"});
+        }
+        std::vector<std::string> users;
+        std::map<std::string, std::vector<std::pair<Ts, Ts>>> by_user;   // user → (commit_ts, data_start)
+        for (; (*it)->valid(); (*it)->next()) {
+            const std::string stored((*it)->key());
+            if (stored.size() < 8) {
+                break;
+            }
+            const auto user = stored.substr(0, stored.size() - 8);
+            by_user[user].emplace_back(Ts{read_be64(stored.substr(stored.size() - 8))},
+                                       Ts{read_be64((*it)->value())});
+            if (users.empty() || users.back() != user) {
+                users.push_back(user);
+            }
+        }
+        std::vector<Modify> batch;
+        std::pair<std::uint64_t, std::uint64_t> counters{0, 0};
+        for (const auto& user : users) {
+            prune_user(user, by_user[user], safe_point, batch, counters);
+        }
+        if (batch.empty()) {
+            return counters;
+        }
+        if (auto r = storage_.write(batch); !r.has_value()) {
+            return std::unexpected(r.error());
+        }
+        return counters;
+    }
+
     // ---- 决议入口（红线2/3：生死只由 primary 状态决定） ----
     [[nodiscard]] result<TxnStatus> check_txn_status(std::string_view primary, Ts lock_start_ts,
                                                      std::uint64_t now_ms) {
@@ -352,6 +396,42 @@ private:
         }
         auto lv = decode_lock_value(*r->value);
         return lv;
+    }
+
+    // 单个用户 key 的版本裁剪：保留 ≤ safe_point 的最新版本及其数据，其余删除
+    void prune_user(const std::string& user, const std::vector<std::pair<Ts, Ts>>& versions,
+                    Ts safe_point, std::vector<Modify>& batch,
+                    std::pair<std::uint64_t, std::uint64_t>& counters) const {
+        Ts keep{0};
+        bool has_keep = false;
+        for (const auto& [cts, dts] : versions) {
+            if (cts.value <= safe_point.value) {
+                keep = cts;   // 升序：最后命中 = ≤ safe_point 的最大者
+                has_keep = true;
+            }
+        }
+        if (!has_keep) {
+            return;   // safe_point 之前无提交：不动（活跃事务数据）
+        }
+        std::set<std::uint64_t> kept_starts;
+        for (const auto& [cts, dts] : versions) {
+            if (cts.value == keep.value) {
+                kept_starts.insert(dts.value);
+            }
+        }
+        for (const auto& [cts, dts] : versions) {
+            if (cts.value == keep.value) {
+                continue;
+            }
+            if (cts.value < keep.value) {
+                batch.push_back(Modify{Delete{.cf = Cf::Write, .key = write_key(user, cts)}});
+                ++counters.first;
+            }
+            if (cts.value < keep.value && kept_starts.count(dts.value) == 0) {
+                batch.push_back(Modify{Delete{.cf = Cf::Default, .key = data_key(user, dts)}});
+                ++counters.second;
+            }
+        }
     }
 
     // 读 Default 某版本（编码键精确 get）
@@ -482,6 +562,7 @@ private:
     }
 
     static constexpr std::size_t kScanLimit = 4096;   // 版本数课程级，GC 前有界
+    static constexpr std::size_t kGcScanLimit = 1 << 20;   // GC 全量扫（Admin 低频）
     Storage& storage_;
 };
 

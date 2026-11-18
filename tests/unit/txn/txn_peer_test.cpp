@@ -113,7 +113,7 @@ TEST(TxnPeer, CrashedTxnResolvedThroughRaftPath) {
     // 直接用 PeerTxnExecutor 的 prewrite（TxnClient::commit 会连 commit 一起做完）
     {
         std::vector<tinykv::txn::Mutation> muts{
-            {.op = tinykv::txn::Mutation::Op::PUT, .key = "k2", .value = "half"}};
+            {.op = tinykv::txn::Mutation::Op::kPut, .key = "k2", .value = "half"}};
         auto r = f.exec().prewrite(muts, "k2", crash.start_ts(), 3000, f.now_ms);
         ASSERT_TRUE(r.has_value());
     }

@@ -118,3 +118,11 @@ message TxnCheckTxnStatusResponse {
     uint64 lock_ttl = 2;        // 未过期时剩余 TTL（毫秒）；过期/已终态 = 0
     tinykv.cmdpb.RegionError region_error = 3;
 }
+
+message TxnGCRequest {
+    uint64 safe_point = 1;      // 全集群最小活跃 start_ts（M6：daemon 取活跃会话最小值）
+}
+message TxnGCResponse {
+    uint64 versions_removed = 1;   // 清理的 Write 版本数
+    uint64 data_removed = 2;       // 清理的 Default 条目数
+}

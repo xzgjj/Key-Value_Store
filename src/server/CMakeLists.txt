@@ -8,9 +8,13 @@ endif()
 
 add_library(tinykv_server STATIC status_server.cpp)
 target_include_directories(tinykv_server PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/.. ${TINYKV_ASIO_INCLUDE_DIR})
-target_link_libraries(tinykv_server PUBLIC tinykv_common)
+target_link_libraries(tinykv_server PUBLIC tinykv_common tinykv_raftstore tinykv_txn tinykv_cli)
 if(WIN32)
     target_link_libraries(tinykv_server PUBLIC ws2_32 mswsock)
 endif()
 find_package(Threads REQUIRED)
 target_link_libraries(tinykv_server PUBLIC Threads::Threads)
+
+# M6 ③：组合根可执行——唯一负责"创建并连接全部组件"的入口
+add_executable(tinykv-server main.cpp)
+target_link_libraries(tinykv-server PRIVATE tinykv_server tinykv_cli)

@@ -26,6 +26,7 @@ constexpr char kTxnMarker = '\x2B';           // RaftCmdRequest 起始字节只�
 constexpr char kTxnTypePrewrite = '\x01';
 constexpr char kTxnTypeCommit = '\x02';
 constexpr char kTxnTypeRollback = '\x03';
+constexpr char kTxnTypeGC = '\x04';
 
 namespace {
 
@@ -350,70 +351,108 @@ bool Peer::propose_txn_rollback(const kvpb::TxnBatchRollbackRequest& req) {
     return raft_->propose(std::move(payload)).has_value();
 }
 
+bool Peer::propose_txn_gc(const kvpb::TxnGCRequest& req) {
+    std::string payload(1, kTxnMarker);
+    payload.push_back(kTxnTypeGC);
+    payload += req.SerializeAsString();
+    return raft_->propose(std::move(payload)).has_value();
+}
+
+namespace {
+
+// txn 载荷各类型的执行体（execute_txn_payload 只做分派；错误以 optional 回传）
+std::optional<KvError> run_txn_prewrite(Storage& storage, txn::LatchManager& latches,
+                                        const std::string& body) {
+    kvpb::TxnPrewriteRequest req;
+    if (!req.ParseFromString(body)) {
+        return InvalidArgument{"txn prewrite 反序列化失败"};
+    }
+    std::vector<std::string> keys;
+    std::vector<txn::Mutation> muts;
+    for (const auto& m : req.mutations()) {
+        keys.emplace_back(m.key());
+        muts.push_back(txn::Mutation{
+            .op = m.op() == kvpb::Mutation::PUT ? txn::Mutation::Op::kPut
+                                                : txn::Mutation::Op::kDel,
+            .key = m.key(), .value = m.value()});
+    }
+    auto guard = latches.acquire(keys);   // 红线4：latch 持有至 apply 完成
+    txn::MvccTxn mvcc(storage);
+    if (auto r = mvcc.prewrite(muts, req.primary_lock(), Ts{req.start_ts()}, req.lock_ttl(), 0);
+        !r.has_value()) {
+        return std::move(r.error());
+    }
+    return std::nullopt;
+}
+
+std::optional<KvError> run_txn_commit(Storage& storage, txn::LatchManager& latches,
+                                      const std::string& body) {
+    kvpb::TxnCommitRequest req;
+    if (!req.ParseFromString(body)) {
+        return InvalidArgument{"txn commit 反序列化失败"};
+    }
+    std::vector<std::string> keys(req.keys().begin(), req.keys().end());
+    auto guard = latches.acquire(keys);
+    txn::MvccTxn mvcc(storage);
+    if (auto r = mvcc.commit(keys, Ts{req.start_ts()}, Ts{req.commit_ts()}); !r.has_value()) {
+        return std::move(r.error());
+    }
+    return std::nullopt;
+}
+
+std::optional<KvError> run_txn_rollback(Storage& storage, txn::LatchManager& latches,
+                                        const std::string& body) {
+    kvpb::TxnBatchRollbackRequest req;
+    if (!req.ParseFromString(body)) {
+        return InvalidArgument{"txn rollback 反序列化失败"};
+    }
+    std::vector<std::string> keys(req.keys().begin(), req.keys().end());
+    auto guard = latches.acquire(keys);
+    txn::MvccTxn mvcc(storage);
+    if (auto r = mvcc.rollback(keys, Ts{req.start_ts()}); !r.has_value()) {
+        return std::move(r.error());
+    }
+    return std::nullopt;
+}
+
+std::optional<KvError> run_txn_gc(Storage& storage, const std::string& body) {
+    kvpb::TxnGCRequest req;
+    if (!req.ParseFromString(body)) {
+        return InvalidArgument{"txn gc 反序列化失败"};
+    }
+    txn::MvccTxn mvcc(storage);
+    if (auto r = mvcc.gc(Ts{req.safe_point()}); !r.has_value()) {
+        return std::move(r.error());
+    }
+    return std::nullopt;
+}
+
+}  // namespace
+
 result<void> Peer::execute_txn_payload(const std::string& payload, std::uint64_t index) {
-    txn::MvccTxn mvcc(storage_);
     const char type = payload[1];
-    std::string body = payload.substr(2);
+    const std::string body = payload.substr(2);
     std::optional<KvError> err;
-    if (type == kTxnTypePrewrite) {
-        kvpb::TxnPrewriteRequest req;
-        if (!req.ParseFromString(body)) {
-            err = InvalidArgument{"txn prewrite 反序列化失败"};
-        } else {
-            // 红线4：latch 按 key 全序持有至 apply 完成；apply 单线程下互斥天然成立，
-            // 这里显式取闩让"闩语义"落在代码结构上而非巧合上
-            std::vector<std::string> keys;
-            for (const auto& m : req.mutations()) {
-                keys.emplace_back(m.key());
-            }
-            auto guard = txn_latches_.acquire(keys);
-            std::vector<txn::Mutation> muts;
-            for (const auto& m : req.mutations()) {
-                muts.push_back(txn::Mutation{
-                    .op = m.op() == kvpb::Mutation::PUT ? txn::Mutation::Op::PUT
-                                                        : txn::Mutation::Op::DELETE,
-                    .key = m.key(), .value = m.value()});
-            }
-            if (auto r = mvcc.prewrite(muts, req.primary_lock(), Ts{req.start_ts()},
-                                       req.lock_ttl(), 0); !r.has_value()) {
-                err = std::move(r.error());
-            }
-        }
-    } else if (type == kTxnTypeCommit) {
-        kvpb::TxnCommitRequest req;
-        if (!req.ParseFromString(body)) {
-            err = InvalidArgument{"txn commit 反序列化失败"};
-        } else {
-            auto guard = txn_latches_.acquire(
-                std::vector<std::string>(req.keys().begin(), req.keys().end()));
-            if (auto r = mvcc.commit(
-                    std::vector<std::string>(req.keys().begin(), req.keys().end()),
-                    Ts{req.start_ts()}, Ts{req.commit_ts()});
-                !r.has_value()) {
-                err = std::move(r.error());
-            }
-        }
-    } else if (type == kTxnTypeRollback) {
-        kvpb::TxnBatchRollbackRequest req;
-        if (!req.ParseFromString(body)) {
-            err = InvalidArgument{"txn rollback 反序列化失败"};
-        } else {
-            auto guard = txn_latches_.acquire(
-                std::vector<std::string>(req.keys().begin(), req.keys().end()));
-            if (auto r = mvcc.rollback(
-                    std::vector<std::string>(req.keys().begin(), req.keys().end()),
-                    Ts{req.start_ts()});
-                !r.has_value()) {
-                err = std::move(r.error());
-            }
-        }
-    } else {
-        err = InvalidArgument{"未知 txn 载荷类型"};
+    switch (type) {
+        case kTxnTypePrewrite:
+            err = run_txn_prewrite(storage_, txn_latches_, body);
+            break;
+        case kTxnTypeCommit:
+            err = run_txn_commit(storage_, txn_latches_, body);
+            break;
+        case kTxnTypeRollback:
+            err = run_txn_rollback(storage_, txn_latches_, body);
+            break;
+        case kTxnTypeGC:
+            err = run_txn_gc(storage_, body);
+            break;
+        default:
+            err = InvalidArgument{"未知 txn 载荷类型"};
+            break;
     }
     if (err.has_value()) {
         txn_errors_[index] = std::move(*err);   // nullopt = 成功；client 泵到位点后查询
     }
-    return {};
     return {};
 }
 

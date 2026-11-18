@@ -38,7 +38,7 @@ struct Fixture {
 };
 
 std::vector<Mutation> put(const std::string& key, const std::string& value) {
-    return {Mutation{.op = Mutation::Op::PUT, .key = key, .value = value}};
+    return {Mutation{.op = Mutation::Op::kPut, .key = key, .value = value}};
 }
 
 TEST(MvccTxnTest, PrewriteCommitReadRoundTrip) {
