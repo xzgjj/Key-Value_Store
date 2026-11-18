@@ -1,24 +1,24 @@
 {
-  "task": "M7 收口：⑦ 跨区协商器（分组 2PC + 恢复广播 + 150 轮 chaos）、CLI 三个悬空端点的服务端实现、跨区开关接配置",
+  "task": "M7 收口第一批：⑦ 跨区事务随机 kill chaos（真崩溃语义，150 轮）+ 开关转正（txn.cross_region_enabled 默认 true）+ /status 暴露开关状态（红线 6）+ 契约/文档同步",
   "paths": [
-    "src/txn/",
-    "src/server/",
-    "src/raftstore/",
-    "src/config/",
-    "proto/",
-    "tests/",
-    "docs/",
-    "demo.yaml",
+    "tests/tools/txn_chaos_writer.cpp",
+    "tests/integration/txn_cross_region_chaos_random_test.cpp",
+    "tests/integration/CMakeLists.txt",
+    "src/server/server_app.h",
+    "src/config/config.h",
+    "docs/testing.md",
+    "docs/SPEC-6-m7-evolution.md",
+    "docs/CONTRACT-REVIEW.md",
+    "docs/http-protocol.md",
     "README.md",
-    "ci/task_scope.json",
-    "scripts/verify_matrix.py"
+    "demo.yaml",
+    ".gitignore"
   ],
-  "reason": "用户确认：请求体保持制表符分隔（已入契约）；补齐协调器/状态机/恢复；CLI 三个悬空端点选补服务端。⑦ 在第五/六笔中落地：TxnClient 分组提交（PREPARE→TSO→COMMIT_PRIMARY→COMMIT_SECONDARY）+ resolve_locks_of 广播到各 region 引擎 + 开关与配置；三个端点（/region/peers、/scheduler/status、POST /trace）补齐并有用例。 另收 scripts/verify_matrix.py：把'多标准/多编译器建树→测→删'收敛成一条命令（矩阵树每棵 1.3~2.5GB，验证完不删会累积到十几 GB，本次就发生过因清理导致构建树消失）。",
+  "reason": "SPEC-6 §6.7 完成判定要求'夜跑级随机中断'：新增 txn_chaos_writer 子进程（_Exit 等价 kill -9）+ txn_cross_region_chaos_random（死亡点/主组侧/半途决议三随机维度，150 轮）；随机 chaos 通过后经用户批准（2026-11-18：随机 chaos 通过后转正、跳过 TLS）把 txn.cross_region_enabled 默认改 true，并在 /status 增加 txn_cross_region 字段补红线 6；CONTRACT-REVIEW D-2/D-3 裁决落档，新增 C-10/C-11 契约行。.gitignore 追加三个非本任务的外来未跟踪目录（.cache/.slidep/年终总结，其他会话产物，文件未改动），否则 scope 阶段恒红。",
   "bugfix": false,
   "fixes": [],
-  "overflow_approved": true,
-  "behavior_change_approved": false,
-  "rule_asset_approved": false,
-  "behavior_change_note": "①TxnPrewriteRequest 追加 cross_region=6（跨区分组时放宽'primary 必须在本批'，单区路径不变）；②新增 txn.cross_region_enabled（默认 false）；③resolve_locks_of 由'只清 primary 所在 region'改为'广播到所有 region'（跨区事务的锁分散在多引擎，只清一处会留下永远解不掉的锁）；④txn 端点错误改为带结构化细节（ERR InvalidArgument: …原因=…）；⑤新增 /region/peers、/scheduler/status、POST /trace；⑥TraceInterceptor 支持开关。",
-  "approver": "用户（2026-11-18：协调器/状态机/恢复补齐；CLI 悬空端点补服务端；/kv 保持制表符分隔）"
+  "overflow_approved": false,
+  "behavior_change_approved": true,
+  "behavior_change_note": "txn.cross_region_enabled 默认 false→true：跨区事务从'明确拒绝'变为'分组 2PC 提交'（⑦ 转正的预期方向，配置显式写 false 可完全回退）；/status 追加 txn_cross_region 字段（纯追加）。",
+  "approver": "用户（2026-11-18：随机 chaos 通过后开关转正；TLS 移出 M7；⑨a 本批接线默认 16 分片）"
 }

@@ -18,14 +18,16 @@
 | C-7 | HTTP 鉴权 | 无 | 配 `server.auth_token` 后必须 `Authorization: Bearer <token>`，否则 401 | 未配 token 时零影响 | 清空 token |
 | C-8 | 数据目录新增 `meta/` | 无 | `meta/regions.pb` + `regions.pb.bak` | 旧库无此目录 = 首次启动路径，自动建并落盘 | 删 `meta/` 即回单 region 兼容路径 |
 | C-9 | 就绪输出 | `stdout` 全缓冲（重定向时行不落盘） | 行缓冲 + 就绪行立即 flush | 解析该行的脚本从"等不到"变成"等得到" | 无（纯改善） |
+| C-10 | `txn.cross_region_enabled` 默认值 | false（跨区写入报"跨区事务未启用"） | **true**（跨区事务按 region 分组两阶段提交；显式写 false 即回旧行为） | 依赖"跨区被拒绝"的调用方会看到事务真的跨区提交了——这是 ⑦ 转正的预期方向；配置文件显式声明 false 可完全回退 | 配置里显式写 `cross_region_enabled: false` |
+| C-11 | `/status` 响应 | 无 `txn_cross_region` 字段 | 追加 `"txn_cross_region":true|false`（红线 6：开关状态可观测） | 纯追加，解析方不受影响 | 无 |
 
 ## 2. 需要你决定的三件事
 
 | # | 议题 | 选项 | 我的建议 |
 |---|---|---|---|
 | D-1 | `/kv` 请求体限定"制表符分隔"，导致 **value 不能含制表符** | 你的结论：**保持制表符分隔**（已写进 `http-protocol.md §3`，含"value/key 不能含制表符"的明确边界） | 与我的建议一致；需要二进制内容时走事务 API 的 proto 载荷 |
-| D-2 | 鉴权只做 Bearer token，未做 TLS（M7-SEC-02 的 TLS 部分） | (a) 维持"未鉴权强制回环 + token 明文" (b) 接 OpenSSL 做 TLS 传输装饰器 | (a)：TLS 需要新依赖与证书生命周期管理，属独立议题；当前形态已能挡住"裸奔在公网" |
-| D-3 | ⑦ 跨区 2PC 状态与开关 | 已按你的指示补做：分组 → 状态机（PREPARE/TSO/COMMIT_PRIMARY/COMMIT_SECONDARY）→ 恢复（锁决议广播到各 region）。`txn.cross_region_enabled` 仍默认 false | **建议**：chaos 已绿（150 轮枚举三窗口），但那是"已知窗口"的确定性覆盖，不是随机 kill。建议默认值维持 false，等夜跑级随机中断补上再讨论转正 |
+| D-2 | 鉴权只做 Bearer token，未做 TLS（M7-SEC-02 的 TLS 部分） | (a) 维持"未鉴权强制回环 + token 明文" (b) 接 OpenSSL 做 TLS 传输装饰器 | **已裁决（2026-11-18）**：选 (a)，TLS 移出 M7 另立项。M7-SEC-02 以"未启用时强制绑定回环"部分达成，文档如实记录 |
+| D-3 | ⑦ 跨区 2PC 状态与开关 | 已按你的指示补做：分组 → 状态机（PREPARE/TSO/COMMIT_PRIMARY/COMMIT_SECONDARY）→ 恢复（锁决议广播到各 region）。`txn.cross_region_enabled` 仍默认 false | **已裁决（2026-11-18）**：`txn_cross_region_chaos_random`（随机 kill，150 轮）通过后开关转正为默认 true（C-10）。半提交不出现的断言覆盖死亡点 0..4 × 主组侧 × 半途决议 |
 
 ## 3. CLI 交互面（与 `docs/cli.md` 一致，未变）
 

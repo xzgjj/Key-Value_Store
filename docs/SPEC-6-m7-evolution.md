@@ -243,7 +243,7 @@ tinykv-cli ... regions                 # 仍是两个 region（M6 行为是回�
 
 | 配置项 | 默认 | 影响 |
 |---|---|---|
-| `txn.cross_region_enabled` | false | ⑦ 协调器开关；关时只允许单区事务 |
+| `txn.cross_region_enabled` | true | ⑦ 协调器开关（2026-11-18 随机 kill chaos 通过后转正）；关时只允许单区事务 |
 | `raftstore.meta_dir` | `meta` | ⑧ 元数据目录（相对 data_dir） |
 | `server.lock_shards` | 16 | ⑨a 分片数；1 = 等价改造前 |
 | `server.auth_token` | 空 | ⑩ 为空即关闭鉴权，并在启动时告警 |
@@ -265,10 +265,12 @@ tinykv-cli ... regions                 # 仍是两个 region（M6 行为是回�
 ⑨c 不设完成判定（持续项，随改动评估）。
 
 **当前进度（2026-11-18）**：⑧ 完成；⑦ 完成（护栏 → 分组 → 状态机 → 恢复四步齐备，
-`txn_cross_region_test` 3 例 + `txn_cross_region_chaos` 150 轮），但**默认开关仍关**——
-chaos 是"枚举三个已知窗口"而非随机 kill，按 §6.7 精神还差夜跑级的随机中断；
-⑨a 原语完成、接线待开关转正；⑩ 鉴权完成、TLS 待决（见 `docs/CONTRACT-REVIEW.md` D-2）。
-`docs/notes-m7.md` 尚未建立：等 ⑦ 开关转正时一次性写（避免半成品笔记变成第二份事实源）。
+`txn_cross_region_test` 3 例 + `txn_cross_region_chaos` 150 轮）且**已转正**——
+`txn_cross_region_chaos_random` 补上随机 kill（子进程 `_Exit` 真崩溃语义 + 死亡点/主组侧/半途决议
+三个随机维度，150 轮），通过后经用户批准 `txn.cross_region_enabled` 默认 true，
+开关状态进 `/status`（红线 6 补齐）；⑨a 原语完成、接线进行中；⑩ 鉴权完成、TLS 经用户裁决
+**移出 M7**（D-2 收口：TLS 依赖与证书生命周期另立项）。
+`docs/notes-m7.md` 随 ⑨a 接线批次一起写（避免半成品笔记变成第二份事实源）。
 
 ## 6.8 开放决策点
 
@@ -295,3 +297,5 @@ chaos 是"枚举三个已知窗口"而非随机 kill，按 §6.7 精神还差夜
 | 2026-11-18 | ⑦ 第三/四步落地：`TxnClient` 分组提交（PREPARE → TSO → COMMIT_PRIMARY → COMMIT_SECONDARY）+ 恢复路径（`resolve_locks_of` 广播到各 region 引擎）；`txn.cross_region_enabled` 开关 + `txn_cross_region_test` 3 例 | M7-REL-01 的三条路径（全可见/全不可见/中断收敛）各有一条用例；默认仍关 |
 | 2026-11-18 | ⑦ chaos 证据：`txn_cross_region_chaos` 150 轮枚举三个中断窗口（只 PREPARE 主组 / 全 PREPARE 未取 ts / 主组已提交），断言半提交不出现 | §6.7 的 chaos 行达成；默认开关是否打开仍待你拍板 |
 | 2026-11-18 | ARCH-1 P1-1 收口：`/region/peers`、`/scheduler/status`、`POST /trace` 服务端实现 + `admin_endpoints_test` | CLI 三个悬空命令不再 404 |
+| 2026-11-18 | ⑦ chaos 升级为随机中断：`txn_cross_region_chaos_random`（子进程 `_Exit` 真崩溃 + 死亡点/主组侧/半途决议随机，150 轮）通过 | §6.7 的"夜跑级随机中断"缺口补齐；修复前 kill≥3 轮必失败（目录与主组侧错位），红→绿有据 |
+| 2026-11-18 | ⑦ 开关转正：`txn.cross_region_enabled` 默认 true（用户批准），开关状态进 `/status`（红线 6） | 跨区事务正式可用；M7-REL-01 证据链闭合 |

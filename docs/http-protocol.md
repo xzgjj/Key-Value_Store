@@ -112,9 +112,10 @@ curl -s -H 'Authorization: Bearer <token>' http://127.0.0.1:3401/status
 
 | 开关 | 线上表现 |
 |---|---|
-| `false`（默认） | `POST /txn/commit` 返回 `ERR InvalidArgument: 跨区事务未启用（key=… 属 region N，primary=… 属 region M）`；**不会有任何写入落地** |
-| `true` | 按 region 分组两阶段提交：每组一次 prewrite → 取 commit_ts → 先提交 primary 组 → 再提交其余组；中途崩溃由"读者遇锁 → 查 primary 状态"收敛 |
+| `true`（默认，M7 转正） | 按 region 分组两阶段提交：每组一次 prewrite → 取 commit_ts → 先提交 primary 组 → 再提交其余组；中途崩溃由"读者遇锁 → 查 primary 状态"收敛 |
+| `false`（显式关闭） | `POST /txn/commit` 返回 `ERR InvalidArgument: 跨区事务未启用（key=… 属 region N，primary=… 属 region M）`；**不会有任何写入落地** |
 
+开关当前值经 `GET /status` 的 `txn_cross_region` 字段可查（红线 6）。
 单 region 事务在两种开关下走同一条路径（无额外开销）。
 
 ## 6. 与 CLI 的关系

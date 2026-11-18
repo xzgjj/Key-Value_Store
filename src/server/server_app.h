@@ -60,9 +60,10 @@ struct ServerOptions {
     // ⑩ 安全边界（M7-SEC-01/02）：非空 = 所有 HTTP 请求必须带 Authorization: Bearer <token>；
     // 为空 = 不鉴权，此时强制绑回环（D6-3：默认关 + 启动告警 + 强制回环）。
     std::string auth_token;
-    // ⑦ 跨区事务开关（SPEC-6 §6.6 `txn.cross_region_enabled`，默认关）：
-    // 打开后会话里的 TxnClient 会按 region 分组走两阶段提交；关闭时跨区 prewrite 仍被拒绝。
-    bool cross_region_enabled{false};
+    // ⑦ 跨区事务开关（SPEC-6 §6.6 `txn.cross_region_enabled`）：
+    // 开（默认，M7 转正：150 轮随机 kill chaos 通过后由用户批准）→ 会话里的 TxnClient
+    // 按 region 分组走两阶段提交；关 → 跨区 prewrite 被护栏拒绝。状态经 /status 暴露（红线 6）。
+    bool cross_region_enabled{true};
 
     // ---- Raft 传输层（M7 ⑤：单机 KV → 分布式 store 的分水岭） ----
     // voters 为空 = 单节点模式（不创建 Transport，保持既有行为）；非空 = 多副本组。
@@ -845,8 +846,10 @@ private:
                ",\"splits\":" + std::to_string(split_events_.load()) +
                ",\"apply_errors\":" + std::to_string(apply_errors) +
                ",\"txn_errors\":" + std::to_string(txn_errors) + ",\"last_apply_error\":\"" +
-               http::escape(last_error) + "\"" + ",\"now_ms\":" + std::to_string(now_ms_.load()) +
-               ",\"auth\":" + (opt_.auth_token.empty() ? "false" : "true") + ",\"bind\":\"" +
+               http::escape(last_error) + "\"" +                ",\"now_ms\":" + std::to_string(now_ms_.load()) +
+               ",\"auth\":" + (opt_.auth_token.empty() ? "false" : "true") +
+               ",\"txn_cross_region\":" + (opt_.cross_region_enabled ? "true" : "false") +
+               ",\"bind\":\"" +
                http::escape(opt_.host) + "\"" +
                (!opt_.auth_token.empty() || is_loopback(opt_.host) ? "" : ",\"warn\":\"未鉴权\"") +
                ",\"replica_id\":" + std::to_string(opt_.replica_id.value) +

@@ -195,6 +195,7 @@ CI 用 `ctest -L unit|simulation|integration|bench` 选择，无需解析本页�
 | tests/integration/split_meta_persistence_test.cpp | integration | `split_meta_persistence_test` | - | nightly |
 | tests/integration/txn_cross_region_test.cpp | integration | `txn_cross_region_test` | - | nightly |
 | tests/integration/txn_cross_region_chaos_test.cpp | integration | `txn_cross_region_chaos` | - | nightly;serial |
+| tests/integration/txn_cross_region_chaos_random_test.cpp | integration | `txn_cross_region_chaos_random` | - | nightly;serial |
 | tests/integration/crash_recovery_test.cpp | integration | `crash_recovery_test` | - | nightly |
 | tests/bench/cluster_bench_test.cpp | bench | `cluster_bench` | - | nightly |
 | tests/bench/tcp_perf_bench_test.cpp | bench | `tcp_perf_bench` | - | nightly |

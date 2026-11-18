@@ -37,7 +37,7 @@ struct ServerSection {
 
 // txn.* 段（M7 ⑦：跨区事务开关）
 struct TxnSection {
-    bool cross_region_enabled{false};  // 关 = 跨区 prewrite 明确拒绝（安全侧默认）
+    bool cross_region_enabled{true};  // M7 转正：默认开（随机 kill chaos 通过后）；false = 跨区拒绝
 };
 
 struct Config {

@@ -1,7 +1,6 @@
 # TinyKV-CPP
 
-> 用现代 C++23 从零实现的 mini-TiKV：单机 KV → Raft → Multi-Raft → Percolator 分布式事务，  
-> 服务端、命令行、嵌入 API 三件套齐备，正确性由 65 个 ctest 与 CI 门禁背书。
+> 用现代 C++23 从零实现的 mini-TiKV：单机 KV → Raft → Multi-Raft → Percolator 分布式事务，  服务端、命令行、嵌入 API 三件套齐备，正确性由 65 个 ctest 与 CI 门禁背书。
 
 ![TinyKV-CI](https://github.com/xzgjj/Key-Value_Store/actions/workflows/ci.yml/badge.svg?branch=main)
 
@@ -9,9 +8,10 @@
 
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 
-这是一个可以真正跑起来的系统级项目，不是跟着教程抄一遍的练习。它把 TiKV 的核心链路  
-——自研存储引擎、Raft 共识、Multi-Raft 分片、Percolator 事务——压缩到一万行量级，  
+这是一个可以真正跑起来的系统级项目，不是跟着教程抄一遍的练习。它把 TiKV 的核心链路  ——自研存储引擎、Raft 共识、Multi-Raft 分片、Percolator 事务——压缩到一万行量级，  
 每个模块都能从入口文件读到末尾，每条设计取舍都写进了对应阶段的实现笔记。
+
+
 
 ## 1. 项目定位
 
@@ -25,6 +25,8 @@
 
 **凭什么说完成**：每个阶段都有规格与验收表，验收项必须指向仓库里真实存在的测试才算闭合。做不到的事也会写进已知限制，不拿"跑通了"冒充"做完了"。
 
+
+
 ## 2. 能力清单
 
 | 层          | 已实现的内容                                                                                     | 入口                                                  |
@@ -35,6 +37,8 @@
 | 分布式事务      | TSO 严格单调授时、Latch 单行原子性、`MvccTxn` 三列族 prewrite/commit/rollback、锁决议三态、GC 安全点                 | [src/txn/mvcc.h](src/txn/mvcc.h)                    |
 | 运行时        | `ServerApp` 组合根、`Service` 生命周期（顺序启动/逆序停止）、Worker 泵循环、会话级事务、Interceptor 链、信号优雅关闭            | [src/server/server\_app.h](src/server/server_app.h) |
 | 客户端        | 本地读写/扫描/状态、集群模式读写、Region 观测（`regions`/`region peers`/`region split`）、region trace 开关、交互式事务 | [src/cli/cli.cpp](src/cli/cli.cpp)                  |
+
+
 
 ## 3. 快速开始
 
@@ -47,6 +51,8 @@
 | 第三方库 | protobuf、spdlog、asio、unordered\_dense；gtest 由 CMake FetchContent 固定版本拉取       |
 | 脚本运行 | Python 3.11+（构建与 CI 脚本只用标准库，不额外装依赖）                                          |
 | 依赖来源 | 本机用 MSYS2 pacman，CI/MSVC 走 vcpkg 清单（[vcpkg.json](vcpkg.json)，需 `VCPKG_ROOT`） |
+
+
 
 ### 3.2 构建与测试
 
@@ -68,6 +74,8 @@ ctest --test-dir build/win-debug -L fast --output-on-failure
 
 构建产物在 `build/<preset>/` 下：`src/server/tinykv-server`、`src/cli/tinykv-cli`、  
 `examples/embed_example`。
+
+
 
 ### 3.3 跑服务端，CLI 读写
 
@@ -104,6 +112,8 @@ auto got = (*engine)->get(Cf::Default, std::as_bytes(std::span{"k1", 2}));
 完整可编译版本见 [examples/embed\_example.cpp](examples/embed_example.cpp)——它随 CI 一起编译，  
 接口改了却忘了改示例，CI 会直接红。
 
+
+
 ## 4. 架构
 
 一层一层往下看：最上面是两种入口，CLI 走 HTTP，嵌入 API 直接调 C++ 接口；往下是 `server` 层，它把 StatusServer、会话状态、Worker 泵和 Interceptor 链组装成一个常驻进程；再往下是 `raftstore`，每个 Region 由一个或多个 Peer 承载，负责区间路由、epoch 校验、Split 和快照分块；Peer 的两个依赖并行展开——`raft` 提供选举、复制、快照和日志压缩，`txn` 提供 MVCC、Latch 和 TSO；最底下是 `storage`，跳表 memtable 接追加写 WAL，落盘为 SST，三列族在这里物理隔离；`common` 横切全部层次，提供结构化错误、变长编码、CRC32C 和日志封装。
@@ -139,20 +149,24 @@ auto got = (*engine)->get(Cf::Default, std::as_bytes(std::span{"k1", 2}));
 
 **一把粗粒度串行闸是当前的自知取舍。** 所有 Peer 和 Storage 访问由 `peer_mu_` 串行化，HTTP handler、后台泵、事务执行器共用它。这把锁让正确性容易论证、死锁面容易排查，代价是吞吐上限明显；并发优化留到有 bench 数据指出瓶颈时再做，而不是先拆锁再找 bug。
 
+
+
 ## 5. 已知限制
 
 如实记录，不伪装完成度。这些是当前实现的边界，也是后续工作的起点：
 
-- **跨 Region 事务**：协调器已落地（分组 2PC：PREPARE → TSO → COMMIT_PRIMARY → COMMIT_SECONDARY，
-  恢复靠 primary 锁状态收敛），由 `txn.cross_region_enabled` 控制，**默认关闭**。
-  关闭时跨区 prewrite 返回 `InvalidArgument`（不静默写错分区）。打开前还缺 150 轮 chaos 证据。
+- **跨 Region 事务**：协调器已落地并转正（分组 2PC：PREPARE → TSO → COMMIT_PRIMARY → COMMIT_SECONDARY，
+  恢复靠 primary 锁状态收敛），`txn.cross_region_enabled` **默认开启**；150 轮随机 kill chaos
+  （真崩溃语义，死亡点/主组侧/半途决议随机）与 150 轮枚举 chaos 双证据。显式配 false 即回"跨区拒绝"。
 - **Region 元数据**：已落盘（`meta/regions.pb` + `.bak`），split 后重启拓扑与数据都在；
   但 region 1 仍沿用 `data_dir` 根目录（子 region 在 `regions/<id>`），双布局未合并。
 - **GC 安全点**取活跃会话的最小 start\_ts，无会话时取当前 TSO；锁冲突解析后的版本裁剪语义见 SPEC-4。
-- **并发与安全边界**：一把粗粒度串行闸（分片锁原语已就绪、未接线）；鉴权为 Bearer token，
-  **未做 TLS**；未配 token 时强制绑回环并在 `/status` 标 `"auth":false`。
+- **并发与安全边界**：一把粗粒度串行闸（分片锁原语已就绪、接线进行中）；鉴权为 Bearer token，
+  **未做 TLS**（已裁决移出 M7，见 CONTRACT-REVIEW D-2）；未配 token 时强制绑回环并在 `/status` 标 `"auth":false`。
 - **编译器/标准**：默认 C++23；C++20/17 走 `src/common/compat.h`，g++ 与 clang++ 均在 CI 矩阵内。
 - **非目标**：Region Merge、完整 PD 调度策略、Joint Consensus、悲观事务、RDMA/GPU 传输。
+
+
 
 ## 6. 许可
 

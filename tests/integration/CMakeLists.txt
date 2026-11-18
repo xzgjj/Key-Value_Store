@@ -10,6 +10,16 @@ add_tinykv_test(lincheck_si_test SRCS lincheck_si_test.cpp LIBS tinykv_storage L
 add_tinykv_test(txn_chaos_n150 SRCS txn_chaos_test.cpp LIBS tinykv_raftstore tinykv_proto LEVEL integration)
 
 add_tinykv_test(txn_cross_region_chaos SRCS txn_cross_region_chaos_test.cpp LIBS tinykv_storage LEVEL integration)
+
+# 随机中断 chaos 的子进程写入器（_Exit 等价 kill -9，真崩溃语义见 tools/txn_chaos_writer.cpp）
+add_executable(txn_chaos_writer ../tools/txn_chaos_writer.cpp)
+target_link_libraries(txn_chaos_writer PRIVATE tinykv_storage)
+if(MINGW)
+    target_link_options(txn_chaos_writer PRIVATE -static)
+endif()
+add_tinykv_test(txn_cross_region_chaos_random SRCS txn_cross_region_chaos_random_test.cpp LIBS tinykv_storage LEVEL integration)
+target_compile_definitions(txn_cross_region_chaos_random PRIVATE
+    TXN_CHAOS_WRITER_PATH=\"$<TARGET_FILE:txn_chaos_writer>\")
 add_tinykv_test(txn_cross_region_test SRCS txn_cross_region_test.cpp LIBS tinykv_server tinykv_cli LEVEL integration)
 add_tinykv_test(split_meta_persistence_test SRCS split_meta_persistence_test.cpp LIBS tinykv_server tinykv_cli LEVEL integration)
 
