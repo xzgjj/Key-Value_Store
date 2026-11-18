@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <mutex>
 #include <vector>
@@ -26,9 +27,15 @@ public:
     [[nodiscard]] virtual result<std::vector<Ts>> get_timestamps(std::size_t n) = 0;
 };
 
-// 进程内 TSO：单一计数器。锁只保护 counter 的取段，保证批量原子性。
+// 进程内 TSO：物理时间基线 + 逻辑计数（Percolator 同款布局：ts = physical_ms << 18 | logical）。
+// 为什么必须带物理基线：纯计数器在重启后从 0 重新计数，新事务的 start_ts 会小于盘上所有
+// commit_ts——MVCC 只认 commit_ts ≤ start_ts 的版本，于是历史数据全部读不到（静默空值），
+// 而 latest_commit_bound > start_ts 让任何写都命中 WriteConflict（事务面实际不可写）。
+// physical=false 保留纯计数器模式：测试要确定性、要小 ts 值（Ts{1000} 这类断言依赖它）。
 class MonotonicTsProvider final : public TsProvider {
 public:
+    explicit MonotonicTsProvider(bool physical = false) : physical_(physical) {}
+
     [[nodiscard]] result<std::vector<Ts>> get_timestamps(std::size_t n) override {
         if (n == 0) {
             return std::unexpected(InvalidArgument{"批量授时 n 必须 > 0"});
@@ -37,7 +44,7 @@ public:
         std::vector<Ts> out;
         out.reserve(n);
         for (std::size_t i = 0; i < n; ++i) {
-            out.push_back(Ts{++counter_});
+            out.push_back(Ts{next_locked()});
         }
         return out;
     }
@@ -48,8 +55,35 @@ public:
         return Ts{counter_};
     }
 
+    // 重启恢复：保证后续分配严格大于盘上已存在的最大 ts（提交位点或锁的 start_ts）。
+    // 只在启动装配期调用一次；运行期调用等价于"强制跳过一段 ts"，语义安全但浪费。
+    void raise_floor(Ts floor) {
+        std::lock_guard lock(mu_);
+        if (floor.value > counter_) {
+            counter_ = floor.value;
+        }
+    }
+
 private:
+    static constexpr int kLogicalBits = 18;   // 低 18 位逻辑计数（Percolator：每毫秒 26 万个）
+
+    [[nodiscard]] std::uint64_t next_locked() {
+        std::uint64_t base = counter_ + 1;
+        if (physical_) {
+            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::system_clock::now().time_since_epoch())
+                                .count();
+            const auto physical = (static_cast<std::uint64_t>(ms) << kLogicalBits);
+            if (physical > base) {
+                base = physical;
+            }
+        }
+        counter_ = base;
+        return counter_;
+    }
+
     mutable std::mutex mu_;
+    bool physical_{false};
     std::uint64_t counter_{0};
 };
 

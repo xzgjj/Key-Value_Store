@@ -11,6 +11,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstdint>
 #include <stdexcept>
 #include <vector>
 
@@ -84,6 +85,33 @@ TEST(TsoTest, SchedulerBackedProviderMonotonic) {
     ASSERT_TRUE(a.has_value() && b.has_value());
     EXPECT_TRUE(strictly_increasing(*a));
     EXPECT_LT(a->back().value, b->front().value);
+}
+
+// BUG-0017: code-review P0-2——重启恢复必须抬高 TSO 下限。
+// 使用场景：重启前盘上最大 commit_ts = 1000，重启后若从 1 重新计数，
+// start_ts < 1000 会让历史版本全部读不到（静默空值）、任何写都命中 WriteConflict。
+TEST(TsoTest, RaiseFloorKeepsAllocationsAboveRestoredMax) {
+    MonotonicTsProvider tso;
+    tso.raise_floor(Ts{1000});
+    auto after = tso.get_timestamps(3);
+    ASSERT_TRUE(after.has_value());
+    EXPECT_GT(after->front().value, 1000U) << "重启后新 start_ts 不得小于盘上最大 ts";
+    EXPECT_TRUE(strictly_increasing(*after));
+}
+
+// 物理基线模式：ts 高位来自墙钟毫秒，重启后天然大于历史值（即使不显式 raise_floor）
+TEST(TsoTest, PhysicalModeEncodesWallClockInHighBits) {
+    MonotonicTsProvider tso(/*physical=*/true);
+    auto a = tso.get_timestamps(1);
+    ASSERT_TRUE(a.has_value());
+    const auto now_ms = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+    EXPECT_EQ(a->front().value >> 18, now_ms) << "高位必须是物理毫秒（Percolator 布局）";
+    auto b = tso.get_timestamps(1);
+    ASSERT_TRUE(b.has_value());
+    EXPECT_GT(b->front().value, a->front().value);
 }
 
 // 批量窗口吞吐：FUNC-16 要求 ≥1e5 ts/s（纯计数器，机械下限证明）

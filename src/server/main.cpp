@@ -13,8 +13,11 @@
 #include <condition_variable>
 #include <iostream>
 #include <mutex>
+#include <optional>
+#include <string>
 #include <thread>
 
+#include "config/config.h"
 #include "server/server_app.h"
 
 namespace {
@@ -30,17 +33,85 @@ void on_signal(int) {
 
 }  // namespace
 
-int main(int argc, char** argv) {
+namespace {
+
+void print_usage() {
+    std::cerr << "用法: tinykv-server <data_dir> [status_port] [--config <file>]\n"
+                 "  <data_dir>       数据目录（内含 manifest / wal/ / sst/）\n"
+                 "  [status_port]    业务 HTTP 端口；0 或缺省 = 系统分配\n"
+                 "  --config <file>  加载 YAML 配置（engine.fsync_on_commit 等，见 demo.yaml）\n";
+}
+
+// 解析结果：配置路径与"是否已就绪"分开表达，避免用返回值兼表两种失败
+struct ParsedArgs {
     tinykv::server::ServerOptions opt;
-    // 参数极简：tinykv-server <data_dir> [status_port]（更多配置随 daemon 化演进进 config）
-    if (argc >= 2) {
-        opt.data_dir = argv[1];
+    std::optional<std::string> config_path;
+    bool help{false};
+    bool ok{true};
+};
+
+// 参数解析：前两个位置参数保持 M1 起的 <data_dir> [status_port] 语义（脚本兼容），
+// --config 为可选项；配置里的 engine.dir 只在没给位置参数时生效（命令行优先）。
+ParsedArgs parse_args(int argc, char** argv) {
+    ParsedArgs out;
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--config" && i + 1 < argc) {
+            out.config_path = argv[++i];
+            continue;
+        }
+        if (arg == "--help" || arg == "-h") {
+            out.help = true;
+            return out;
+        }
+        if (arg.rfind("--", 0) == 0) {
+            std::cerr << "未知选项: " << arg << '\n';
+            out.ok = false;
+            return out;
+        }
+        if (out.opt.data_dir.empty()) {
+            out.opt.data_dir = arg;
+        } else if (out.opt.status_port == 0) {
+            out.opt.status_port = static_cast<std::uint16_t>(std::stoul(arg));
+        } else {
+            std::cerr << "多余的参数: " << arg << '\n';
+            out.ok = false;
+            return out;
+        }
     }
-    if (argc >= 3) {
-        opt.status_port = static_cast<std::uint16_t>(std::stoul(argv[2]));
+    return out;
+}
+
+// 配置接线（code-review P0-1）：fsync 不再是"装配点写死 false"，而是读配置、默认 true。
+// 之前 main 根本不读 demo.yaml，配置模块只服务 CLI——REL-02 的承诺因此在生产路径上落空。
+[[nodiscard]] bool apply_config(const std::optional<std::string>& config_path,
+                                tinykv::server::ServerOptions& opt) {
+    if (!config_path.has_value()) {
+        return true;
+    }
+    auto cfg = tinykv::load_config(*config_path);
+    if (!cfg.has_value()) {
+        std::cerr << "配置加载失败: " << tinykv::describe_kind(cfg.error()) << '\n';
+        return false;
     }
     if (opt.data_dir.empty()) {
-        std::cerr << "用法: tinykv-server <data_dir> [status_port]\n";
+        opt.data_dir = cfg->engine.dir;
+    }
+    opt.fsync_on_commit = cfg->engine.fsync_on_commit;
+    return true;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    auto parsed = parse_args(argc, argv);
+    if (parsed.help) {
+        print_usage();
+        return 0;
+    }
+    tinykv::server::ServerOptions opt = std::move(parsed.opt);
+    if (!parsed.ok || !apply_config(parsed.config_path, opt) || opt.data_dir.empty()) {
+        print_usage();
         return 1;
     }
 

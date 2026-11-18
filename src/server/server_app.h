@@ -53,6 +53,9 @@ struct ServerOptions {
     std::uint64_t heartbeat{3};
     std::chrono::milliseconds worker_interval{10};
     LogSink log_sink;                    // 可注入请求日志 sink（空 = 不输出）
+    // REL-02 开关：生产装配走配置（默认 true）。false 只允许出现在基准对比里——
+    // 掉电会丢已向客户端确认的写，也会丢已提交的 Raft 日志（破坏 State Machine Safety）。
+    bool fsync_on_commit{true};
 
     // ---- Raft 传输层（M7 ⑤：单机 KV → 分布式 store 的分水岭） ----
     // voters 为空 = 单节点模式（不创建 Transport，保持既有行为）；非空 = 多副本组。
@@ -68,10 +71,13 @@ class ServerApp final : public Service {
 public:
     explicit ServerApp(ServerOptions opt) : opt_(std::move(opt)) {
         interceptors_.add(std::make_unique<LogInterceptor>(opt_.log_sink));
-        metrics_ = new MetricsInterceptor();
-        interceptors_.add(std::unique_ptr<Interceptor>(metrics_));
-        trace_ = new TraceInterceptor();
-        interceptors_.add(std::unique_ptr<Interceptor>(trace_));
+        // 先建再取裸指针交给链持有：add() 抛异常时由 unique_ptr 回收，不留泄漏（CLAUDE.md §4-4）
+        auto metrics = std::make_unique<MetricsInterceptor>();
+        metrics_ = metrics.get();
+        interceptors_.add(std::move(metrics));
+        auto trace = std::make_unique<TraceInterceptor>();
+        trace_ = trace.get();
+        interceptors_.add(std::move(trace));
     }
 
     [[nodiscard]] std::string_view name() const override { return "tinykv-server"; }
@@ -81,58 +87,15 @@ public:
         if (running_) {
             return {};
         }
-        raftstore::Region region{.id = RegionId{1}, .start_key = "", .end_key = "",
-                                 .peers = {}, .epoch = {1, 0}, .size_hint = 0};
-        if (!meta_.add_region(region).has_value()) {
-            return std::unexpected(InvalidArgument{"region 1 注册失败"});
-        }
-        if (auto r = start_transport_locked(); !r.has_value()) {
+        if (auto r = mount_storage_locked(); !r.has_value()) {
             return r;
         }
-        registry_ = std::make_unique<RegionPeerRegistry>(
-            opt_.data_dir, meta_, opt_.election_timeout, opt_.heartbeat,
-            opt_.replica_id, opt_.voters);
-        // split 钩子：新 region 动态建 peer + 迁移数据（回调在 apply 路径内，仅动存储）。
-        // 经工厂挂钩——bootstrap 与后续每个 split 新 peer 都自动覆盖（多级 split 可用）。
-        registry_->set_observer_factory([this](raftstore::Peer& peer) {
-            peer.set_split_observer([this](const raftstore::Region& l,
-                                           const raftstore::Region& r) {
-                auto res = registry_->on_split(l, r);
-                if (!res.has_value()) {
-                    split_error_ = std::string(tinykv::describe_kind(res.error()));
-                }
-                ++split_events_;
-            });
-        });
-        if (auto r = registry_->bootstrap(region); !r.has_value()) {
-            return std::unexpected(r.error());
+        if (auto r = mount_txn_locked(); !r.has_value()) {
+            return r;
         }
-        // 单节点组可立即 tick 成 leader（无网络依赖）；多副本必须靠消息交换选主，
-        // 这里只把日志基线建好，选举交给后台 Worker 的 pump 驱动。
-        if (!multi_voter()) {
-            registry_->campaign_all();
-        }
-
-        // 三个回调都按 key 路由到目标 region 的 peer（executor 持闸调用，这里不再加锁）
-        exec_ = std::make_unique<PeerTxnExecutor>(
-            [this](std::string_view key) -> raftstore::Peer& { return registry_->require(key); },
-            [this](std::string_view key) { pump_one(key); },
-            [this](std::string_view key, std::uint64_t idx) {
-                return registry_->require(key).applied_at_least(idx);
-            },
-            &peer_mu_, 400,
-            [this] { return registry_->all_peers(); },   // GC 广播到每个 region
-            // ARCH-1 P0-1：注入 key→region 路由，跨区 prewrite 在提案前就被结构化拒绝
-            [this](std::string_view key) -> std::optional<RegionId> {
-                auto r = meta_.find_region(key);
-                return r.has_value() ? std::optional<RegionId>{r->id} : std::nullopt;
-            });
-        sessions_ = std::make_unique<TxnSessionManager>(*exec_, tso_);
-
         if (auto r = start_http_locked(); !r.has_value()) {
             return r;
         }
-
         worker_ = std::make_unique<Worker>(
             [this] {
                 std::lock_guard lock(peer_mu_);   // 后台泵与 HTTP 共闸（类注释）
@@ -212,6 +175,86 @@ public:
 
 private:
     [[nodiscard]] bool multi_voter() const { return opt_.voters.size() > 1; }
+
+    // 存储面装配：region 元数据 → 传输层 → region/peer 注册表 → bootstrap → 选举。
+    // 抽出来是因为 start() 单函数别超过 80 行（CI 静态门禁），且这三段的失败回滚语义不同。
+    [[nodiscard]] result<void> mount_storage_locked() {
+        raftstore::Region region{.id = RegionId{1}, .start_key = "", .end_key = "",
+                                 .peers = {}, .epoch = {1, 0}, .size_hint = 0};
+        if (!meta_.add_region(region).has_value()) {
+            return std::unexpected(InvalidArgument{"region 1 注册失败"});
+        }
+        if (auto r = start_transport_locked(); !r.has_value()) {
+            return r;
+        }
+        registry_ = std::make_unique<RegionPeerRegistry>(
+            opt_.data_dir, meta_, opt_.election_timeout, opt_.heartbeat,
+            opt_.replica_id, opt_.voters, opt_.fsync_on_commit);
+        // split 钩子：新 region 动态建 peer + 迁移数据（回调在 apply 路径内，仅动存储）。
+        // 经工厂挂钩——bootstrap 与后续每个 split 新 peer 都自动覆盖（多级 split 可用）。
+        registry_->set_observer_factory([this](raftstore::Peer& peer) {
+            peer.set_split_observer([this](const raftstore::Region& l,
+                                           const raftstore::Region& r) {
+                auto res = registry_->on_split(l, r);
+                if (!res.has_value()) {
+                    split_error_ = std::string(tinykv::describe_kind(res.error()));
+                }
+                ++split_events_;
+            });
+        });
+        if (auto r = registry_->bootstrap(region); !r.has_value()) {
+            return std::unexpected(r.error());
+        }
+        // 单节点组可立即 tick 成 leader（无网络依赖）；多副本必须靠消息交换选主，
+        // 这里只把日志基线建好，选举交给后台 Worker 的 pump 驱动。
+        if (!multi_voter()) {
+            registry_->campaign_all();
+        }
+        return {};
+    }
+
+    // 事务面装配：执行器（按 key 路由）+ TSO 恢复基线 + 会话管理器。
+    [[nodiscard]] result<void> mount_txn_locked() {
+        // 三个回调都按 key 路由到目标 region 的 peer（executor 持闸调用，这里不再加锁）
+        exec_ = std::make_unique<PeerTxnExecutor>(
+            [this](std::string_view key) -> raftstore::Peer& { return registry_->require(key); },
+            [this](std::string_view key) { pump_one(key); },
+            [this](std::string_view key, std::uint64_t idx) {
+                return registry_->require(key).applied_at_least(idx);
+            },
+            &peer_mu_, 400,
+            [this] { return registry_->all_peers(); },   // GC 广播到每个 region
+            // ARCH-1 P0-1：注入 key→region 路由，跨区 prewrite 在提案前就被结构化拒绝
+            [this](std::string_view key) -> std::optional<RegionId> {
+                auto r = meta_.find_region(key);
+                return r.has_value() ? std::optional<RegionId>{r->id} : std::nullopt;
+            });
+        // TSO 恢复（code-review P0-2）：先把下限抬到盘上已用的最大 ts，再开放分配。
+        // 不做这一步，重启后 start_ts 从 1 重新计数 → 历史版本全读不到、写全冲突。
+        if (auto baseline = recover_ts_floor(); !baseline.has_value()) {
+            return std::unexpected(baseline.error());
+        }
+        sessions_ = std::make_unique<TxnSessionManager>(*exec_, checked_tso_);
+        return {};
+    }
+
+
+    // 启动期抬高 TSO 下限：扫每个 region 的 Write/Lock 列族取最大 ts。
+    // 这是"数据真相优先于计时器"的一次性对账，O(region × 数据量)，只在装配期做一次。
+    [[nodiscard]] result<void> recover_ts_floor() {
+        Ts floor{0};
+        for (auto* peer : registry_->all_peers()) {
+            auto baseline = peer->mvcc().max_ts_in_use();
+            if (!baseline.has_value()) {
+                return std::unexpected(baseline.error());
+            }
+            if (baseline->value > floor.value) {
+                floor = *baseline;
+            }
+        }
+        tso_.raise_floor(floor);
+        return {};
+    }
 
     // 多副本模式起 TcpTransport（独立 io_context 线程）；单节点不创建，保持零 socket 开销。
     [[nodiscard]] result<void> start_transport_locked() {
@@ -696,7 +739,10 @@ private:
     std::unique_ptr<RegionPeerRegistry> registry_;
     std::unique_ptr<raftstore::TcpTransport> transport_;   // 多副本传输层（单节点为 nullptr）
     raftstore::StoreMeta meta_;
-    tso::MonotonicTsProvider tso_;
+    // 物理基线 TSO（生产语义）+ Checked 装饰器（红线 6：非严格递增即拒绝服务）。
+    // 声明顺序即构造顺序：装饰器引用前者，故前者先声明。
+    tso::MonotonicTsProvider tso_{true};
+    tso::CheckedTsProvider checked_tso_{tso_};
     std::unique_ptr<PeerTxnExecutor> exec_;
     std::unique_ptr<TxnSessionManager> sessions_;
     std::unique_ptr<Worker> worker_;

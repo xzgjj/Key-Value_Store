@@ -47,20 +47,25 @@ class RegionPeerRegistry {
 public:
     using ObserverFactory = std::function<void(raftstore::Peer&)>;   // 宿主给每个新 peer 挂 split 钩子
 
+    // fsync_on_commit 默认 false：本表主要由测试装置直接构造（每次写都 fsync 会让用例慢一个量级）。
+    // 生产装配点（ServerApp）显式传入配置值，默认 true——code-review P0-1 的收口就在这里：
+    // 掉电丢已确认写是数据丢失，不能由"测试快一点"的需求决定。
     explicit RegionPeerRegistry(std::filesystem::path data_dir, raftstore::StoreMeta& meta,
                                 std::uint64_t election_timeout = 8,
                                 std::uint64_t heartbeat = 3,
                                 PeerId replica_id = PeerId{1},
-                                std::vector<PeerId> voters = {})
+                                std::vector<PeerId> voters = {},
+                                bool fsync_on_commit = false)
         : data_dir_(std::move(data_dir)), meta_(meta), election_(election_timeout),
           heartbeat_(heartbeat), replica_id_(replica_id),
-          voters_(voters.empty() ? std::vector<PeerId>{replica_id} : std::move(voters)) {}
+          voters_(voters.empty() ? std::vector<PeerId>{replica_id} : std::move(voters)),
+          fsync_on_commit_(fsync_on_commit) {}
 
     void set_observer_factory(ObserverFactory fn) { observer_factory_ = std::move(fn); }
 
     // 建初始 slot：region 1 独占全空间（用 data_dir 根，兼容既有单 region 数据布局）
     [[nodiscard]] result<void> bootstrap(const raftstore::Region& region) {
-        auto eng = Engine::open({.dir = data_dir_, .fsync_on_commit = false});
+        auto eng = Engine::open({.dir = data_dir_, .fsync_on_commit = fsync_on_commit_});
         if (!eng.has_value()) {
             return std::unexpected(eng.error());
         }
@@ -139,7 +144,7 @@ public:
             return std::unexpected(InvalidArgument{"split 宿主 slot 不存在"});
         }
         auto eng = Engine::open({.dir = data_dir_ / "regions" / std::to_string(right.id.value),
-                                 .fsync_on_commit = false});
+                                 .fsync_on_commit = fsync_on_commit_});
         if (!eng.has_value()) {
             return std::unexpected(eng.error());
         }
@@ -298,6 +303,7 @@ private:
     std::uint64_t heartbeat_;
     PeerId replica_id_{1};
     std::vector<PeerId> voters_;
+    bool fsync_on_commit_{false};
     ObserverFactory observer_factory_;
     std::map<RegionId, PeerSlot> slots_;
 };

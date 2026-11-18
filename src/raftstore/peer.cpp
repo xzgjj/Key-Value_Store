@@ -3,21 +3,16 @@
 
 #include "raftstore/peer.h"
 
-#include <utility>
-
-#include "common/error_format.h"
-
 #include <algorithm>
 #include <memory>
 #include <span>
 #include <string_view>
 #include <utility>
-
-#include "common/error_format.h"
 #include <vector>
 
 #include "common/crc32c.h"
 #include "common/error.h"
+#include "common/error_format.h"
 #include "raft/entry_batch.h"
 
 namespace tinykv::raftstore {
@@ -33,6 +28,9 @@ namespace {
 // M4 第⑤层：快照分块在途窗口（流控）——未确认块数上限，防止把接收端内存打爆
 constexpr std::uint32_t kSnapshotWindow = 4;
 
+// 单次快照的接收上限：块数 × 块长不得越过它（拒收而非尝试分配）
+constexpr std::size_t kMaxSnapshotBytes = 512U * 1024U * 1024U;   // 512MB
+
 // proto 列族 → 存储层列族（唯一转换点；两侧定义见 proto/common.proto 与 common/encode.h）
 Cf to_cf(commonpb::CfName name) {
     switch (name) {
@@ -45,8 +43,6 @@ Cf to_cf(commonpb::CfName name) {
             return Cf::Default;
     }
 }
-
-std::string as_string(const std::string& bytes) { return bytes; }
 
 }  // namespace
 
@@ -546,6 +542,12 @@ std::optional<KvError> run_txn_gc(Storage& storage, const std::string& body) {
 }  // namespace
 
 result<void> Peer::execute_txn_payload(const std::string& payload, std::uint64_t index) {
+    // code-review P1-5：只有 marker 一个字节的载荷会让 substr(2) 抛 out_of_range，
+    // 异常从 apply 路径穿出直接终止进程。长度不足按损坏处理（apply 层不允许抛）。
+    if (payload.size() < 2) {
+        return std::unexpected(
+            Corrupted{.where = "peer:txn-payload", .reason = "事务载荷缺类型字节"});
+    }
     const char type = payload[1];
     const std::string body = payload.substr(2);
     std::optional<KvError> err;
@@ -628,14 +630,13 @@ result<void> Peer::execute(const cmdpb::RaftCmdRequest& req) {
             case cmdpb::Request::kPut: {
                 const auto& put = one.put();
                 batch.push_back(Modify{Put{.cf = to_cf(put.cf()),
-                                           .key = as_string(put.key()),
-                                           .value = as_string(put.value())}});
+                                           .key = put.key(), .value = put.value()}});
                 resp.add_cmd_responses()->mutable_put();
                 break;
             }
             case cmdpb::Request::kDelete: {
                 const auto& del = one.delete_();
-                batch.push_back(Modify{Delete{.cf = to_cf(del.cf()), .key = as_string(del.key())}});
+                batch.push_back(Modify{Delete{.cf = to_cf(del.cf()), .key = del.key()}});
                 resp.add_cmd_responses()->mutable_delete_();
                 break;
             }
@@ -764,6 +765,12 @@ result<void> Peer::handle_snapshot_chunk(const raftpb::Message& msg) {
     }
     const PeerId from{msg.from()};
     auto& recv = snapshot_recvs_[from.value];
+    // code-review P1-4：total 来自网络且是 u32，不校验就按它分配内存——
+    // 恶意/损坏的 leader 可以让接收端一次分配数 GB（bad_alloc 直接终止进程）。
+    const auto max_chunks = static_cast<std::uint32_t>(kMaxSnapshotBytes / snapshot_chunk_bytes_);
+    if (chunk.total_chunks() == 0 || chunk.total_chunks() > max_chunks + 1) {
+        return std::unexpected(InvalidArgument{"快照块数越界（total_chunks 超出上限）"});
+    }
     if (recv.index != chunk.snapshot_index() || recv.total != chunk.total_chunks()) {
         recv.index = chunk.snapshot_index();   // 新快照：重置缓存
         recv.term = chunk.snapshot_term();

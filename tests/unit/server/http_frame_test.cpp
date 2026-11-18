@@ -171,4 +171,22 @@ TEST(HttpFrameTest, ObserveEndpointIsIndependentAndReportsApplyErrors) {
     EXPECT_TRUE(rejected->empty()) << "观测端口不得暴露事务写端点";
 }
 
+// BUG-0018: code-review P1-12——JSON 转义必须覆盖控制字符。
+// 使用场景：value 里带换行/制表符（日志、多行文本都是这种值）。旧 escape 只转义 " 与 \，
+// 于是响应体变成非法 JSON，调用方的解析器直接失败——数据没丢，但"读成功"变成了"读不了"。
+TEST(HttpFrameTest, ControlCharsInValueProduceValidJson) {
+    HttpFixture f;
+    // 注意：帧协议用制表符分隔字段，因此 value 里不能含制表符（这是协议的边界，
+    // 已在 docs/cli.md 的请求体格式一节写明）；换行与控制字符则必须能安全往返。
+    const std::string value = "line1\nline2\"quoted\"";
+    ASSERT_TRUE(f.post("/kv", "put\tck\t" + value).has_value());
+    const auto body = f.get("/kv?key=ck");
+    ASSERT_TRUE(body.has_value());
+    // 必须转义：响应里不能出现裸换行/制表符，且 " 以 \" 形式出现
+    EXPECT_EQ(body->find('\n'), std::string::npos) << "响应体含裸换行（非法 JSON）: " << *body;
+    EXPECT_NE(body->find("\\n"), std::string::npos) << *body;
+    EXPECT_NE(body->find("\\\""), std::string::npos) << *body;
+    EXPECT_NE(body->find("line1"), std::string::npos) << "值必须能读回: " << *body;
+}
+
 }  // namespace

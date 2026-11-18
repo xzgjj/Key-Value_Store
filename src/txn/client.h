@@ -55,9 +55,6 @@ public:
         if (key.empty()) {
             return std::unexpected(InvalidArgument{"空 key"});
         }
-        if (!writes_.empty() && primary_.empty() && key < writes_.front().key) {
-            // primary = 字典序最小的 key（确定性决议锚点）
-        }
         writes_.push_back(Mutation{.op = Mutation::Op::kPut,
                                    .key = std::move(key),
                                    .value = std::move(value)});
@@ -112,14 +109,15 @@ public:
         }
         auto pre = exec_.prewrite(writes_, primary_, start_ts_, lock_ttl_ms_, now_ms);
         if (!pre.has_value()) {
+            // 冲突字段必须原样上抛：伪造 {primary="", lock_start_ts=0} 会让调用方无法决议
+            // （error.h 明确要求"未知时为 nullopt，禁止伪造"）
+            const KvError conflict = pre.error();
             auto locked = resolve_blocking(std::move(pre.error()), now_ms);
             if (!locked.has_value()) {
                 return std::unexpected(locked.error());
             }
             if (*locked) {
-                return std::unexpected(LockConflict{.key = primary_,
-                                                    .primary = "",
-                                                    .lock_start_ts = 0});   // 未过期，稍后重试
+                return std::unexpected(conflict);   // 未过期锁：原样返回，调用方稍后重试
             }
             pre = exec_.prewrite(writes_, primary_, start_ts_, lock_ttl_ms_, now_ms);
             if (!pre.has_value()) {

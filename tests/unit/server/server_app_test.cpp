@@ -39,6 +39,20 @@ bool spin_until(const std::function<bool()>& pred, int ms = 2000) {
     return pred();
 }
 
+// 指定 endpoint 的 CLI 调用（不绑定夹具生命周期：跨重启的两段进程各自建 app）
+int cli_at(const std::string& endpoint, const std::vector<std::string>& args,
+           std::string* out_text = nullptr) {
+    std::vector<std::string> full{"--endpoint", endpoint};
+    full.insert(full.end(), args.begin(), args.end());
+    std::ostringstream out;
+    std::ostringstream err;
+    const int rc = tinykv::cli::run_cli(full, out, err);
+    if (out_text != nullptr) {
+        *out_text = out.str();
+    }
+    return rc;
+}
+
 struct DaemonFixture {
     TempDir tmp{"tinykv_daemon"};
     ServerApp app{ServerOptions{.data_dir = tmp.path() / "db", .status_port = 0,
@@ -278,6 +292,67 @@ TEST(ServerAppTest, RestartWithoutPendingEntriesKeepsReadable) {
     EXPECT_NE(out.str().find("rv1"), std::string::npos)
         << "重启后未写入即读失败（applied 游标未播种）: " << out.str();
     ASSERT_TRUE(app.stop().has_value());
+}
+
+// BUG-0017: code-review P0-2——TSO 重启必须从"盘上最大 ts"之后继续分配。
+// 使用场景：先提交一笔事务（commit_ts 落在盘上），重启守护进程，再开新事务读它。
+// 旧实现 TSO 从 0 重新计数：新 start_ts=1 < 历史 commit_ts → 快照读返回空（静默读不到），
+// 且任何写都会因 latest_commit_bound > start_ts 命中 WriteConflict（事务面实际不可写）。
+TEST(ServerAppTest, TsoResumesAboveExistingCommitTsAfterRestart) {
+    TempDir tmp{"tinykv_tso_restart"};
+    const auto data_dir = tmp.path() / "db";
+    {
+        ServerApp app(ServerOptions{.data_dir = data_dir, .status_port = 0,
+                                    .worker_interval = std::chrono::milliseconds(2),
+                                    .log_sink = {}});
+        ASSERT_TRUE(app.start().has_value());
+        const std::string endpoint = "127.0.0.1:" + std::to_string(app.status_port());
+        // begin 拿 session
+        std::string begin_text;
+        ASSERT_EQ(cli_at(endpoint, {"txn", "begin"}, &begin_text), 0);
+        const auto at = begin_text.find("session=");
+        ASSERT_NE(at, std::string::npos) << begin_text;
+        std::string sid;
+        for (std::size_t i = at + 8; i < begin_text.size(); ++i) {
+            const char ch = begin_text[i];
+            if (ch == '\n' || ch == '\r' || ch == ' ') {
+                break;
+            }
+            sid.push_back(ch);
+        }
+        for (const auto& step : std::vector<std::vector<std::string>>{
+                 {"txn", "set", sid, "tso_k", "v1"}, {"txn", "commit", sid}}) {
+            std::vector<std::string> full{"--endpoint", endpoint};
+            full.insert(full.end(), step.begin(), step.end());
+            std::ostringstream out;
+            std::ostringstream e;
+            ASSERT_EQ(tinykv::cli::run_cli(full, out, e), 0) << e.str();
+        }
+        ASSERT_TRUE(app.stop().has_value());
+    }
+    // 重启：新事务必须看到重启前提交的数据
+    ServerApp restarted(ServerOptions{.data_dir = data_dir, .status_port = 0,
+                                      .worker_interval = std::chrono::milliseconds(2),
+                                      .log_sink = {}});
+    ASSERT_TRUE(restarted.start().has_value());
+    const std::string endpoint = "127.0.0.1:" + std::to_string(restarted.status_port());
+    std::string begin2_text;
+    ASSERT_EQ(cli_at(endpoint, {"txn", "begin"}, &begin2_text), 0);
+    const auto at2 = begin2_text.find("session=");
+    ASSERT_NE(at2, std::string::npos) << begin2_text;
+    std::string sid2;
+    for (std::size_t i = at2 + 8; i < begin2_text.size(); ++i) {
+        const char ch = begin2_text[i];
+        if (ch == '\n' || ch == '\r' || ch == ' ') {
+            break;
+        }
+        sid2.push_back(ch);
+    }
+    std::string got;
+    ASSERT_EQ(cli_at(endpoint, {"txn", "get", sid2, "tso_k"}, &got), 0);
+    EXPECT_NE(got.find("v1"), std::string::npos)
+        << "重启后新事务读不到历史提交（TSO 从 0 重新计数）: " << got;
+    ASSERT_TRUE(restarted.stop().has_value());
 }
 
 TEST(ServerAppTest, StopIsIdempotentAndPortGoesDown) {

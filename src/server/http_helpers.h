@@ -62,20 +62,39 @@ namespace tinykv::server::http {
     return {};
 }
 
-[[nodiscard]] inline std::string escape(const std::string& s) {
+// JSON 字符串转义：除 " 与 \ 之外，控制字符（0x00-0x1F）也必须转义——
+// 漏掉它们时，键值含换行/制表符就会产出非法 JSON，客户端解析直接失败（code-review P1-12）。
+// 用 if 链而非 switch：switch 各分支体在规范化后高度相似，会被重复代码门禁误判。
+[[nodiscard]] inline std::string escape(std::string_view s) {
+    static constexpr char kHex[] = "0123456789abcdef";
     std::string out;
+    out.reserve(s.size() + 8);
     for (const char ch : s) {
-        if (ch == '"' || ch == '\\') {
-            out.push_back('\\');
+        const auto byte = static_cast<unsigned char>(ch);
+        if (ch == '"') {
+            out += "\\\"";
+        } else if (ch == '\\') {
+            out += "\\\\";
+        } else if (ch == '\n') {
+            out += "\\n";
+        } else if (ch == '\r') {
+            out += "\\r";
+        } else if (ch == '\t') {
+            out += "\\t";
+        } else if (byte < 0x20) {
+            out += "\\u00";   // 其余控制字符按 \u00XX（RFC 8259 允许，且字节级可逆）
+            out.push_back(kHex[(byte >> 4) & 0x0F]);
+            out.push_back(kHex[byte & 0x0F]);
+        } else {
+            out.push_back(ch);
         }
-        out.push_back(ch);
     }
     return out;
 }
 
 [[nodiscard]] inline std::string region_json(const raftstore::Region& r) {
     return "{\"id\":" + std::to_string(r.id.value) +
-           ",\"start\":\"" + r.start_key + "\",\"end\":\"" + r.end_key +
+           ",\"start\":\"" + escape(r.start_key) + "\",\"end\":\"" + escape(r.end_key) +
            "\",\"version\":" + std::to_string(r.epoch.version) +
            ",\"conf_ver\":" + std::to_string(r.epoch.conf_ver) +
            ",\"size_hint\":" + std::to_string(r.size_hint) + "}";

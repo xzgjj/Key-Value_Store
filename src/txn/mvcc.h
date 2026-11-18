@@ -387,6 +387,44 @@ public:
         return counters;
     }
 
+    // ---- 启动恢复：盘上已用过的最大 ts（Write 的 commit_ts 与 Lock 的 start_ts 取大者） ----
+    // TSO 重启若从 0 重新计数，新事务的 start_ts 会小于历史 commit_ts：
+    // 快照读看不到任何历史版本（静默空值），写又必然命中 WriteConflict（事务面不可写）。
+    // 装配期用本方法取基线，抬高 TSO 的下限（code-review P0-2）。
+    [[nodiscard]] result<Ts> max_ts_in_use() const {
+        Ts best{0};
+        auto reader = storage_.create_reader();
+        if (!reader.has_value()) {
+            return std::unexpected(reader.error());
+        }
+        for (const Cf cf : {Cf::Write, Cf::Lock}) {
+            auto it = (*reader)->scan(cf, std::span<const std::byte>{}, kGcScanLimit);
+            if (!it.has_value()) {
+                return std::unexpected(it.error());
+            }
+            for (; (*it)->valid(); (*it)->next()) {
+                const std::string stored((*it)->key());
+                std::uint64_t ts = 0;
+                if (cf == Cf::Write) {
+                    if (stored.size() < 8) {
+                        continue;
+                    }
+                    ts = read_be64(stored.substr(stored.size() - 8));
+                } else {
+                    auto lv = decode_lock_value((*it)->value());
+                    if (!lv.has_value()) {
+                        continue;
+                    }
+                    ts = lv->start_ts.value;
+                }
+                if (ts > best.value) {
+                    best = Ts{ts};
+                }
+            }
+        }
+        return best;
+    }
+
     // ---- 决议入口（红线2/3：生死只由 primary 状态决定） ----
     [[nodiscard]] result<TxnStatus> check_txn_status(std::string_view primary, Ts lock_start_ts,
                                                      std::uint64_t now_ms) {
