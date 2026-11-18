@@ -10,6 +10,11 @@
 // 本表建右半新 Slot（新 PeerId = region id，单节点组），把旧 Engine 中落在右区间
 // [split_key, old_end) 的 MVCC 条目迁到新 Engine，并从旧 Engine 删除（数据归属感）。
 // 回调在 Peer 的 apply 路径内触发，此处只操作存储/元数据，绝不重入 peer 的 pump。
+//
+// 并发（⑨a 分片接线后）：slots_ 表被"分区闸下的路由读"与"apply 路径内的 on_split"
+// 并发访问——本类自带 mu_ 保护表结构本身（⑨a 前 {slots_} 由 peer_mu_ 全局闸覆盖，
+// 分片后 peer 之外的访问点只可能落在这些方法里，内部加锁让组合根无需第二把共享闸）。
+// Peer/Engine 实例自身仍由调用方按 region 串行（锁序：region 桶 → 本表 mu_）。
 
 #pragma once
 
@@ -19,6 +24,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
@@ -106,12 +112,14 @@ public:
     }
 
     [[nodiscard]] raftstore::Peer* peer_by_id(RegionId id) const {
+        std::lock_guard lock(mu_);
         auto it = slots_.find(id);
         return it == slots_.end() ? nullptr : it->second.peer.get();
     }
 
     // 传输层按 Raft PeerId 寻址（多副本时 PeerId ≠ RegionId）
     [[nodiscard]] raftstore::Peer* peer_by_peer_id(PeerId id) const {
+        std::lock_guard lock(mu_);
         for (const auto& [region, slot] : slots_) {
             (void)region;
             if (slot.peer->id() == id) {
@@ -127,15 +135,21 @@ public:
         auto* p = peer_for(key);
         if (p == nullptr) {
             // 理论不可达（REL-05：每个 key 恰属一个 region）；保底返回首个 peer 避免解引用空
+            std::lock_guard lock(mu_);
             return *slots_.begin()->second.peer;
         }
         return *p;
     }
 
-    [[nodiscard]] std::size_t size() const { return slots_.size(); }
+    [[nodiscard]] std::size_t size() const {
+        std::lock_guard lock(mu_);
+        return slots_.size();
+    }
 
-    // 遍历所有 peer（GC 广播、Worker 泵、stop 逆序收尾）
+    // 遍历所有 peer（GC 广播、Worker 泵、stop 逆序收尾）。返回指针列表：
+    // slot 指针稳定（map 节点），split 只增不删，Peer& 生命期覆盖到 close_all。
     [[nodiscard]] std::vector<raftstore::Peer*> all_peers() const {
+        std::lock_guard lock(mu_);
         std::vector<raftstore::Peer*> out;
         out.reserve(slots_.size());
         for (const auto& [id, slot] : slots_) {
@@ -146,8 +160,10 @@ public:
     }
 
     // split 回调：动态建右半 peer + 迁移数据。left 是本 peer 保留的左区间。
+    // 整个操作持 mu_：迁移期间路由读只会看到旧 slot（右半还不存在），install 后原子可见。
     [[nodiscard]] result<void> on_split(const raftstore::Region& left,
                                         const raftstore::Region& right) {
+        std::lock_guard lock(mu_);
         if (slots_.find(right.id) != slots_.end()) {
             return {};  // 幂等：已建过
         }
@@ -182,8 +198,9 @@ public:
         return {};
     }
 
-    // 关闭全部引擎（逆序：peer 先析构，engine 后 close）
+    // 关闭全部引擎（逆序：peer 先析构，engine 后 close）。stop 后无并发请求，mu_ 仍按惯例持有。
     [[nodiscard]] result<void> close_all() {
+        std::lock_guard lock(mu_);
         std::string first_err;
         for (auto it = slots_.rbegin(); it != slots_.rend(); ++it) {
             it->second.peer.reset();
@@ -201,6 +218,7 @@ public:
 
     // 选举所有 peer（单节点组：若干 tick 即 leader）；启动/新 peer 建好后调用
     void campaign_all() {
+        std::lock_guard lock(mu_);
         for (auto& [id, slot] : slots_) {
             (void)id;
             for (int i = 0; i < 20 && !slot.peer->is_leader(); ++i) {
@@ -212,6 +230,7 @@ public:
 
     // 泵一轮：每个 peer tick + on_ready（Worker 与 executor 共用外部闸）
     void pump_all() {
+        std::lock_guard lock(mu_);
         for (auto& [id, slot] : slots_) {
             (void)id;
             slot.peer->tick();
@@ -308,6 +327,7 @@ private:
 
     static constexpr std::size_t kScanLimit = 1U << 20U;  // Admin 低频，全量有界
 
+    mutable std::mutex mu_;  // 保护 slots_ 表结构（实例内部的 Peer/Engine 由 region 闸串行）
     std::filesystem::path data_dir_;
     raftstore::StoreMeta& meta_;
     std::uint64_t election_;

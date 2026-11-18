@@ -245,7 +245,7 @@ tinykv-cli ... regions                 # 仍是两个 region（M6 行为是回�
 |---|---|---|
 | `txn.cross_region_enabled` | true | ⑦ 协调器开关（2026-11-18 随机 kill chaos 通过后转正）；关时只允许单区事务 |
 | `raftstore.meta_dir` | `meta` | ⑧ 元数据目录（相对 data_dir） |
-| `server.lock_shards` | 16 | ⑨a 分片数；1 = 等价改造前 |
+| `server.lock_shards` | 16 | ⑨a 分片数（>1 且单节点生效；1 = 一把大锁回退档；多副本模式强制 1） |
 | `server.auth_token` | 空 | ⑩ 为空即关闭鉴权，并在启动时告警 |
 | `server.tls_cert/key` | 空 | ⑩ 为空即明文；非空必须同时给两者 |
 
@@ -268,8 +268,10 @@ tinykv-cli ... regions                 # 仍是两个 region（M6 行为是回�
 `txn_cross_region_test` 3 例 + `txn_cross_region_chaos` 150 轮）且**已转正**——
 `txn_cross_region_chaos_random` 补上随机 kill（子进程 `_Exit` 真崩溃语义 + 死亡点/主组侧/半途决议
 三个随机维度，150 轮），通过后经用户批准 `txn.cross_region_enabled` 默认 true，
-开关状态进 `/status`（红线 6 补齐）；⑨a 原语完成、接线进行中；⑩ 鉴权完成、TLS 经用户裁决
-**移出 M7**（D-2 收口：TLS 依赖与证书生命周期另立项）。
+开关状态进 `/status`（红线 6 补齐）；⑨a 已接线组合根（分区闸/全局闸双档 + `server.lock_shards`
+配置，多副本强制退化一把大锁；`region_concurrency_bench` 实测跨区吞吐与改前持平——
+下一个瓶颈是 HTTP 单 io_context 线程，分片的吞吐收益要等 HTTP 层多线程化才显形）；
+⑩ 鉴权完成、TLS 经用户裁决**移出 M7**（D-2 收口：TLS 依赖与证书生命周期另立项）。
 `docs/notes-m7.md` 随 ⑨a 接线批次一起写（避免半成品笔记变成第二份事实源）。
 
 ## 6.8 开放决策点
@@ -292,6 +294,7 @@ tinykv-cli ... regions                 # 仍是两个 region（M6 行为是回�
 | 2026-11-18 | ⑦-0 护栏落地：`PeerTxnExecutor::guard_single_region` 在提案前按 key 归属拒绝跨区 prewrite（BUG-0008） | ⑦ 的第一步完成；跨区从"静默写错分区"变成明确报错 |
 | 2026-11-18 | ⑧ 落地：`StoreMetaStore`（`meta/regions.pb` + `.bak` + CRC）、启动按 meta 重建 peer、split 后落盘；`split_meta_persistence_test` 三断言通过 | M7-REL-02 的证据链齐备；`next_region_id` 取盘上最大值 +1 |
 | 2026-11-18 | ⑨a 原语落地：`LockRegistry`（分桶 + 同区串行/跨区并行用例），**默认未接线** | 按 ARCH-3 §2 的并行约束，等 ⑦ 收口后再改组合根 |
+| 2026-11-18 | ⑨a 接线组合根：PeerGate 分区闸/全局闸双档（执行器按操作类型取闸）、`server.lock_shards` 配置（默认 16）、registry 内部锁保护 slots_、多副本强制退化 | `lock_shards_wiring_test` 3 例（行为等价/跨区并发/回退档）+ `region_concurrency_bench`：跨区吞吐与改前持平（0.99），瓶颈转移到 HTTP 单 io_context 线程（已记录） |
 | 2026-11-18 | ⑩ 部分落地：Bearer token 鉴权（常量时间比较、401 不回显）+ 未鉴权强制回环 + `/status` 可见；**TLS 未做** | M7-SEC-01 达成；M7-SEC-02 只剩 TLS 一项，见 D-2 |
 | 2026-11-18 | ⑦ 第二步（分组）落地：`txn/region_grouper.h` 纯函数 + 6 例 | 分组正确性可与协议正确性分开验证 |
 | 2026-11-18 | ⑦ 第三/四步落地：`TxnClient` 分组提交（PREPARE → TSO → COMMIT_PRIMARY → COMMIT_SECONDARY）+ 恢复路径（`resolve_locks_of` 广播到各 region 引擎）；`txn.cross_region_enabled` 开关 + `txn_cross_region_test` 3 例 | M7-REL-01 的三条路径（全可见/全不可见/中断收敛）各有一条用例；默认仍关 |

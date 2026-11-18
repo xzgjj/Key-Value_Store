@@ -3,8 +3,12 @@
 //
 // 装配顺序（= 注册顺序，LifecycleManager 保证逆序关闭）：
 //   Storage(Engine) → Raft(Peer 单节点组) → Worker(泵循环) → StatusServer(HTTP)
-// 并发模型：Peer 非线程安全 → 全部 Peer/Storage 访问经 peer_mu_ 串行（课程级粗粒度锁，
-// per-peer 分片随多 region 演进）；Worker 后台泵与 HTTP handler 共用同一把锁。
+// 并发模型（⑨a 分片接线后）：Peer 非线程安全 → 访问经 PeerGate 串行——
+//   * 单 region 操作（kv 读写、事务提案/读）只锁该 region 的桶（同区串行、跨区并行）；
+//   * 跨 region 操作（Worker 泵、split、status、GC/锁决议广播）锁全部桶；
+//   * 多副本或 lock_shards=1 时退化为一把大锁 peer_mu_（闸语义与改造前逐字节一致）。
+//   * registry 的 slots_ 表自带 mu_（split 动态建 slot 与路由读并发）；StoreMeta 自带
+//     RWMutex；锁序固定：region 桶 → registry mu_ / Engine mu_ / latch / session mu_。
 // 服务端事务会话：TxnSessionManager（会话作用域），执行端 = PeerTxnExecutor（经 raft）。
 //
 // Service 自身可嵌套：ServerApp 实现 Service，可被更外层（多 store 拓扑）再组装。
@@ -32,6 +36,7 @@
 #include "raftstore/meta_store.h"
 #include "server/http_helpers.h"
 #include "server/interceptor.h"
+#include "server/lock_registry.h"
 #include "server/peer_registry.h"
 #include "server/peer_txn.h"
 #include "server/service.h"
@@ -64,6 +69,10 @@ struct ServerOptions {
     // 开（默认，M7 转正：150 轮随机 kill chaos 通过后由用户批准）→ 会话里的 TxnClient
     // 按 region 分组走两阶段提交；关 → 跨区 prewrite 被护栏拒绝。状态经 /status 暴露（红线 6）。
     bool cross_region_enabled{true};
+    // ⑨a 锁分片（M7-PERF-01，SPEC-6 §6.6 `server.lock_shards`）：>1 时单 region 操作只锁
+    // 所属桶（同区串行、跨区并行），跨区操作锁全部桶；1 = 一把大锁（改造前行为）。
+    // 多副本模式强制退化为 1：泵路径触碰全部 peer + transport，分片收益为零。
+    std::size_t lock_shards{16};
 
     // ---- Raft 传输层（M7 ⑤：单机 KV → 分布式 store 的分水岭） ----
     // voters 为空 = 单节点模式（不创建 Transport，保持既有行为）；非空 = 多副本组。
@@ -95,6 +104,12 @@ public:
         if (running_) {
             return {};
         }
+        // ⑨a：分片只在"单节点 + shards>1"生效。多副本的泵/读路径触碰全部 peer 与
+        // transport，分片不带来并行度，保守退回一把大锁（闸语义等价改造前）。
+        sharded_ = opt_.lock_shards > 1 && !multi_voter();
+        if (sharded_) {
+            locks_ = std::make_unique<LockRegistry>(opt_.lock_shards);
+        }
         if (auto r = mount_storage_locked(); !r.has_value()) {
             return r;
         }
@@ -106,7 +121,7 @@ public:
         }
         worker_ = std::make_unique<Worker>(
             [this] {
-                std::lock_guard lock(peer_mu_);  // 后台泵与 HTTP 共闸（类注释）
+                auto gate = gate_for(true, {});  // 全局闸：泵触碰全部 peer
                 tick_and_pump_locked();
             },
             opt_.worker_interval);
@@ -186,6 +201,52 @@ public:
 private:
     [[nodiscard]] bool multi_voter() const { return opt_.voters.size() > 1; }
 
+    // ---- ⑨a 闸：分区闸（单 region）与全局闸（跨 region）的唯一入口 ----
+    // 分片关/多副本：两种闸都退化为 peer_mu_（单把，句柄里只有一把锁）。
+    // 分片开：分区闸=region 所属桶；全局闸=全部桶（lock_all 升序）。
+    // key 无归属（理论不可达，REL-05）→ 保守取全局闸，绝不"猜一个桶"。
+    [[nodiscard]] PeerGateHandle gate_for(bool global, std::string_view key) {
+        if (!sharded_) {
+            std::vector<std::unique_lock<std::mutex>> locks;
+            locks.emplace_back(peer_mu_);
+            return PeerGateHandle(std::move(locks));
+        }
+        if (global) {
+            return PeerGateHandle(locks_->lock_all());
+        }
+        const auto region = region_of_key(key);
+        if (!region.has_value()) {
+            return PeerGateHandle(locks_->lock_all());
+        }
+        std::vector<std::unique_lock<std::mutex>> locks;
+        locks.push_back(locks_->lock(*region));
+        return PeerGateHandle(std::move(locks));
+    }
+
+    // 观测端点专用：try 全部闸，拿不到就回缓存（绝不因业务泵卡住观测读）
+    [[nodiscard]] std::optional<PeerGateHandle> try_gate_global() {
+        if (!sharded_) {
+            std::unique_lock lock(peer_mu_, std::try_to_lock);
+            if (!lock.owns_lock()) {
+                return std::nullopt;
+            }
+            std::vector<std::unique_lock<std::mutex>> locks;
+            locks.push_back(std::move(lock));
+            return PeerGateHandle(std::move(locks));
+        }
+        auto all = locks_->try_lock_all();
+        if (!all.has_value()) {
+            return std::nullopt;
+        }
+        return PeerGateHandle(std::move(*all));
+    }
+
+    // key → region（StoreMeta 自带 RWMutex，免额外闸）
+    [[nodiscard]] std::optional<RegionId> region_of_key(std::string_view key) {
+        auto r = meta_.find_region(key);
+        return r.has_value() ? std::optional<RegionId>{r->id} : std::nullopt;
+    }
+
     // 回环判定：未鉴权时唯一允许的监听面（含 IPv6 回环与 localhost 别名）
     [[nodiscard]] static bool is_loopback(std::string_view host) {
         return host == "127.0.0.1" || host == "::1" || host == "localhost";
@@ -263,11 +324,12 @@ private:
             [this](std::string_view key, std::uint64_t idx) {
                 return registry_->require(key).applied_at_least(idx);
             },
-            &peer_mu_, 400, [this] { return registry_->all_peers(); },  // GC 广播到每个 region
+            // ⑨a：闸提供者——执行器按操作类型取分区闸/全局闸（单区串行、跨区并行）
+            [this](bool global, std::string_view key) { return gate_for(global, key); }, 400,
+            [this] { return registry_->all_peers(); },  // GC 广播到每个 region
             // ARCH-1 P0-1：注入 key→region 路由，跨区 prewrite 在提案前就被结构化拒绝
             [this](std::string_view key) -> std::optional<RegionId> {
-                auto r = meta_.find_region(key);
-                return r.has_value() ? std::optional<RegionId>{r->id} : std::nullopt;
+                return region_of_key(key);
             });
         // TSO 恢复（code-review P0-2）：先把下限抬到盘上已用的最大 ts，再开放分配。
         // 不做这一步，重启后 start_ts 从 1 重新计数 → 历史版本全读不到、写全冲突。
@@ -278,9 +340,8 @@ private:
         if (opt_.cross_region_enabled) {
             // 协调在 client 侧（SPEC-6 §6.2.2）：TxnClient 拿到路由就能自己分组，
             // 不需要新增一个并行类——两套编排只会分叉。
-            sessions_->set_region_router([this](std::string_view key) -> std::optional<RegionId> {
-                auto r = meta_.find_region(key);
-                return r.has_value() ? std::optional<RegionId>{r->id} : std::nullopt;
+            sessions_->set_region_router([this](std::string_view key) {
+                return region_of_key(key);
             });
         }
         return {};
@@ -364,7 +425,7 @@ private:
         return {};
     }
 
-    // ---- M7 ⑤：统一泵——收件 → 步进 → apply → 发件。调用方必须持 peer_mu_ ----
+    // ---- M7 ⑤：统一泵——收件 → 步进 → apply → 发件。调用方必须持全局闸 ----
     // tick 由 Worker 单独驱动；HTTP 路径只 pump 不 tick，避免高频时钟打乱选举节奏。
     // 顺序很关键：先 step 收件（让 follower 及时跟上 leader），再 on_ready 推进共识与
     // apply，最后 take_messages 发件；take_messages 绝不单独调用而不 on_ready（会清掉队列）。
@@ -397,12 +458,13 @@ private:
         }
     }
 
-    // 等待位点推进：单节点无网络，紧泵 400 轮即可；多副本必须让出 CPU 等 TCP 往返，
-    // 否则 400 轮空转在 1ms 内跑完，对端的心跳响应还没回来就误判超时。
+    // 等待位点推进：单节点无网络，紧泵 400 轮即可（⑨a：只泵目标 peer，其他 peer 由
+    // Worker 驱动——分区闸下泵全部 peer 会跨桶触碰他 region 的状态）；多副本必须让出
+    // CPU 等 TCP 往返，否则 400 轮空转在 1ms 内跑完，对端心跳响应没机会回来就误判超时。
     [[nodiscard]] bool wait_applied_locked(raftstore::Peer& peer, std::uint64_t idx) {
         if (!multi_voter()) {
             for (int i = 0; i < 400; ++i) {
-                pump_locked();
+                pump_peer_only(peer);
                 if (peer.applied_at_least(idx)) {
                     return true;
                 }
@@ -431,6 +493,17 @@ private:
         return out;
     }
 
+    // 单 peer 泵（⑨a 分区闸配套）：只推进目标 peer，绝不触碰别的 peer/transport——
+    // 否则分区闸下的泵会与另一 region 的 handler 数据竞争。多副本一律走 pump_locked
+    // （全局闸），多副本模式永不启用分片（类注释）。
+    void pump_peer_only(raftstore::Peer& peer) {
+        for (int i = 0; i < 20 && !peer.is_leader(); ++i) {
+            peer.tick();
+        }
+        peer.tick();
+        (void)peer.on_ready();
+    }
+
     // 泵指定 key 所属 peer（executor 在闸内调用；新 peer 首次泵负责把 split observer 建的
     // 实例推成 leader 并 apply 初始条目）
     void pump_one(std::string_view key) {
@@ -442,11 +515,7 @@ private:
         if (peer == nullptr) {
             return;
         }
-        for (int i = 0; i < 20 && !peer->is_leader(); ++i) {
-            peer->tick();
-        }
-        peer->tick();
-        (void)peer->on_ready();
+        pump_peer_only(*peer);
     }
 
     // ---- kv 面端点（经 raft 提案，"写走共识"红线不豁免） ----
@@ -455,16 +524,18 @@ private:
         if (key.empty()) {
             return {};
         }
-        std::lock_guard lock(peer_mu_);
+        auto gate = gate_for(false, key);  // ⑨a 分区闸：读只触碰 key 所属 region
         kv_reads_.fetch_add(1, std::memory_order_relaxed);
         auto& peer = registry_->require(key);
         // 线性一致读：ReadIndex 确认 + applied 追平后才读状态机（不再直接 leader 本地读）
         // 多副本下 pump 必须让出 CPU，否则心跳确认的 TCP 回包没机会到达 io_context 线程。
         const auto ri = peer.wait_read_index(
-            [this] {
-                pump_locked();
+            [&] {
                 if (multi_voter()) {
+                    pump_locked();
                     std::this_thread::yield();
+                } else {
+                    pump_peer_only(peer);  // ⑨a：分区闸下只泵本 peer
                 }
             },
             multi_voter() ? 200000 : 400,
@@ -493,7 +564,7 @@ private:
         if (parts.size() < 2 || parts[1].empty()) {
             return "ERR bad-request";
         }
-        std::lock_guard lock(peer_mu_);
+        auto gate = gate_for(false, parts[1]);  // ⑨a 分区闸：写只触碰 key 所属 region
         kv_writes_.fetch_add(1, std::memory_order_relaxed);
         auto& peer = registry_->require(parts[1]);
         const auto expect = peer.raft().last_index().value + 1;
@@ -546,7 +617,7 @@ private:
         return admin(method, path, query, body);
     }
 
-    // POST 族：会话写操作 + GC（executor 自带闸，此处不加 peer_mu_）
+    // POST 族：会话写操作 + GC（executor 自带闸，此处不加全局闸）
     [[nodiscard]] std::string admin_post(const std::string& path, const std::string& body) {
         const auto parts = http::split_frame(body);
         if (path == "/txn/begin") {
@@ -613,11 +684,12 @@ private:
     }
 
     // region split（M4 功能在 M6 多 region 下重新接通）：propose → apply → observer 动态建 peer
+    // 全局闸：split 触碰 meta 拓扑 + 新建 peer（跨 region 操作）
     [[nodiscard]] std::string admin_split(const std::vector<std::string>& parts) {
         if (parts.size() != 3) {
             return "ERR bad-request";
         }
-        std::lock_guard lock(peer_mu_);
+        auto gate = gate_for(true, {});
         const auto rid = http::parse_u64(parts[1]);
         if (!rid.has_value()) {
             return "ERR bad-request";  // BUG-0002: 非数字 region id 不得击穿解析路径
@@ -802,13 +874,13 @@ private:
 
     // 同步快照：业务线程可等闸；观测端点用 status_snapshot() 永不等待业务闸
     [[nodiscard]] std::string status_json() {
-        std::lock_guard lock(peer_mu_);
+        auto gate = gate_for(true, {});  // 全局闸：快照读全部 peer
         return status_json_locked();
     }
 
-    // 观测端点专用：try_lock 成功则刷新缓存，失败则回上一份快照——绝不因业务泵卡住观测
+    // 观测端点专用：try 全部闸成功则刷新缓存，失败则回上一份快照——绝不因业务泵卡住观测
     [[nodiscard]] std::string status_snapshot() {
-        if (std::unique_lock lock(peer_mu_, std::try_to_lock); lock.owns_lock()) {
+        if (auto gate = try_gate_global(); gate.has_value()) {
             auto json = status_json_locked();
             std::lock_guard cache_lock(observe_mu_);
             observe_cache_ = std::move(json);
@@ -888,7 +960,9 @@ private:
     static constexpr std::uint64_t kSessionIdleTtlMs = 30'000;  // 空闲会话回收线（锁 TTL 的 10 倍）
 
     ServerOptions opt_;
-    std::mutex peer_mu_;  // 全部 Peer/Storage 访问的串行闸
+    std::mutex peer_mu_;  // 全局闸的退化形态（分片关闭/多副本）；分片开启时仅此路径仍在用
+    std::unique_ptr<LockRegistry> locks_;  // ⑨a 分桶注册表（start 按配置建，shards 恒定）
+    bool sharded_{false};                  // 分片是否生效（单节点 && lock_shards>1）
     std::unique_ptr<RegionPeerRegistry> registry_;
     std::unique_ptr<raftstore::TcpTransport> transport_;  // 多副本传输层（单节点为 nullptr）
     raftstore::StoreMeta meta_;

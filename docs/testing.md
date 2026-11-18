@@ -188,6 +188,7 @@ CI 用 `ctest -L unit|simulation|integration|bench` 选择，无需解析本页�
 | tests/unit/server/http_frame_test.cpp | unit | `http_frame_test` | - | fast |
 | tests/unit/server/multi_replica_test.cpp | unit | `multi_replica_test` | - | fast |
 | tests/unit/server/lock_registry_test.cpp | unit | `lock_registry_test` | - | fast |
+| tests/unit/server/lock_shards_wiring_test.cpp | unit | `lock_shards_wiring_test` | - | fast |
 | tests/unit/server/auth_test.cpp | unit | `auth_test` | - | fast |
 | tests/unit/server/admin_endpoints_test.cpp | unit | `admin_endpoints_test` | - | fast |
 | tests/unit/txn/gc_test.cpp | unit | `gc_test` | - | fast |
@@ -202,6 +203,7 @@ CI 用 `ctest -L unit|simulation|integration|bench` 选择，无需解析本页�
 | tests/bench/split_bench_test.cpp | bench | `split_bench` | - | nightly |
 | tests/bench/heartbeat_bandwidth_bench_test.cpp | bench | `heartbeat_bandwidth_bench` | - | nightly |
 | tests/bench/snapshot_bench_test.cpp | bench | `snapshot_bench` | - | nightly |
+| tests/bench/region_concurrency_bench_test.cpp | bench | `region_concurrency_bench` | - | nightly;serial |
 <!-- registry:end -->
 
 > **M0 起步批次**（2026-11-16 落地登记，见上表）：encode / kv_error / strong_id / common_log 四个

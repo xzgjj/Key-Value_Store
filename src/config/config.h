@@ -29,10 +29,11 @@ struct LogSection {
     std::string dir{"log"};
 };
 
-// server.* 段（M7 ⑩：安全边界与监听面）
+// server.* 段（M7 ⑩：安全边界与监听面；M7 ⑨a：锁分片）
 struct ServerSection {
     std::string host{"127.0.0.1"};  // 未启用鉴权时强制回环（见 docs/cli.md 安全一节）
     std::string auth_token;         // 空 = 不鉴权（启动告警 + 强制绑回环）
+    std::size_t lock_shards{16};    // ⑨a 分片数（>1 且单节点生效；1 = 一把大锁回退档）
 };
 
 // txn.* 段（M7 ⑦：跨区事务开关）

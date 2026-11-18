@@ -11,17 +11,14 @@
 #include "server/server_app.h"
 
 #include "cli/cli.h"
-#include "cli/http_client.h"
+#include "server_daemon.h"
 
 #include <gtest/gtest.h>
 
-#include <chrono>
 #include <memory>
-#include <sstream>
 #include <string>
 #include <vector>
 
-#include "raft_test_base.h"
 #include "storage/engine.h"
 #include "txn/mvcc.h"
 
@@ -30,72 +27,23 @@ namespace {
 using tinykv::Cf;
 using tinykv::Engine;
 using tinykv::Ts;
-using tinykv::server::ServerApp;
-using tinykv::server::ServerOptions;
+using tinykv::testlib::ServerDaemon;
 using tinykv::testlib::TempDir;
 using tinykv::txn::Mutation;
 using tinykv::txn::MvccTxn;
 
-struct Daemon {
-    TempDir tmp{"tinykv_cross_region"};
-    ServerApp app;
-
-    explicit Daemon(bool cross_region) : app(make_options(tmp.path() / "db", cross_region)) {
-        EXPECT_TRUE(app.start().has_value());
-    }
-    ~Daemon() { (void)app.stop(); }
-
-    static ServerOptions make_options(const std::filesystem::path& dir, bool cross_region) {
-        ServerOptions opt;
-        opt.data_dir = dir;
-        opt.status_port = 0;
-        opt.worker_interval = std::chrono::milliseconds(2);
-        opt.cross_region_enabled = cross_region;
-        return opt;
-    }
-
-    [[nodiscard]] int cli(const std::vector<std::string>& args, std::string* out = nullptr) {
-        std::vector<std::string> full{"--endpoint",
-                                      "127.0.0.1:" + std::to_string(app.status_port())};
-        full.insert(full.end(), args.begin(), args.end());
-        std::ostringstream o;
-        std::ostringstream e;
-        const int rc = tinykv::cli::run_cli(full, o, e);
-        last_err = e.str();
-        if (out != nullptr) {
-            *out = o.str();
-        }
-        return rc;
-    }
-    std::string last_err;
-};
-
-// 从 "OK session=tN" 里取 session id
-std::string session_of(const std::string& text) {
-    const auto at = text.find("session=");
-    if (at == std::string::npos) {
-        return {};
-    }
-    std::string sid;
-    for (std::size_t i = at + 8; i < text.size(); ++i) {
-        const char ch = text[i];
-        if (ch == '\n' || ch == '\r' || ch == ' ') {
-            break;
-        }
-        sid.push_back(ch);
-    }
-    return sid;
-}
+// 装置用 testlib 共享版（lock_shards=16 分片档，行为与改造前等价——见 lock_shards_wiring_test）
+using Daemon = ServerDaemon;
 
 // 1) 两区原子提交：a 在 region 1、z 在 region 2，同一事务提交后两处都可见
 TEST(CrossRegionTxnTest, CommitsAcrossTwoRegionsAndBothKeysVisible) {
-    Daemon d(/*cross_region=*/true);
+    Daemon d(16, /*cross_region=*/true, "tinykv_cross_region");
     std::string out;
     ASSERT_EQ(d.cli({"region", "split", "1", "m"}, &out), 0) << d.last_err << out;
 
     std::string begin;
     ASSERT_EQ(d.cli({"txn", "begin"}, &begin), 0) << d.last_err;
-    const std::string sid = session_of(begin);
+    const std::string sid = tinykv::testlib::session_of(begin);
     ASSERT_FALSE(sid.empty()) << begin;
 
     ASSERT_EQ(d.cli({"txn", "set", sid, "a", "va"}), 0) << d.last_err;  // region 1
@@ -107,7 +55,7 @@ TEST(CrossRegionTxnTest, CommitsAcrossTwoRegionsAndBothKeysVisible) {
     // 新事务读两处：都可见
     std::string begin2;
     ASSERT_EQ(d.cli({"txn", "begin"}, &begin2), 0) << d.last_err;
-    const std::string sid2 = session_of(begin2);
+    const std::string sid2 = tinykv::testlib::session_of(begin2);
     std::string got_a;
     std::string got_z;
     ASSERT_EQ(d.cli({"txn", "get", sid2, "a"}, &got_a), 0) << d.last_err;
@@ -120,13 +68,13 @@ TEST(CrossRegionTxnTest, CommitsAcrossTwoRegionsAndBothKeysVisible) {
 
 // 2) 关闭跨区时：提交被明确拒绝（不是静默写错分区）
 TEST(CrossRegionTxnTest, RejectedWhenCoordinatorDisabled) {
-    Daemon d(/*cross_region=*/false);
+    Daemon d(16, /*cross_region=*/false, "tinykv_cross_region_off");
     std::string out;
     ASSERT_EQ(d.cli({"region", "split", "1", "m"}, &out), 0) << d.last_err << out;
 
     std::string begin;
     ASSERT_EQ(d.cli({"txn", "begin"}, &begin), 0) << d.last_err;
-    const std::string sid = session_of(begin);
+    const std::string sid = tinykv::testlib::session_of(begin);
     ASSERT_FALSE(sid.empty());
     ASSERT_EQ(d.cli({"txn", "set", sid, "a", "va"}), 0) << d.last_err;
     ASSERT_EQ(d.cli({"txn", "set", sid, "z", "vz"}), 0) << d.last_err;

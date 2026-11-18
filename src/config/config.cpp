@@ -108,6 +108,11 @@ result<void> apply_server(ServerSection& cfg, const std::string& key, const std:
         cfg.auth_token = unquote(value);
         return {};
     }
+    if (key == "lock_shards") {
+        return parse_size(value, cfg.lock_shards) && cfg.lock_shards > 0
+                   ? result<void>{}
+                   : bad("server.lock_shards 必须是正整数");
+    }
     return bad("server 段未知键 '" + key + "'");
 }
 

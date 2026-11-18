@@ -20,6 +20,7 @@
 | C-9 | 就绪输出 | `stdout` 全缓冲（重定向时行不落盘） | 行缓冲 + 就绪行立即 flush | 解析该行的脚本从"等不到"变成"等得到" | 无（纯改善） |
 | C-10 | `txn.cross_region_enabled` 默认值 | false（跨区写入报"跨区事务未启用"） | **true**（跨区事务按 region 分组两阶段提交；显式写 false 即回旧行为） | 依赖"跨区被拒绝"的调用方会看到事务真的跨区提交了——这是 ⑦ 转正的预期方向；配置文件显式声明 false 可完全回退 | 配置里显式写 `cross_region_enabled: false` |
 | C-11 | `/status` 响应 | 无 `txn_cross_region` 字段 | 追加 `"txn_cross_region":true|false`（红线 6：开关状态可观测） | 纯追加，解析方不受影响 | 无 |
+| C-12 | 配置文件 `server:` 段 | 只有 `host`、`auth_token` | 追加 `server.lock_shards`（默认 16；1 = 一把大锁回退档；未知键仍报错） | 旧配置无此键 = 用默认值，行为不变 | 删该行即回默认 16 |
 
 ## 2. 需要你决定的三件事
 

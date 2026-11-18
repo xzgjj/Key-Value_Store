@@ -46,7 +46,7 @@ public:
                   }
                   return true;
               },
-              nullptr,   // 测试装置单线程泵，无需共享闸
+              {},        // 测试装置单线程泵，无需共享闸（空 PeerGateFn）
               400, {}, std::move(region_of)) {}
 };
 

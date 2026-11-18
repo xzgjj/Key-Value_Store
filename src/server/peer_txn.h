@@ -11,6 +11,7 @@
 #pragma once
 
 #include <functional>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -29,6 +30,30 @@ namespace tinykv::server {
 // PUT=0 / DELETE=1，数值是契约的一部分（改枚举值等于改线上格式，本就在禁改清单里）。
 inline constexpr kvpb::Mutation::Op kMutationDelete = static_cast<kvpb::Mutation::Op>(1);
 
+// ---- ⑨a 组合根的 Peer 串行闸抽象 ----
+// 分区闸（global=false）：只锁目标 region 的桶——同 region 串行、跨 region 并行；
+// 全局闸（global=true）：按桶序锁全部桶（或退化成单把 peer_mu_）——Worker 泵、
+// split、status、GC 广播、锁决议扫描等"触碰全部 peer"的操作必须互斥于一切分区操作。
+// 句柄可持 1..N 把锁，析构即全释放；reset() 提前释放（resolve_locks_of 的"收集后提案"）。
+class PeerGateHandle {
+public:
+    PeerGateHandle() = default;
+    explicit PeerGateHandle(std::vector<std::unique_lock<std::mutex>> locks)
+        : locks_(std::move(locks)) {}
+    PeerGateHandle(PeerGateHandle&&) = default;
+    PeerGateHandle& operator=(PeerGateHandle&&) = default;
+    PeerGateHandle(const PeerGateHandle&) = delete;
+    PeerGateHandle& operator=(const PeerGateHandle&) = delete;
+
+    void reset() { locks_.clear(); }
+
+private:
+    std::vector<std::unique_lock<std::mutex>> locks_;
+};
+
+// 闸提供者：组合根注入；空 function = 无共享泵（测试装置单线程），不加闸。
+using PeerGateFn = std::function<PeerGateHandle(bool global, std::string_view key)>;
+
 class PeerTxnExecutor : public tinykv::txn::TxnExecutor {  // 非 final：测试适配器派生注入收敛策略
 public:
     using PeerRef = std::function<tinykv::raftstore::Peer&(std::string_view key)>;
@@ -38,20 +63,21 @@ public:
     // key → 所属 region（ARCH-1 P0-1 护栏用）。不注入 = 关闭护栏（单 region / 测试装置）。
     using RegionOf = std::function<std::optional<tinykv::RegionId>(std::string_view key)>;
 
-    // gate：daemon 组合根注入的 Peer 串行闸（Worker 泵与 HTTP 共用；泵回调不得重复加锁）
-    PeerTxnExecutor(PeerRef peer, Pump pump, Applied applied, std::mutex* gate,
+    // gate：daemon 组合根注入的 Peer 串行闸（⑨a：分区闸或全局闸；泵回调不得重复加锁）。
+    // 空 function = 测试装置单线程泵，无需共享闸（兼容原 nullptr 语义）。
+    PeerTxnExecutor(PeerRef peer, Pump pump, Applied applied, PeerGateFn gate,
                     int max_rounds = 400, PeerList peers = {}, RegionOf region_of = {})
         : peer_(std::move(peer)),
           pump_(std::move(pump)),
           applied_(std::move(applied)),
-          gate_(gate),
+          gate_(std::move(gate)),
           max_rounds_(max_rounds),
           peers_(std::move(peers)),
           region_of_(std::move(region_of)) {}
 
     [[nodiscard]] tinykv::result<std::optional<std::string>> get(std::string_view key,
                                                                  tinykv::Ts start_ts) override {
-        auto gate = hold_gate();
+        auto gate = hold_gate(false, key);
         auto& p = peer_(key);
         const auto ri = p.wait_read_index([&] { pump_(key); });
         if (!ri.has_value()) {
@@ -141,7 +167,7 @@ public:
 
     [[nodiscard]] tinykv::result<tinykv::txn::TxnStatus> check_txn_status(
         std::string_view primary, tinykv::Ts lock_start_ts, std::uint64_t now_ms) override {
-        auto gate = hold_gate();
+        auto gate = hold_gate(false, primary);
         auto& p = peer_(primary);
         const auto ri = p.wait_read_index([&] { pump_(primary); });
         if (!ri.has_value()) {
@@ -157,7 +183,7 @@ public:
     [[nodiscard]] tinykv::result<std::size_t> resolve_locks_of(
         std::string_view primary, tinykv::Ts lock_start_ts,
         std::optional<tinykv::Ts> commit_to) override {
-        auto gate = hold_gate();
+        auto gate = hold_gate(true, {});  // 扫描跨全部 region：全局闸
         auto& primary_peer = peer_(primary);
         const auto ri = primary_peer.wait_read_index([&] { pump_(primary); });
         if (!ri.has_value()) {
@@ -186,7 +212,7 @@ public:
         if (victims.empty()) {
             return std::size_t{0};
         }
-        gate.reset();  // 写路径自己再加闸：同一线程不可对同一 mutex 重复 lock
+        gate.reset();  // 写路径自己再加闸（按各 victim 的 region）：同一线程不可重复锁同一桶
         std::size_t total = 0;
         for (auto& [peer, keys] : victims) {
             (void)peer;
@@ -234,7 +260,7 @@ public:
                 return tinykv::unexpected(tinykv::NotLeader{.region_id = tinykv::RegionId{0},
                                                             .leader_hint = std::nullopt});
             }
-            auto gate = hold_gate();
+            auto gate = hold_gate(true, {});  // GC 广播跨全部 region：全局闸
             const auto expect = p->raft().last_index().value + 1;
             if (!p->propose_txn_gc(req)) {
                 return tinykv::unexpected(tinykv::NotLeader{.region_id = tinykv::RegionId{0},
@@ -309,16 +335,17 @@ private:
         return {};
     }
 
-    [[nodiscard]] std::optional<std::unique_lock<std::mutex>> hold_gate() const {
-        if (gate_ != nullptr) {
-            return std::unique_lock<std::mutex>(*gate_);
+    [[nodiscard]] std::optional<PeerGateHandle> hold_gate(bool global,
+                                                          std::string_view key) const {
+        if (!gate_) {
+            return std::nullopt;  // 测试装置无共享泵时可不设闸
         }
-        return std::nullopt;  // 测试装置无共享泵时可不设闸
+        return gate_(global, key);
     }
 
     template <typename ProposeFn>
     tinykv::result<void> call_through_raft(std::string_view key, ProposeFn&& propose) {
-        auto gate = hold_gate();
+        auto gate = hold_gate(false, key);  // 分区闸：提案只触碰 route_key 所属 peer
         tinykv::raftstore::Peer& p = peer_(key);
         const auto expect = p.raft().last_index().value + 1;
         if (!propose(p)) {
@@ -345,7 +372,7 @@ private:
     PeerRef peer_;
     Pump pump_;
     Applied applied_;
-    std::mutex* gate_{nullptr};
+    PeerGateFn gate_;  // 空 = 无共享泵（测试装置）；非空 = 分区/全局闸提供者
     int max_rounds_;
     PeerList peers_;
     RegionOf region_of_;  // 空 = 单 region 装配（护栏不生效）
