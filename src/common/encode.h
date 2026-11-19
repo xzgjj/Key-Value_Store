@@ -28,7 +28,12 @@ namespace tinykv {
 // 列族（P4 事务直接复用：Write/Lock 为 Percolator 两列）
 enum class Cf : uint8_t { Default = 0, Write = 1, Lock = 2 };
 
-// CF 前缀编码：空 user_key 返回 InvalidArgument
+// 列族合法性：把任意整数强转成 Cf 后必须先过这一关（快照/网络输入不可信）
+[[nodiscard]] constexpr bool is_valid_cf(Cf cf) noexcept {
+    return static_cast<std::uint8_t>(cf) <= static_cast<std::uint8_t>(Cf::Lock);
+}
+
+// CF 前缀编码：空 user_key / 非法 CF 返回 InvalidArgument
 [[nodiscard]] result<std::string> encode_key(Cf cf, tinykv::span<const std::byte> user_key);
 
 // 事务时间戳编码：CF 前缀 + user_key + 大端 ts 后缀（ts 排序序 = 数值序，SPEC-4 §21）

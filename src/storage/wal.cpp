@@ -21,8 +21,8 @@
 namespace tinykv {
 namespace {
 
-constexpr std::size_t kHeaderBytes = 8;                // [u32 len][u32 crc]
-constexpr std::uint32_t kMaxRecordBytes = 64U << 20U;  // 单条上限：防坏长度触发巨量分配
+constexpr std::size_t kHeaderBytes = Wal::kHeaderBytes;              // [u32 len][u32 crc]
+constexpr std::size_t kMaxRecordBytes = Wal::kMaxRecordBytes;        // 单条上限：防坏长度触发巨量分配
 constexpr std::size_t kSegmentNameWidth = 6;
 
 void put_u32(std::string& out, std::uint32_t v) {
@@ -355,6 +355,19 @@ result<void> Wal::sync_locked() {
 }
 
 result<void> Wal::append(tinykv::span<const Modify> batch) {
+    // code-review P0-1 附带项：先按"键值原始长度 + 每条固定开销"估算，超限直接拒绝。
+    // 旧实现先 encode_batch 再检查——超大批次会先产生一次几十 MB 的分配，然后才被拒绝。
+    std::size_t estimate = 0;
+    for (const Modify& m : batch) {
+        if (const auto* p = std::get_if<Put>(&m.op)) {
+            estimate += p->key.size() + p->value.size() + 12;  // kind/cf/两个 varint 长度
+        } else {
+            estimate += std::get<Delete>(m.op).key.size() + 12;
+        }
+        if (estimate > kMaxRecordBytes) {
+            return tinykv::unexpected(InvalidArgument{"单个写入批次编码后超过 64MB 上限"});
+        }
+    }
     std::string payload;
     encode_batch(batch, payload);
     if (payload.size() > kMaxRecordBytes) {

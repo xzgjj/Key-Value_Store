@@ -54,6 +54,11 @@ struct WalReplayResult {
 
 class Wal {
 public:
+    // 单条记录上限（编码后 payload）：防坏长度/超大批次触发巨量分配。
+    // 公开给写路径做"编码前"预估校验（engine 在落盘前就拒绝超限批次）。
+    static constexpr std::size_t kMaxRecordBytes = 64U << 20U;
+    static constexpr std::size_t kHeaderBytes = 8;  // [u32 len][u32 crc32c]
+
     // 打开（或创建）最新段用于追加，并启动后台提交者；目录不存在则创建
     [[nodiscard]] static result<std::unique_ptr<Wal>> open(const WalOptions& opt);
 

@@ -15,10 +15,13 @@ void append_be64(std::string& out, uint64_t v) {
 
 }  // namespace
 
-// CF 前缀编码：[cf_id:1B][user_key]；空 key 拒绝（InvalidArgument，SPEC-0 §0.3.1 矩阵）
+// CF 前缀编码：[cf_id:1B][user_key]；空 key / 非法 CF 拒绝（InvalidArgument，SPEC-0 §0.3.1 矩阵）
 result<std::string> encode_key(Cf cf, tinykv::span<const std::byte> user_key) {
     if (user_key.empty()) {
         return tinykv::unexpected(InvalidArgument{"user_key 为空"});
+    }
+    if (!is_valid_cf(cf)) {
+        return tinykv::unexpected(InvalidArgument{"CF 取值非法（只允许 0/1/2）"});
     }
     std::string out;
     out.reserve(user_key.size() + 1);

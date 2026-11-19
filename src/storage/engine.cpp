@@ -23,6 +23,37 @@ result<std::string> encode_user(Cf cf, std::string_view user) {
     return encode_key(cf, tinykv::as_bytes(tinykv::span{user.data(), user.size()}));
 }
 
+// code-review P0-1：整批校验必须发生在写 WAL **之前**。
+// 旧实现先把整批写进 WAL，再在 apply_batch 里由 encode_key 拒绝空 key——调用虽然返回错误，
+// WAL 里却留下一条坏记录，下次 Engine::open 重放到它必然失败，整个数据目录再也打不开。
+result<void> validate_batch(tinykv::span<const Modify> batch) {
+    std::size_t bytes = 0;
+    for (const Modify& m : batch) {
+        if (const auto* p = std::get_if<Put>(&m.op)) {
+            if (!is_valid_cf(p->cf)) {
+                return tinykv::unexpected(InvalidArgument{"Put 的 CF 取值非法"});
+            }
+            if (p->key.empty()) {
+                return tinykv::unexpected(InvalidArgument{"Put.key 为空（拒绝写入 WAL）"});
+            }
+            bytes += p->key.size() + p->value.size() + 12;
+        } else {
+            const auto& d = std::get<Delete>(m.op);
+            if (!is_valid_cf(d.cf)) {
+                return tinykv::unexpected(InvalidArgument{"Delete 的 CF 取值非法"});
+            }
+            if (d.key.empty()) {
+                return tinykv::unexpected(InvalidArgument{"Delete.key 为空（拒绝写入 WAL）"});
+            }
+            bytes += d.key.size() + 12;
+        }
+        if (bytes > Wal::kMaxRecordBytes) {
+            return tinykv::unexpected(InvalidArgument{"单个写入批次编码后超过 64MB 上限"});
+        }
+    }
+    return {};
+}
+
 std::string sst_name(std::uint32_t seq) {
     std::string digits = std::to_string(seq);
     if (digits.size() < 6) {
@@ -408,6 +439,10 @@ result<GetResult> Engine::get(Cf cf, tinykv::span<const std::byte> key) {
 result<void> Engine::write(tinykv::span<const Modify> batch) {
     if (batch.empty()) {
         return tinykv::unexpected(InvalidArgument{"写入批次为空"});
+    }
+    // 先校验后落盘：任何一条非法都不得进入 WAL（否则坏记录会在下次恢复时毒死目录）
+    if (auto v = validate_batch(batch); !v) {
+        return v;
     }
     std::lock_guard lock(mu_);
     if (closed_) {
