@@ -8,6 +8,7 @@
 // 确定性时钟：主循环每秒推进 1000ms（注入口径，非墙钟），TTL/GC 判定因此可复现。
 
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <condition_variable>
 #include <csignal>
@@ -18,6 +19,8 @@
 #include <string>
 #include <thread>
 
+#include "common/error_format.h"
+#include "common/log.h"
 #include "config/config.h"
 #include "server/server_app.h"
 
@@ -28,8 +31,20 @@ std::mutex g_mu;
 std::condition_variable g_cv;
 
 void on_signal(int) {
+    // code-review：condition_variable::notify_all 不是 async-signal-safe 的，
+    // 在信号处理器里调用理论上可死锁。主循环本来就每 1s 定时醒来，通知可以省掉。
     g_stop.store(true);
-    g_cv.notify_all();  // 唤醒主循环（cv 是进程内安全的通知路径）
+}
+
+// log.level -> 枚举。未知值保持默认（info），启动告警由 log::init 的控制台镜像承担。
+std::optional<tinykv::log::Level> parse_log_level(const std::string& s) {
+    if (s == "trace") return tinykv::log::Level::trace;
+    if (s == "debug") return tinykv::log::Level::debug;
+    if (s == "info") return tinykv::log::Level::info;
+    if (s == "warn") return tinykv::log::Level::warn;
+    if (s == "err") return tinykv::log::Level::err;
+    if (s == "critical") return tinykv::log::Level::critical;
+    return std::nullopt;
 }
 
 }  // namespace
@@ -73,7 +88,15 @@ ParsedArgs parse_args(int argc, char** argv) {
         if (out.opt.data_dir.empty()) {
             out.opt.data_dir = arg;
         } else if (out.opt.status_port == 0) {
-            out.opt.status_port = static_cast<std::uint16_t>(std::stoul(arg));
+            // code-review：std::stoul 对非数字抛异常（未捕获 → terminate）、对 70000 静默截断。
+            unsigned parsed = 0;
+            const auto res = std::from_chars(arg.data(), arg.data() + arg.size(), parsed);
+            if (res.ec != std::errc{} || res.ptr != arg.data() + arg.size() || parsed > 65535) {
+                std::cerr << "状态端口必须是 0..65535 的整数: " << arg << '\n';
+                out.ok = false;
+                return out;
+            }
+            out.opt.status_port = static_cast<std::uint16_t>(parsed);
         } else {
             std::cerr << "多余的参数: " << arg << '\n';
             out.ok = false;
@@ -112,6 +135,16 @@ ParsedArgs parse_args(int argc, char** argv) {
     opt.tls_cert = cfg->server.tls_cert;          // ⑭：TLS 证书链（空 = 明文）
     opt.tls_key = cfg->server.tls_key;            // ⑭：TLS 私钥（与 cert 必须同给）
     opt.cross_region_enabled = cfg->txn.cross_region_enabled;
+    // code-review：engine.memtable/wal 段此前没有接线（demo.yaml 在 daemon 上静默失效）
+    opt.memtable_limit_mb = cfg->engine.memtable_limit_mb;
+    opt.wal_segment_mb = cfg->engine.wal_segment_mb;
+    // log.* 接线：此前 log::init 在 src/ 无调用点，服务端日志全部被丢弃（可观测性缺口）
+    if (auto lr = tinykv::log::init(cfg->log.dir, "tinykv", true); !lr.has_value()) {
+        std::cerr << "日志初始化失败（继续运行，日志仅控制台）: "
+                  << tinykv::describe_kind(lr.error()) << '\n';
+    } else if (auto log_level = parse_log_level(cfg->log.level); log_level.has_value()) {
+        tinykv::log::set_level(*log_level);  // 级别必须在 init 之后设置才作用于 logger
+    }
     return true;
 }
 

@@ -60,22 +60,28 @@ public:
     explicit RegionPeerRegistry(std::filesystem::path data_dir, raftstore::StoreMeta& meta,
                                 std::uint64_t election_timeout = 8, std::uint64_t heartbeat = 3,
                                 PeerId replica_id = PeerId{1}, std::vector<PeerId> voters = {},
-                                bool fsync_on_commit = false)
+                                bool fsync_on_commit = false,
+                                std::size_t memtable_limit_bytes = 64U << 20U,
+                                std::size_t wal_segment_bytes = 128U << 20U)
         : data_dir_(std::move(data_dir)),
           meta_(meta),
           election_(election_timeout),
           heartbeat_(heartbeat),
           replica_id_(replica_id),
           voters_(voters.empty() ? std::vector<PeerId>{replica_id} : std::move(voters)),
-          fsync_on_commit_(fsync_on_commit) {}
+          fsync_on_commit_(fsync_on_commit),
+          memtable_limit_bytes_(memtable_limit_bytes),
+          wal_segment_bytes_(wal_segment_bytes) {}
 
     void set_observer_factory(ObserverFactory fn) { observer_factory_ = std::move(fn); }
 
     // 建 slot：region 1 独占全空间时用 data_dir 根（兼容 M1 起的单 region 数据布局），
     // 其余 region 用 data_dir/regions/<id>。meta 恢复时逐个 region 走这里（⑧）。
     [[nodiscard]] result<void> bootstrap(const raftstore::Region& region) {
-        auto eng =
-            Engine::open({.dir = engine_dir_for(region.id), .fsync_on_commit = fsync_on_commit_});
+        auto eng = Engine::open({.dir = engine_dir_for(region.id),
+                                 .fsync_on_commit = fsync_on_commit_,
+                                 .memtable_limit_bytes = memtable_limit_bytes_,
+                                 .wal_segment_bytes = wal_segment_bytes_});
         if (!eng.has_value()) {
             return tinykv::unexpected(eng.error());
         }
@@ -166,8 +172,10 @@ public:
         if (old_slot == nullptr) {
             return tinykv::unexpected(InvalidArgument{"split 宿主 slot 不存在"});
         }
-        auto eng =
-            Engine::open({.dir = engine_dir_for(right.id), .fsync_on_commit = fsync_on_commit_});
+        auto eng = Engine::open({.dir = engine_dir_for(right.id),
+                                 .fsync_on_commit = fsync_on_commit_,
+                                 .memtable_limit_bytes = memtable_limit_bytes_,
+                                 .wal_segment_bytes = wal_segment_bytes_});
         if (!eng.has_value()) {
             return tinykv::unexpected(eng.error());
         }
@@ -332,6 +340,8 @@ private:
     PeerId replica_id_{1};
     std::vector<PeerId> voters_;
     bool fsync_on_commit_{false};
+    std::size_t memtable_limit_bytes_{64U << 20U};
+    std::size_t wal_segment_bytes_{128U << 20U};
     ObserverFactory observer_factory_;
     std::map<RegionId, PeerSlot> slots_;
 };

@@ -85,6 +85,10 @@ TEST(CliLocalSmoke, UsageErrorsReturnOne) {
     EXPECT_EQ(invoke({"--config", cfg, "put", "only-key"}).code, 1);   // 缺 value
     EXPECT_EQ(invoke({"--config", cfg, "nosuchcmd"}).code, 1);
     EXPECT_EQ(invoke({"--config", cfg, "get", "k", "--cf", "bogus"}).code, 1);
+    // code-review：--limit 曾用 std::stoul，非数字会抛异常穿出 main（terminate）
+    EXPECT_EQ(invoke({"--config", cfg, "scan", "--limit", "abc"}).code, 1);
+    EXPECT_EQ(invoke({"--config", cfg, "scan", "--limit", "0"}).code, 1);
+    EXPECT_EQ(invoke({"--config", cfg, "scan", "--limit", "-1"}).code, 1);
 }
 
 TEST(CliLocalSmoke, ConfigErrorsAreReported) {

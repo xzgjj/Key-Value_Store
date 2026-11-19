@@ -4,12 +4,18 @@
 #include "config/config.h"
 
 #include <fstream>
+#include <limits>
 #include <functional>
 #include <string_view>
 #include <vector>
 
 namespace tinykv {
 namespace {
+
+// 配置上限：极大值会让"配置解析成功"变成"启动时创建海量线程/桶/大缓冲区"
+constexpr std::size_t kMaxEngineMb = 65536;   // 64GB
+constexpr std::size_t kMaxLockShards = 4096;
+constexpr std::size_t kMaxHttpThreads = 256;
 
 constexpr std::string_view kIndent = "  ";
 
@@ -45,8 +51,10 @@ bool parse_bool(const std::string& v, bool& out) {
     return false;
 }
 
+// 十进制无符号解析：显式溢出检查（旧实现 acc*10+digit 会回绕成小值/0，
+// 用户写个天文数字反而得到"合法"的极小配置）
 bool parse_size(const std::string& v, std::size_t& out) {
-    if (v.empty()) {
+    if (v.empty() || v.size() > 20) {
         return false;
     }
     std::size_t acc = 0;
@@ -54,7 +62,11 @@ bool parse_size(const std::string& v, std::size_t& out) {
         if (c < '0' || c > '9') {
             return false;
         }
-        acc = acc * 10 + static_cast<std::size_t>(c - '0');
+        const auto digit = static_cast<std::size_t>(c - '0');
+        if (acc > (std::numeric_limits<std::size_t>::max() - digit) / 10) {
+            return false;  // 溢出
+        }
+        acc = acc * 10 + digit;
     }
     out = acc;
     return true;
@@ -75,12 +87,16 @@ result<void> apply_engine(EngineSection& cfg, const std::string& key, const std:
                                                       : bad("fsync_on_commit 只能是 true/false");
     }
     if (key == "memtable_limit_mb") {
-        return parse_size(value, cfg.memtable_limit_mb) ? result<void>{}
-                                                        : bad("memtable_limit_mb 必须是整数");
+        return parse_size(value, cfg.memtable_limit_mb) && cfg.memtable_limit_mb >= 1 &&
+                       cfg.memtable_limit_mb <= kMaxEngineMb
+                   ? result<void>{}
+                   : bad("memtable_limit_mb 必须是 1..65536 的整数");
     }
     if (key == "wal_segment_mb") {
-        return parse_size(value, cfg.wal_segment_mb) ? result<void>{}
-                                                     : bad("wal_segment_mb 必须是整数");
+        return parse_size(value, cfg.wal_segment_mb) && cfg.wal_segment_mb >= 1 &&
+                       cfg.wal_segment_mb <= kMaxEngineMb
+                   ? result<void>{}
+                   : bad("wal_segment_mb 必须是 1..65536 的整数");
     }
     return bad("engine 段未知键 '" + key + "'");
 }
@@ -109,15 +125,17 @@ result<void> apply_server(ServerSection& cfg, const std::string& key, const std:
         return {};
     }
     if (key == "lock_shards") {
-        return parse_size(value, cfg.lock_shards) && cfg.lock_shards > 0
+        // 上限防"配置成天文数字直接创建海量桶"
+        return parse_size(value, cfg.lock_shards) && cfg.lock_shards > 0 &&
+                       cfg.lock_shards <= kMaxLockShards
                    ? result<void>{}
-                   : bad("server.lock_shards 必须是正整数");
+                   : bad("server.lock_shards 必须是 1..4096 的整数");
     }
     if (key == "http_threads") {
-        // ⑪：0 合法（= hardware_concurrency，bench 档），负数/非数字由 parse_size 拒绝
-        return parse_size(value, cfg.http_threads)
+        // ⑪：0 合法（= hardware_concurrency，bench 档）；上限防止一次创建数百线程
+        return parse_size(value, cfg.http_threads) && cfg.http_threads <= kMaxHttpThreads
                    ? result<void>{}
-                   : bad("server.http_threads 必须是非负整数（0 = 按 CPU 数）");
+                   : bad("server.http_threads 必须是 0..256 的整数（0 = 按 CPU 数）");
     }
     if (key == "tls_cert") {
         cfg.tls_cert = unquote(value);

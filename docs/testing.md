@@ -138,6 +138,7 @@ CI 用 `ctest -L unit|simulation|integration|bench` 选择，无需解析本页�
 | tests/unit/common/encode_test.cpp | unit | `encode_test` | - | fast |
 | tests/unit/common/common_log_test.cpp | unit | `common_log_test` | - | fast |
 | tests/unit/common/compat_test.cpp | unit | `compat_test` | - | fast |
+| tests/unit/common/config_test.cpp | unit | `config_test` | - | fast |
 | tests/unit/proto/proto_roundtrip_test.cpp | unit | `proto_roundtrip_test` | - | fast |
 | tests/unit/common/kv_error_test.cpp | unit | `kv_error_test` | - | fast |
 | tests/unit/storage/memtable_test.cpp | unit | `memtable_test` | - | fast |

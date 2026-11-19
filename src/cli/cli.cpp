@@ -3,7 +3,10 @@
 
 #include "cli/cli.h"
 
+#include <algorithm>
+#include <charconv>
 #include <cstddef>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -27,6 +30,7 @@ constexpr int kExitUsage = 1;
 constexpr int kExitRuntime = 2;
 constexpr int kExitNotFound = 3;
 constexpr const char* kDefaultConfig = "demo.yaml";
+constexpr std::size_t kMaxScanLimit = 1000000;  // scan 一次最多返回的条数上限
 
 // 已解析的全局参数
 struct Globals {
@@ -91,7 +95,16 @@ result<void> apply_global(Globals& g, const std::string& name, const std::string
         }
         g.cf = *cf;
     } else if (name == "--limit") {
-        g.limit = static_cast<std::size_t>(std::stoul(value));
+        // code-review：std::stoul 对 "abc" 抛异常（main 未捕获 → terminate）、对 "-1" 回绕。
+        // 统一 from_chars + 范围校验。
+        std::size_t parsed = 0;
+        const auto res =
+            std::from_chars(value.data(), value.data() + value.size(), parsed);
+        if (res.ec != std::errc{} || res.ptr != value.data() + value.size() || parsed == 0 ||
+            parsed > kMaxScanLimit) {
+            return tinykv::unexpected(InvalidArgument{"--limit 必须是 1..1000000 的整数"});
+        }
+        g.limit = parsed;
     } else if (name == "--read-mode") {
         if (value != "read_index" && value != "lease" && value != "log") {
             return tinykv::unexpected(InvalidArgument{"--read-mode 只能是 read_index/lease/log"});
@@ -125,8 +138,10 @@ EngineOptions to_options(const Config& cfg) {
     EngineOptions opt;
     opt.dir = cfg.engine.dir;
     opt.fsync_on_commit = cfg.engine.fsync_on_commit;
-    opt.memtable_limit_bytes = cfg.engine.memtable_limit_mb << 20U;
-    opt.wal_segment_bytes = cfg.engine.wal_segment_mb << 20U;
+    // 左移前先夹到 size_t 可表示范围（config 已限 1..65536MB，这里的夹取是防未来改上限）
+    constexpr std::size_t kMaxShiftMb = std::numeric_limits<std::size_t>::max() >> 20U;
+    opt.memtable_limit_bytes = std::min(cfg.engine.memtable_limit_mb, kMaxShiftMb) << 20U;
+    opt.wal_segment_bytes = std::min(cfg.engine.wal_segment_mb, kMaxShiftMb) << 20U;
     return opt;
 }
 
@@ -252,12 +267,21 @@ bool parse_region_id(const std::string& s, std::uint64_t& id) {
 // 解析 --endpoint host:port；失败输出用法错误返回 false
 bool parse_endpoint(const Globals& g, std::string& host, std::uint16_t& port, std::ostream& err) {
     const auto colon = g.endpoint.rfind(':');
-    if (colon == std::string::npos) {
+    if (colon == std::string::npos || colon == 0 || colon + 1 >= g.endpoint.size()) {
         err << "--endpoint 需为 host:port\n";
         return false;
     }
+    const auto port_text = g.endpoint.substr(colon + 1);
+    unsigned parsed = 0;
+    const auto res =
+        std::from_chars(port_text.data(), port_text.data() + port_text.size(), parsed);
+    if (res.ec != std::errc{} || res.ptr != port_text.data() + port_text.size() || parsed == 0 ||
+        parsed > 65535) {
+        err << "--endpoint 端口必须是 1..65535 的整数\n";
+        return false;
+    }
     host = g.endpoint.substr(0, colon);
-    port = static_cast<std::uint16_t>(std::stoul(g.endpoint.substr(colon + 1)));
+    port = static_cast<std::uint16_t>(parsed);
     return true;
 }
 

@@ -62,6 +62,10 @@ struct ServerOptions {
     // REL-02 开关：生产装配走配置（默认 true）。false 只允许出现在基准对比里——
     // 掉电会丢已向客户端确认的写，也会丢已提交的 Raft 日志（破坏 State Machine Safety）。
     bool fsync_on_commit{true};
+    // code-review：engine.memtable_limit_mb / wal_segment_mb 此前只接了 CLI 本地模式，
+    // daemon 路径固定用默认值——demo.yaml 里的配置静默失效。这里补齐接线。
+    std::size_t memtable_limit_mb{64};
+    std::size_t wal_segment_mb{128};
     // ⑩ 安全边界（M7-SEC-01/02）：非空 = 所有 HTTP 请求必须带 Authorization: Bearer <token>；
     // 为空 = 不鉴权，此时强制绑回环（D6-3：默认关 + 启动告警 + 强制回环）。
     std::string auth_token;
@@ -257,7 +261,8 @@ private:
         }
         registry_ = std::make_unique<RegionPeerRegistry>(
             opt_.data_dir, meta_, opt_.election_timeout, opt_.heartbeat, opt_.replica_id,
-            opt_.voters, opt_.fsync_on_commit);
+            opt_.voters, opt_.fsync_on_commit, opt_.memtable_limit_mb << 20U,
+            opt_.wal_segment_mb << 20U);
         // split 钩子：新 region 动态建 peer + 迁移数据（回调在 apply 路径内，仅动存储）。
         // 经工厂挂钩——bootstrap 与后续每个 split 新 peer 都自动覆盖（多级 split 可用）。
         registry_->set_observer_factory([this](raftstore::Peer& peer) {
