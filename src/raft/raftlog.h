@@ -91,6 +91,10 @@ private:
     explicit RaftLog(Storage& storage) : storage_(storage) {}
 
     [[nodiscard]] result<void> persist_meta();
+    // code-review P0-2：先落盘、成功后才推进内存 meta_。
+    // 旧实现"先改内存后写盘"，落盘失败时内存已前进、盘上还是旧值——重启后 term/vote 回退，
+    // 同一任期可能投两次票，直接破坏 Raft 选举安全。
+    [[nodiscard]] result<void> persist_meta(const Meta& next);
     // meta 的持久化表示（"\0lm" + "\0la" 两条 Put），供单独落盘或与条目变更合并成一批
     [[nodiscard]] static ModifyVec meta_modifies(const Meta& m);
     // BUG-0014：条目变更与 meta 同批写。成功后才把 meta_ 推进到 next——

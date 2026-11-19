@@ -61,7 +61,15 @@ result<std::unique_ptr<RaftLog>> RaftLog::open(Storage& storage) {
     if (!raw) {
         return tinykv::unexpected(raw.error());
     }
-    if (raw->value.has_value() && raw->value->size() == kMetaBytes) {
+    if (raw->value.has_value()) {
+        // code-review P0-2：长度不符绝不能当默认值静默放过——那等于把 term/vote 归零，
+        // 重启后可能在同一任期重复投票。损坏就要明确报 Corrupted。
+        if (raw->value->size() != kMetaBytes) {
+            return tinykv::unexpected(
+                Corrupted{.where = "raftlog:open",
+                          .reason = "meta blob 长度 " + std::to_string(raw->value->size()) +
+                                    " 不符（期望 " + std::to_string(kMetaBytes) + "）"});
+        }
         const std::string& m = *raw->value;
         log->meta_ = Meta{.first_index = read_u64(m, 0),
                           .last_index = read_u64(m, 8),
@@ -75,7 +83,11 @@ result<std::unique_ptr<RaftLog>> RaftLog::open(Storage& storage) {
     if (!applied) {
         return tinykv::unexpected(applied.error());
     }
-    if (applied->value.has_value() && applied->value->size() == 8) {
+    if (applied->value.has_value()) {
+        if (applied->value->size() != 8) {
+            return tinykv::unexpected(
+                Corrupted{.where = "raftlog:open", .reason = "applied blob 长度不符（期望 8）"});
+        }
         log->meta_.applied = read_u64(*applied->value, 0);
     }
     // 元信息缺失（全新日志）时保持默认值且**不写盘**：启动路径不做任何写动作（SPEC-1 红线 1 同源）
@@ -101,7 +113,15 @@ ModifyVec RaftLog::meta_modifies(const Meta& m) {
 }
 
 result<void> RaftLog::persist_meta() {
-    return storage_.write(meta_modifies(meta_));
+    return persist_meta(meta_);
+}
+
+result<void> RaftLog::persist_meta(const Meta& next) {
+    if (auto r = storage_.write(meta_modifies(next)); !r) {
+        return r;  // 失败：meta_ 未动，内存与盘上仍一致
+    }
+    meta_ = next;
+    return {};
 }
 
 // BUG-0014：条目变更与 meta 必须同一批落盘。引擎的 write 是原子的，分两次写会留下
@@ -119,8 +139,9 @@ result<void> RaftLog::write_with_meta(ModifyVec batch, const Meta& next) {
 }
 
 result<void> RaftLog::set_applied(LogIndex idx) {
-    meta_.applied = idx.value;
-    return persist_meta();
+    Meta next = meta_;
+    next.applied = idx.value;
+    return persist_meta(next);
 }
 
 result<Term> RaftLog::term(LogIndex idx) const {
@@ -271,8 +292,9 @@ result<void> RaftLog::set_committed(LogIndex idx) {
     if (idx.value < meta_.committed) {
         return tinykv::unexpected(InvalidArgument{"commit 不可回退"});
     }
-    meta_.committed = idx.value;
-    return persist_meta();
+    Meta next = meta_;
+    next.committed = idx.value;
+    return persist_meta(next);
 }
 
 result<void> RaftLog::reset_snapshot(LogIndex index, Term term) {
@@ -291,9 +313,11 @@ result<void> RaftLog::reset_snapshot(LogIndex index, Term term) {
 }
 
 result<void> RaftLog::set_hard_state(Term term, std::optional<PeerId> vote) {
-    meta_.term = term.value;
-    meta_.vote = vote ? vote->value : 0;
-    return persist_meta();
+    // 先写盘、成功后才改内存（P0-2：落盘失败时不能对外表现为"term/vote 已推进"）
+    Meta next = meta_;
+    next.term = term.value;
+    next.vote = vote ? vote->value : 0;
+    return persist_meta(next);
 }
 
 }  // namespace tinykv::raft

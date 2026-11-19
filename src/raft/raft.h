@@ -15,6 +15,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "common/error.h"
@@ -87,8 +88,13 @@ public:
 
     [[nodiscard]] LogIndex last_index() const { return log_.last_index(); }
 
-    // 安装快照后调用：日志重置到 (index, term)，applied 前移，退回 follower
-    void restore_snapshot(LogIndex index, Term term);
+    // 安装快照后调用：日志重置到 (index, term)，applied 前移，退回 follower。
+    // 落盘失败返回错误——调用方不得在日志指针未推进时安装快照（P0-2）。
+    [[nodiscard]] result<void> restore_snapshot(LogIndex index, Term term);
+
+    // 持久化失败后的粘性失败态：状态机不再投票/提案/推进 commit，调用方必须停止接客。
+    [[nodiscard]] bool failed() const { return failed_; }
+    [[nodiscard]] const std::string& failure() const { return fail_reason_; }
 
     // 只有所有 voter 的 match_index 都到达 upto 才允许压缩日志，否则落后节点只能走快照。
     // 由 leader 判定；follower 不持有全量 match 视图，返回 false 保守不压缩。
@@ -140,12 +146,17 @@ private:
     void handle_heartbeat_response(const raftpb::Message& msg);
     // ⑦a：收到 TimeoutNow → 立即竞选（learner 忽略；已是 leader 忽略）
     void handle_timeout_now(const raftpb::Message& msg);
-    void append_entry_and_replicate(const std::string& data);
+    [[nodiscard]] result<void> append_entry_and_replicate(const std::string& data);
 
-    // 把 [applied+1, committed] 的条目收进待 apply 队列；apply 时处理 ConfChange
-    void collect_apply();
+    // 把 [applied+1, committed] 的条目收进待 apply 队列；apply 时处理 ConfChange。
+    // 任一条目读不出来 → 返回 Corrupted 且**不推进** applied_（P0-3：静默跳过 = 丢写）。
+    [[nodiscard]] result<void> collect_apply();
     // apply 一条 ConfChange：更新 voters/learners（幂等，支撑日志重放重建）
     void apply_conf_change(const raftpb::ConfChange& cc);
+
+    // 持久化失败即进入粘性失败态：不再投票/提案/推进 commit，错误经 step/propose 上抛。
+    void fail(std::string_view why);
+    [[nodiscard]] result<void> check_failed() const;
 
     Config cfg_;
     std::vector<PeerId> learners_;   // M4 第④层：只收日志、不投票不计入 majority
@@ -183,6 +194,8 @@ private:
     std::optional<PeerId> transfer_target_;
     std::uint64_t transfer_deadline_{0};
     bool transfer_notified_{false};
+    bool failed_{false};        // 粘性失败：持久化链路已不可信（P0-2）
+    std::string fail_reason_;   // 首次失败的诊断信息（不覆盖，保留根因）
 };
 
 }  // namespace tinykv::raft

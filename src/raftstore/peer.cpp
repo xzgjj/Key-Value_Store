@@ -62,7 +62,14 @@ result<std::unique_ptr<Peer>> Peer::open(const raft::Config& cfg, Storage& stora
         return tinykv::unexpected(log.error());
     }
     // 构造函数私有：用 unique_ptr 立即接管（非数组 new，ENG-04 只禁裸数组）
-    return std::unique_ptr<Peer>(new Peer(std::move(*log), storage, cfg));
+    auto peer = std::unique_ptr<Peer>(new Peer(std::move(*log), storage, cfg));
+    // P0-2/P0-3：构造期恢复待 apply 条目失败时 Raft 进入粘性失败态，必须在 open 阶段上抛，
+    // 不能带着"日志读不出来"的 peer 启动服务。
+    if (peer->raft_->failed()) {
+        return tinykv::unexpected(
+            IoFailed{.path = "peer:open", .reason = peer->raft_->failure()});
+    }
+    return peer;
 }
 
 std::uint64_t Peer::applied_seq(std::uint64_t client_id) const {
@@ -157,7 +164,9 @@ result<void> Peer::step_message(const raftpb::Message& msg) {
     if (auto r = install_snapshot(data); !r) {
         return r;
     }
-    raft_->restore_snapshot(LogIndex{msg.index()}, Term{msg.log_term()});
+    if (auto r = raft_->restore_snapshot(LogIndex{msg.index()}, Term{msg.log_term()}); !r) {
+        return r;  // 日志指针未推进：不得回执"已安装"
+    }
 
     // 回执让 leader 知道该 follower 已到快照位点，可以接着发增量
     raftpb::Message reply;
@@ -840,7 +849,9 @@ result<void> Peer::finish_snapshot_recv(PeerId from, SnapshotRecv& recv) {
     if (auto r = install_snapshot(data); !r) {
         return r;
     }
-    raft_->restore_snapshot(LogIndex{recv.index}, Term{recv.term});
+    if (auto r = raft_->restore_snapshot(LogIndex{recv.index}, Term{recv.term}); !r) {
+        return r;
+    }
     // 回执：告诉 leader 已到快照位点，可接着发增量日志
     raftpb::Message reply;
     reply.set_id(raftpb::MSG_APPEND_RESPONSE);

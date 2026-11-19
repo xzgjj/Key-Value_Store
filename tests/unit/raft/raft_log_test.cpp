@@ -147,4 +147,129 @@ TEST(RaftLog, StateSurvivesReopen) {
     EXPECT_EQ(entry->data(), "a");
 }
 
+// code-review P0-2 回归夹具：可注入写失败的存储装饰器。
+// 生产里写失败来自磁盘满/WAL 失败；用例要能确定性地造出那一刻，才能验证
+// "落盘失败时内存不回退、错误能上抛"。
+class FlakyStorage : public tinykv::Storage {
+public:
+    explicit FlakyStorage(tinykv::Storage& inner) : inner_(inner) {}
+
+    [[nodiscard]] tinykv::result<tinykv::GetResult> get(
+        Cf cf, tinykv::span<const std::byte> key) override {
+        return inner_.get(cf, key);
+    }
+    [[nodiscard]] tinykv::result<void> write(tinykv::span<const tinykv::Modify> batch) override {
+        if (fail_writes_) {
+            return tinykv::unexpected(
+                tinykv::IoFailed{.path = "flaky", .reason = "注入写失败"});
+        }
+        return inner_.write(batch);
+    }
+    [[nodiscard]] tinykv::result<std::unique_ptr<tinykv::Reader>> create_reader() override {
+        return inner_.create_reader();
+    }
+
+    bool fail_writes_{false};
+
+private:
+    tinykv::Storage& inner_;
+};
+
+// raft log 的 entry 键：[0x00]re + be64(index)
+std::string entry_key_of(std::uint64_t index) {
+    std::string key("\0re", 3);
+    for (int shift = 56; shift >= 0; shift -= 8) {
+        key.push_back(static_cast<char>((index >> shift) & 0xFFU));
+    }
+    return key;
+}
+
+// P0-2：set_hard_state 必须"写成功才改内存"。旧实现先改 meta_ 再落盘，
+// 磁盘满时内存 term 已前进、盘上没变 —— 重启后 term/vote 回退，可能同任期投两次票。
+TEST(RaftLog, HardStateFailureDoesNotAdvanceMemory) {
+    Fixture f;
+    FlakyStorage flaky(*f.engine);
+    auto log = RaftLog::open(flaky);
+    ASSERT_TRUE(log.has_value());
+
+    ASSERT_TRUE((*log)->set_hard_state(Term{7}, PeerId{3}).has_value());
+    EXPECT_EQ((*log)->current_term(), Term{7});
+
+    flaky.fail_writes_ = true;
+    auto failed = (*log)->set_hard_state(Term{8}, std::nullopt);
+    EXPECT_FALSE(failed.has_value());
+    EXPECT_EQ((*log)->current_term(), Term{7}) << "落盘失败不得推进内存任期";
+    ASSERT_TRUE((*log)->voted_for().has_value());
+    EXPECT_EQ(*(*log)->voted_for(), PeerId{3});
+
+    flaky.fail_writes_ = false;
+    auto reopened = RaftLog::open(flaky);
+    ASSERT_TRUE(reopened.has_value());
+    EXPECT_EQ((*reopened)->current_term(), Term{7});
+}
+
+// P0-2：commit/applied 同样"写成功才改内存"，失败不得让位点前进
+TEST(RaftLog, CommitFailureDoesNotAdvanceMemory) {
+    Fixture f;
+    FlakyStorage flaky(*f.engine);
+    auto log = RaftLog::open(flaky);
+    ASSERT_TRUE(log.has_value());
+    ASSERT_TRUE((*log)->append(std::vector<Entry>{make_entry(1, 1, "a")}).has_value());
+    ASSERT_TRUE((*log)->set_committed(LogIndex{1}).has_value());
+
+    flaky.fail_writes_ = true;
+    EXPECT_FALSE((*log)->set_applied(LogIndex{1}).has_value());
+    EXPECT_EQ((*log)->applied(), LogIndex{0}) << "applied 落盘失败时不得前进";
+}
+
+// P0-2 附带：meta blob 长度不符必须报 Corrupted，不能当默认值把 term/vote 归零
+TEST(RaftLog, CorruptedMetaBlobRejected) {
+    Fixture f;
+    std::string bad(10, '\0');
+    tinykv::ModifyVec batch{tinykv::Modify{tinykv::Put{
+        .cf = tinykv::Cf::Default, .key = std::string("\0lm", 3), .value = std::move(bad)}}};
+    ASSERT_TRUE(f.engine->write(batch).has_value());
+
+    auto reopened = RaftLog::open(*f.engine);
+    ASSERT_FALSE(reopened.has_value());
+    EXPECT_TRUE(std::holds_alternative<tinykv::Corrupted>(reopened.error()));
+}
+
+// P0-3：已提交条目读不出来时必须失败并停在原地，绝不能跳过该条推进 applied
+TEST(RaftLog, CollectApplyFailsOnMissingCommittedEntry) {
+    Fixture f;
+    ASSERT_TRUE(f.log->append(std::vector<Entry>{make_entry(1, 1, "a")}).has_value());
+    ASSERT_TRUE(f.log->set_committed(LogIndex{1}).has_value());
+    // 模拟底层损坏：删掉 entry 1，但 meta 仍说 committed=1
+    tinykv::ModifyVec drop{tinykv::Modify{
+        tinykv::Delete{.cf = tinykv::Cf::Default, .key = entry_key_of(1)}}};
+    ASSERT_TRUE(f.engine->write(drop).has_value());
+
+    Raft raft(tinykv::raft::Config{.id = PeerId{1}, .voters = {PeerId{1}}}, *f.log);
+    EXPECT_TRUE(raft.failed()) << "缺失已提交条目必须进入失败态，而不是静默跳过";
+    EXPECT_NE(raft.failure().find("恢复待 apply"), std::string::npos);
+}
+
+// P0-2：提案落盘失败必须上抛且进入粘性失败态（调用方不能以为"已提案"）
+TEST(RaftLog, ProposeFailurePropagatesAndStopsRaft) {
+    Fixture f;
+    FlakyStorage flaky(*f.engine);
+    auto log = RaftLog::open(flaky);
+    ASSERT_TRUE(log.has_value());
+    Raft raft(tinykv::raft::Config{.id = PeerId{1}, .voters = {PeerId{1}}}, **log);
+    ASSERT_FALSE(raft.failed());
+
+    tinykv::raftpb::Message hup;
+    hup.set_id(tinykv::raftpb::MSG_HUP);
+    ASSERT_TRUE(raft.step(hup).has_value());
+    ASSERT_TRUE(raft.is_leader());
+
+    flaky.fail_writes_ = true;
+    auto prop = raft.propose("x");
+    EXPECT_FALSE(prop.has_value());
+    EXPECT_TRUE(raft.failed());
+    // 失败态下继续提案也必须被拒（不再产生"假成功"）
+    EXPECT_FALSE(raft.propose("y").has_value());
+}
+
 }  // namespace
