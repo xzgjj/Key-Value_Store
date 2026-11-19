@@ -258,6 +258,13 @@
         if (peer == nullptr) {
             return "ERR no-region";
         }
+        // code-review：多 voter 下 RegionPeerRegistry 无法保证新 region 的 PeerId 全局唯一
+        // （raftpb::Message 只带 to=PeerId，无 region_id），split 会造出不可路由的 peer。
+        // 这个判定必须在 propose **之前**——旧实现在 apply 之后才返回 unsupported，
+        // 此时 split 已经生效，留下了不可路由的 peer。
+        if (multi_voter()) {
+            return "ERR split-unsupported-in-multi-voter";
+        }
         const auto expect = peer->raft().last_index().value + 1;
         cmdpb::RaftCmdRequest req;
         req.mutable_header()->set_client_id(kSplitClient);
@@ -268,13 +275,8 @@
         if (!peer->propose(req).has_value()) {
             return "ERR not-leader";
         }
-        // 多 voter 下 RegionPeerRegistry 无法保证新 region 的 PeerId 全局唯一
-        // （raftpb::Message 只带 to=PeerId，无 region_id），此时 split 会造出不可路由的
-        // peer——明确拒绝，单节点模式不受影响。
-        if (multi_voter()) {
-            return "ERR split-unsupported-in-multi-voter";
-        }
         if (!wait_applied_locked(*peer, expect)) {
+            peer->drop_reply(kSplitClient, expect);  // 超时必须回收，避免回执表累积
             return "ERR apply-timeout";
         }
         peer->drop_reply(kSplitClient, expect);  // admin 回执不消费，必须显式回收
@@ -386,8 +388,11 @@
         }
         auto gate = gate_for(false, parts[1]);  // ⑨a 分区闸：写只触碰 key 所属 region
         kv_writes_.fetch_add(1, std::memory_order_relaxed);
-        auto& peer = registry_->require(parts[1]);
-        const auto expect = peer.raft().last_index().value + 1;
+        auto* peer = registry_->peer_for(parts[1]);
+        if (peer == nullptr) {
+            return "ERR no-region";  // P0-4：绝不拿别的 region 的 peer 兜底写
+        }
+        const auto expect = peer->raft().last_index().value + 1;
         cmdpb::RaftCmdRequest req;
         req.mutable_header()->set_client_id(1);
         req.mutable_header()->set_sequence_id(expect);
@@ -401,20 +406,22 @@
         } else {
             return "ERR bad-request";
         }
-        auto accepted = peer.propose(req);
+        auto accepted = peer->propose(req);
         if (!accepted.has_value()) {
             return "ERR not-leader";
         }
         if (!*accepted) {
             // ARCH-1 P0-3：去重命中 = 该 (client,seq) 早已 apply 过，语义上已成功。
             // 这里不能再等 applied 追平 last_index+1——那个位点永远到不了。
-            peer.drop_reply(1, expect);  // 回收 propose 登记的合成回执
+            peer->drop_reply(1, expect);  // 回收 propose 登记的合成回执
             return "OK";
         }
-        if (!wait_applied_locked(peer, expect)) {
+        if (!wait_applied_locked(*peer, expect)) {
+            // code-review：超时必须回收回执，否则反复超时会累积（replies_ 无界增长）
+            peer->drop_reply(1, expect);
             return "ERR apply-timeout";
         }
-        peer.drop_reply(1, expect);  // 组合根轮询位点，不消费回执 → 显式回收
+        peer->drop_reply(1, expect);  // 组合根轮询位点，不消费回执 → 显式回收
         return "OK";
     }
 
@@ -426,16 +433,19 @@
         }
         auto gate = gate_for(false, key);  // ⑨a 分区闸：读只触碰 key 所属 region
         kv_reads_.fetch_add(1, std::memory_order_relaxed);
-        auto& peer = registry_->require(key);
+        auto* peer = registry_->peer_for(key);
+        if (peer == nullptr) {
+            return "{\"error\":\"no-region\"}";  // P0-4：不拿别的 region 兜底读
+        }
         // 线性一致读：ReadIndex 确认 + applied 追平后才读状态机（不再直接 leader 本地读）
         // 多副本下 pump 必须让出 CPU，否则心跳确认的 TCP 回包没机会到达 io_context 线程。
-        const auto ri = peer.wait_read_index(
+        const auto ri = peer->wait_read_index(
             [&] {
                 if (multi_voter()) {
                     pump_locked();
                     std::this_thread::yield();
                 } else {
-                    pump_peer_only(peer);  // ⑨a：分区闸下只泵本 peer
+                    pump_peer_only(*peer);  // ⑨a：分区闸下只泵本 peer
                 }
             },
             multi_voter() ? 200000 : 400,
@@ -449,7 +459,7 @@
         }
         read_index_reads_.fetch_add(1, std::memory_order_relaxed);
         // BUG-0004: raw 键走保留前缀，与 MVCC 的 user_key+8B ts 分属两个命名空间
-        auto got = peer.read_directly(Cf::Default, encode_raw_key(key));
+        auto got = peer->read_directly(Cf::Default, encode_raw_key(key));
         if (!got.has_value()) {
             return "{\"error\":\"" + std::string(tinykv::describe_kind(got.error())) + "\"}";
         }

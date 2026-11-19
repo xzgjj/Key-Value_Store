@@ -56,7 +56,8 @@ using PeerGateFn = std::function<PeerGateHandle(bool global, std::string_view ke
 
 class PeerTxnExecutor : public tinykv::txn::TxnExecutor {  // 非 final：测试适配器派生注入收敛策略
 public:
-    using PeerRef = std::function<tinykv::raftstore::Peer&(std::string_view key)>;
+    // P0-4：返回指针而不是引用——路由不到时必须能表达失败，不能拿别的 region 兜底
+    using PeerRef = std::function<tinykv::raftstore::Peer*(std::string_view key)>;
     using Pump = std::function<void(std::string_view key)>;
     using Applied = std::function<bool(std::string_view key, std::uint64_t index)>;
     using PeerList = std::function<std::vector<tinykv::raftstore::Peer*>()>;  // GC 广播用
@@ -78,7 +79,11 @@ public:
     [[nodiscard]] tinykv::result<std::optional<std::string>> get(std::string_view key,
                                                                  tinykv::Ts start_ts) override {
         auto gate = hold_gate(false, key);
-        auto& p = peer_(key);
+        auto pp = peer_ref(key);
+        if (!pp.has_value()) {
+            return tinykv::unexpected(pp.error());
+        }
+        auto& p = **pp;
         const auto ri = p.wait_read_index([&] { pump_(key); });
         if (!ri.has_value()) {
             return tinykv::unexpected(ri.error());
@@ -168,7 +173,11 @@ public:
     [[nodiscard]] tinykv::result<tinykv::txn::TxnStatus> check_txn_status(
         std::string_view primary, tinykv::Ts lock_start_ts, std::uint64_t now_ms) override {
         auto gate = hold_gate(false, primary);
-        auto& p = peer_(primary);
+        auto pp = peer_ref(primary);
+        if (!pp.has_value()) {
+            return tinykv::unexpected(pp.error());
+        }
+        auto& p = **pp;
         const auto ri = p.wait_read_index([&] { pump_(primary); });
         if (!ri.has_value()) {
             return tinykv::unexpected(ri.error());
@@ -184,7 +193,11 @@ public:
         std::string_view primary, tinykv::Ts lock_start_ts,
         std::optional<tinykv::Ts> commit_to) override {
         auto gate = hold_gate(true, {});  // 扫描跨全部 region：全局闸
-        auto& primary_peer = peer_(primary);
+        auto pp = peer_ref(primary);
+        if (!pp.has_value()) {
+            return tinykv::unexpected(pp.error());
+        }
+        auto& primary_peer = **pp;
         const auto ri = primary_peer.wait_read_index([&] { pump_(primary); });
         if (!ri.has_value()) {
             return tinykv::unexpected(ri.error());
@@ -343,10 +356,25 @@ private:
         return gate_(global, key);
     }
 
+    // P0-4：路由不到 peer 必须显式失败。旧 require() 空表解引用 end()（UB）、
+    // 非空表拿"随便一个 peer"兜底（请求写进错误 region，违反 REL-05）。
+    [[nodiscard]] tinykv::result<tinykv::raftstore::Peer*> peer_ref(std::string_view key) const {
+        auto* p = peer_(key);
+        if (p == nullptr) {
+            return tinykv::unexpected(tinykv::KeyNotInRegion{
+                .key = std::string(key), .region_id = tinykv::RegionId{0}});
+        }
+        return p;
+    }
+
     template <typename ProposeFn>
     tinykv::result<void> call_through_raft(std::string_view key, ProposeFn&& propose) {
         auto gate = hold_gate(false, key);  // 分区闸：提案只触碰 route_key 所属 peer
-        tinykv::raftstore::Peer& p = peer_(key);
+        auto pp = peer_ref(key);
+        if (!pp.has_value()) {
+            return tinykv::unexpected(pp.error());
+        }
+        auto& p = **pp;
         const auto expect = p.raft().last_index().value + 1;
         if (!propose(p)) {
             return tinykv::unexpected(

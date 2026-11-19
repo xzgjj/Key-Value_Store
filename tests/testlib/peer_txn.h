@@ -21,13 +21,14 @@ public:
     // region_of 可选：注入 key→region 路由后启用跨区护栏（ARCH-1 P0-1 的用例入口）
     explicit PeerTxnExecutor(PeerCluster& cluster, RegionOf region_of = {})
         : tinykv::server::PeerTxnExecutor(
-              [&cluster](std::string_view) -> tinykv::raftstore::Peer& {
+              [&cluster](std::string_view) -> tinykv::raftstore::Peer* {
                   const int idx = cluster.leader();
                   if (idx < 0) {
-                      ADD_FAILURE() << "事务执行需要 leader";
-                      return cluster.peer(0);
+                      // P0-4：路由失败必须显式表达（返回 nullptr → 执行器转 KeyNotInRegion），
+                      // 不再"假装成功"拿 0 号 peer 顶替。
+                      return nullptr;
                   }
-                  return cluster.peer(idx);
+                  return &cluster.peer(idx);
               },
               [&cluster](std::string_view) {
                   // 测试主动驱动：双泵 + 全组 tick（生产由 Worker 后台驱动）

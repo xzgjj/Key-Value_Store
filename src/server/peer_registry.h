@@ -131,15 +131,10 @@ public:
 
     [[nodiscard]] const std::vector<PeerId>& voters() const { return voters_; }
 
-    [[nodiscard]] raftstore::Peer& require(std::string_view key) const {
-        auto* p = peer_for(key);
-        if (p == nullptr) {
-            // 理论不可达（REL-05：每个 key 恰属一个 region）；保底返回首个 peer 避免解引用空
-            std::lock_guard lock(mu_);
-            return *slots_.begin()->second.peer;
-        }
-        return *p;
-    }
+    // 注意：这里刻意不再提供 require() 形式的"兜底返回引用"。
+    // 旧实现的两种情况都是缺陷：slots_ 为空时解引用 end()（未定义行为），
+    // 非空但 key 不属任何 region 时返回"随便一个 peer"，请求会写进错误的 region（违反 REL-05）。
+    // 调用方一律用 peer_for()/peer_by_id() 并显式处理 nullptr。
 
     [[nodiscard]] std::size_t size() const {
         std::lock_guard lock(mu_);

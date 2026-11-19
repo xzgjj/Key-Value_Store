@@ -146,4 +146,24 @@ TEST(PeerRegistryTest, OnSplitOnlyRegistersWithoutPumping) {
     EXPECT_TRUE(reg.close_all().has_value());
 }
 
+// code-review P0-4：peer_for 在 key 不属于任何 region 时必须返回 nullptr。
+// 旧 require() 在空表上解引用 end()（UB），非空表上则拿"随便一个 peer"兜底——
+// 请求会被写进错误 region（REL-05）。现在只保留显式 nullptr，由调用方处置。
+TEST(PeerRegistryTest, PeerForReturnsNullWhenKeyOutsideEveryRegion) {
+    TempDir tmp{"peer_registry_gap"};
+    tinykv::raftstore::StoreMeta meta;
+    RegionPeerRegistry reg(tmp.path(), meta);
+    // 空表：不得崩溃（旧实现在这里解引用 map::end()）
+    EXPECT_EQ(reg.peer_for("k"), nullptr);
+
+    // 只覆盖 ["a","m")：b 命中，z 落在空洞里
+    tinykv::raftstore::Region region{.id = RegionId{1}, .start_key = "a", .end_key = "m",
+                                     .peers = {}, .epoch = {1, 0}, .size_hint = 0};
+    ASSERT_TRUE(meta.add_region(region).has_value());
+    ASSERT_TRUE(reg.bootstrap(region).has_value());
+    EXPECT_NE(reg.peer_for("b"), nullptr);
+    EXPECT_EQ(reg.peer_for("z"), nullptr) << "空洞 key 必须显式返回空，不能拿别的 region 兜底";
+    EXPECT_TRUE(reg.close_all().has_value());
+}
+
 }  // namespace

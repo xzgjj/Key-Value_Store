@@ -296,11 +296,13 @@ private:
     // 事务面装配：执行器（按 key 路由）+ TSO 恢复基线 + 会话管理器。
     [[nodiscard]] result<void> mount_txn_locked() {
         // 三个回调都按 key 路由到目标 region 的 peer（executor 持闸调用，这里不再加锁）
+        // P0-4：路由回调返回指针；peer 缺失由 PeerTxnExecutor 显式转成 KeyNotInRegion
         exec_ = std::make_unique<PeerTxnExecutor>(
-            [this](std::string_view key) -> raftstore::Peer& { return registry_->require(key); },
+            [this](std::string_view key) -> raftstore::Peer* { return registry_->peer_for(key); },
             [this](std::string_view key) { pump_one(key); },
             [this](std::string_view key, std::uint64_t idx) {
-                return registry_->require(key).applied_at_least(idx);
+                auto* peer = registry_->peer_for(key);
+                return peer != nullptr && peer->applied_at_least(idx);
             },
             // ⑨a：闸提供者——执行器按操作类型取分区闸/全局闸（单区串行、跨区并行）
             [this](bool global, std::string_view key) { return gate_for(global, key); }, 400,
