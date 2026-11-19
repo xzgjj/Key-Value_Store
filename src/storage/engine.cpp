@@ -608,12 +608,18 @@ result<void> Engine::close() {
 }
 
 Engine::~Engine() {
-    // 析构不抛：尽力 flush，失败时数据仍在 WAL 里，下次 open 会重放出来
-    if (!closed_) {
-        std::lock_guard lock(mu_);
-        if (!closed_ && wal_ != nullptr && !mem_->empty()) {
-            (void)flush_locked();
+    // 析构不抛：尽力 flush，失败时数据仍在 WAL 里，下次 open 会重放出来。
+    // code-review：flush_locked 内部有 path/string/map 分配，bad_alloc 会让异常穿出析构
+    // （clang-tidy bugprone-exception-escape → std::terminate）。析构体整体兜住。
+    try {
+        if (!closed_) {
+            std::lock_guard lock(mu_);
+            if (!closed_ && wal_ != nullptr && !mem_->empty()) {
+                (void)flush_locked();
+            }
         }
+    } catch (...) {
+        // 无法在此报告：数据仍在 WAL，下次 open 重放
     }
 }
 

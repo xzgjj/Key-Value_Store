@@ -112,6 +112,8 @@ public:
         replies_.erase(std::pair{client_id, seq});
     }
     [[nodiscard]] std::size_t reply_count() const { return replies_.size(); }
+    // 观察点：在途快照接收组数（超时回收用例）
+    [[nodiscard]] std::size_t snapshot_recv_count() const { return snapshot_recvs_.size(); }
 
     // log 模式读：把 Get/Scan 作为提案走一遍共识，回执里带结果（PERF-03 的对比基线）
     [[nodiscard]] std::optional<cmdpb::RaftCmdResponse> take_read_reply(std::uint64_t client_id,
@@ -205,9 +207,13 @@ private:
         std::uint64_t term{0};
         std::uint32_t total{0};
         std::uint32_t received{0};
+        std::uint64_t last_tick{0};  // 最近一次收到块的 tick（超时回收用，code-review）
         std::vector<std::string> chunks;
         std::vector<bool> have;
     };
+    // 半截快照的超时回收：传输中断后接收缓存会一直占着（最大 512MB/peer）。
+    // 300 tick（Worker 默认 10ms → ~3s 无进展即丢弃）远大于正常分块间隔。
+    void reclaim_stale_snapshot_recvs();
     // 为该 target 建立/刷新发送状态（dump_snapshot + 序列化 + 切块参数）
     void begin_snapshot_send(PeerId target);
     // 按窗口把在途额度内的块发出去（流控：next - ack < kSnapshotWindow）
@@ -222,6 +228,7 @@ private:
 
     std::map<std::uint64_t, SnapshotSend> snapshot_sends_;  // peer_id → 发送游标
     std::map<std::uint64_t, SnapshotRecv> snapshot_recvs_;  // from peer_id → 接收缓存
+    std::uint64_t snapshot_tick_{0};  // Peer 自己维护的 tick 计数（快照接收超时基准）
     std::size_t snapshot_chunk_bytes_{4U * 1024U * 1024U};  // 默认 4MB（SPEC-3 D3-3）
 
     std::unique_ptr<raft::RaftLog> log_;

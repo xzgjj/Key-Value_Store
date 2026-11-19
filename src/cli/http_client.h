@@ -71,6 +71,21 @@ inline void set_nonblock(socket_t s, bool on) {
 }
 #endif
 
+// RAII 句柄：作用域退出必关 socket。旧实现每个错误分支手写 close，
+// 一旦在 socket() 之后新增可能抛异常的步骤（std::string 构造/追加），句柄就会漏。
+struct SocketGuard {
+    explicit SocketGuard(socket_t s) : fd(s) {}
+    ~SocketGuard() {
+        if (fd != kInvalidSocket) {
+            (void)close_socket(fd);
+        }
+    }
+    SocketGuard(const SocketGuard&) = delete;
+    SocketGuard& operator=(const SocketGuard&) = delete;
+
+    socket_t fd;
+};
+
 }  // namespace detail
 
 // 通用请求：GET 时 body 为空且不带 Content-Length；POST 时携带。
@@ -95,6 +110,7 @@ inline void set_nonblock(socket_t s, bool on) {
     if (fd == detail::kInvalidSocket) {
         return tinykv::unexpected(IoFailed{.path = host, .reason = "socket() 失败"});
     }
+    detail::SocketGuard socket_guard{fd};  // 所有错误/异常路径统一由它关闭
 
     // ---- connect：非阻塞 + select 写就绪（默认 5s）----
     detail::set_nonblock(fd, true);
@@ -127,7 +143,6 @@ inline void set_nonblock(socket_t s, bool on) {
         }
     }
     if (!connected) {
-        (void)detail::close_socket(fd);
         return tinykv::unexpected(
             IoFailed{.path = host, .reason = "连接失败/超时: " + std::to_string(port)});
     }
@@ -150,7 +165,6 @@ inline void set_nonblock(socket_t s, bool on) {
     std::size_t sent = 0;
     while (sent < req.size()) {
         if (remaining_ms() <= 0) {
-            (void)detail::close_socket(fd);
             return tinykv::unexpected(
                 IoFailed{.path = host, .reason = "发送超时（对端不收也不关连接）"});
         }
@@ -170,7 +184,6 @@ inline void set_nonblock(socket_t s, bool on) {
         }
         const int err = detail::last_error();
         if (err != detail::kWouldBlock) {
-            (void)detail::close_socket(fd);
             return tinykv::unexpected(
                 IoFailed{.path = host, .reason = "发送失败 code=" + std::to_string(err)});
         }
@@ -181,7 +194,6 @@ inline void set_nonblock(socket_t s, bool on) {
     char buf[4096];
     for (;;) {
         if (remaining_ms() <= 0) {
-            (void)detail::close_socket(fd);
             return tinykv::unexpected(IoFailed{
                 .path = host, .reason = "响应超时（对端不应答也不关连接）"});
         }
@@ -203,12 +215,10 @@ inline void set_nonblock(socket_t s, bool on) {
         }
         const int err = detail::last_error();
         if (err != detail::kWouldBlock) {
-            (void)detail::close_socket(fd);
             return tinykv::unexpected(IoFailed{
                 .path = host, .reason = "接收失败 code=" + std::to_string(err)});
         }
     }
-    (void)detail::close_socket(fd);
 
     const auto sep = raw.find("\r\n\r\n");
     if (sep == std::string::npos) {

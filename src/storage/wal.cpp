@@ -157,19 +157,25 @@ Wal::Wal(std::filesystem::path dir, bool fsync_on_commit, std::size_t segment_by
 }
 
 Wal::~Wal() {
-    // 先停后台提交者并等待其退出（绝不 detach），再把窗口内残留的写强制刷盘
-    stop_.store(true, std::memory_order_release);
-    {
-        std::lock_guard<std::mutex> lock(commit_mu_);  // 与提交者的 wait 用同一把锁，唤醒不丢
-    }
-    cv_.notify_all();
-    if (committer_.joinable()) {
-        committer_.join();
-    }
-    if (file_ != nullptr) {
-        (void)sync_locked();  // 析构尽力落盘；错误无法向调用者报告，但不影响 fclose
-        std::fclose(file_);
-        file_ = nullptr;
+    // 析构不抛（code-review）：join 可能抛 system_error，sync_locked 的错误路径会构造
+    // IoFailed 字符串——任何一个穿出都会 std::terminate。
+    try {
+        // 先停后台提交者并等待其退出（绝不 detach），再把窗口内残留的写强制刷盘
+        stop_.store(true, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lock(commit_mu_);  // 与提交者的 wait 用同一把锁，唤醒不丢
+        }
+        cv_.notify_all();
+        if (committer_.joinable()) {
+            committer_.join();
+        }
+        if (file_ != nullptr) {
+            (void)sync_locked();  // 析构尽力落盘；错误无法向调用者报告，但不影响 fclose
+            std::fclose(file_);
+            file_ = nullptr;
+        }
+    } catch (...) {
+        // 见上：尽力而为，绝不从析构抛出
     }
 }
 

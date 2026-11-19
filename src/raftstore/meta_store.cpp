@@ -9,6 +9,7 @@
 #include <utility>
 
 #include "common/crc32c.h"
+#include "common/file_handle.h"
 #include "raftstore/region.h"
 
 #ifdef _WIN32
@@ -90,20 +91,23 @@ std::string StoreMetaStore::encode(const std::vector<Region>& regions) {
 }
 
 result<std::vector<Region>> StoreMetaStore::parse_file(const std::filesystem::path& file) const {
-    std::FILE* f = std::fopen(file.string().c_str(), "rb");
-    if (f == nullptr) {
+    // RAII：raw.append 抛异常时句柄仍会释放（旧实现走不到 fclose）
+    FilePtr f(std::fopen(file.string().c_str(), "rb"));
+    if (!f) {
         return tinykv::unexpected(IoFailed{.path = file.string(), .reason = "fopen(rb) 失败"});
     }
     std::string raw;
     char buf[4096];
     for (;;) {
-        const std::size_t n = std::fread(buf, 1, sizeof(buf), f);
+        const std::size_t n = std::fread(buf, 1, sizeof(buf), f.get());
         raw.append(buf, n);
         if (n < sizeof(buf)) {
             break;
         }
     }
-    std::fclose(f);
+    if (std::ferror(f.get()) != 0) {
+        return tinykv::unexpected(IoFailed{.path = file.string(), .reason = "读取 meta 文件失败"});
+    }
 
     if (raw.size() < kMagic.size() + 4 + kTrailerBytes) {
         return tinykv::unexpected(Corrupted{.where = file.string(), .reason = "meta 文件过短"});

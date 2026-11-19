@@ -30,6 +30,9 @@ constexpr std::uint32_t kSnapshotWindow = 4;
 
 // 单次快照的接收上限：块数 × 块长不得越过它（拒收而非尝试分配）
 constexpr std::size_t kMaxSnapshotBytes = 512U * 1024U * 1024U;  // 512MB
+// 半截快照回收：连续 300 tick 没有新块即丢弃（传输中断不留缓存）；并发接收组数上限
+constexpr std::uint64_t kSnapshotRecvTimeoutTicks = 300;
+constexpr std::size_t kMaxSnapshotRecvs = 8;
 
 // proto 列族 → 存储层列族（唯一转换点；两侧定义见 proto/common.proto 与 common/encode.h）
 Cf to_cf(commonpb::CfName name) {
@@ -129,7 +132,22 @@ result<GetResult> Peer::get(Cf cf, std::string_view key) const {
 }
 
 void Peer::tick() {
+    ++snapshot_tick_;
+    reclaim_stale_snapshot_recvs();
     raft_->tick();
+}
+
+// code-review：传输中断后没有超时回收，半截快照（最多 512MB/peer）会一直占着内存。
+// 这里按 tick 计数回收——Peer::tick 由 Worker 周期驱动，无需墙钟，测试可复现。
+void Peer::reclaim_stale_snapshot_recvs() {
+    for (auto it = snapshot_recvs_.begin(); it != snapshot_recvs_.end();) {
+        const auto& recv = it->second;
+        if (snapshot_tick_ > recv.last_tick + kSnapshotRecvTimeoutTicks) {
+            it = snapshot_recvs_.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 std::vector<raftpb::Message> Peer::take_messages() {
@@ -781,7 +799,13 @@ result<void> Peer::handle_snapshot_chunk(const raftpb::Message& msg) {
             Corrupted{.where = "peer:snapshot-chunk", .reason = "块 CRC 不匹配"});
     }
     const PeerId from{msg.from()};
+    if (snapshot_recvs_.find(from.value) == snapshot_recvs_.end() &&
+        snapshot_recvs_.size() >= kMaxSnapshotRecvs) {
+        return tinykv::unexpected(
+            InvalidArgument{"并发快照接收组数超过上限（等待超时回收）"});
+    }
     auto& recv = snapshot_recvs_[from.value];
+    recv.last_tick = snapshot_tick_;  // 每次收到块都刷新，超时只回收"真无进展"的半截快照
     // code-review P1-4：total 来自网络且是 u32，不校验就按它分配内存——
     // 恶意/损坏的 leader 可以让接收端一次分配数 GB（bad_alloc 直接终止进程）。
     const auto max_chunks = static_cast<std::uint32_t>(kMaxSnapshotBytes / snapshot_chunk_bytes_);

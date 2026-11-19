@@ -18,6 +18,7 @@
 #endif
 
 #include "common/crc32c.h"
+#include "common/file_handle.h"
 #include "common/varint.h"
 
 namespace tinykv {
@@ -40,17 +41,18 @@ std::uint32_t read_u32(const char* p) {
 }
 
 bool read_file(const std::filesystem::path& path, std::string& out) {
-    std::FILE* f = std::fopen(path.string().c_str(), "rb");
-    if (f == nullptr) {
+    // RAII：out.append 抛 bad_alloc 时也会关闭句柄（旧实现会泄漏 FILE*）；
+    // 同时检查 ferror——把"读失败"当"文件较短"会让损坏的 SST 被当成空表。
+    FilePtr f(std::fopen(path.string().c_str(), "rb"));
+    if (!f) {
         return false;
     }
     std::array<char, 64 * 1024> buf{};
     std::size_t got = 0;
-    while ((got = std::fread(buf.data(), 1, buf.size(), f)) > 0) {
+    while ((got = std::fread(buf.data(), 1, buf.size(), f.get())) > 0) {
         out.append(buf.data(), got);
     }
-    std::fclose(f);
-    return true;
+    return std::ferror(f.get()) == 0;
 }
 
 // 解析 body：返回 false 表示结构非法（截断/长度越界/尾随垃圾）
@@ -157,18 +159,19 @@ result<void> SstWriter::finish() {
     // BUG-0012：先写临时名 → fsync → 改名为正式名。旧实现直接写正式名且只 fflush，
     // 短写会留下半截 .sst；清单缺失时引擎按目录扫描会把半截表当合法表加载 → Corrupted 启动失败。
     const auto tmp = path_.string() + ".tmp";
-    std::FILE* f = std::fopen(tmp.c_str(), "wb");
-    if (f == nullptr) {
+    // RAII：作用域退出必关闭（旧实现依赖手工 fclose，中途新增可能抛异常的步骤就会漏）
+    FilePtr f(std::fopen(tmp.c_str(), "wb"));
+    if (!f) {
         return tinykv::unexpected(IoFailed{.path = tmp, .reason = "fopen(wb) 失败"});
     }
-    const std::size_t written = std::fwrite(body_.data(), 1, body_.size(), f);
-    const bool flushed = std::fflush(f) == 0;
+    const std::size_t written = std::fwrite(body_.data(), 1, body_.size(), f.get());
+    const bool flushed = std::fflush(f.get()) == 0;
 #ifdef _WIN32
-    const bool synced = flushed && _commit(_fileno(f)) == 0;
+    const bool synced = flushed && _commit(_fileno(f.get())) == 0;
 #else
-    const bool synced = flushed && ::fdatasync(::fileno(f)) == 0;
+    const bool synced = flushed && ::fdatasync(::fileno(f.get())) == 0;
 #endif
-    std::fclose(f);
+    f.reset();  // 显式关闭：rename 前必须释放句柄（Windows 下打开的文件不能改名）
     if (written != body_.size() || !synced) {
         std::error_code ignored;
         std::filesystem::remove(tmp, ignored);  // 失败即删，不留半截文件

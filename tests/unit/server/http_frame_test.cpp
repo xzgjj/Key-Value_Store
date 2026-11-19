@@ -70,6 +70,36 @@ TEST(HttpFrameTest, MalformedQueryDoesNotKillDaemon) {
     EXPECT_NE(still->find("worker_cycles"), std::string::npos);
 }
 
+// code-review：畸形 Content-Length 曾被折成 0（等价"没有 body"），keep-alive 下会与
+// 客户端语义错位。现在必须明确拒绝（回 bad-request 并断连），且 daemon 继续服务。
+TEST(HttpFrameTest, MalformedContentLengthIsRejected) {
+    HttpFixture f;
+    asio::io_context ctx;
+    asio::ip::tcp::socket sock(ctx);
+    asio::error_code ec;
+    sock.connect({asio::ip::make_address("127.0.0.1"), f.app.status_port()}, ec);
+    ASSERT_FALSE(ec) << "连接 daemon 失败";
+    const std::string req =
+        "POST /kv/write HTTP/1.1\r\nHost: x\r\nContent-Length: abc\r\n\r\nput\ta\tb";
+    asio::write(sock, asio::buffer(req), ec);
+    ASSERT_FALSE(ec);
+
+    std::string raw;
+    std::array<char, 4096> buf{};
+    for (;;) {
+        const auto n = sock.read_some(asio::buffer(buf), ec);
+        if (ec || n == 0) {
+            break;
+        }
+        raw.append(buf.data(), n);
+    }
+    EXPECT_NE(raw.find("ERR bad-request"), std::string::npos)
+        << "畸形 Content-Length 必须拒绝，不能当 0 继续解析";
+    const auto alive = f.get("/status");
+    ASSERT_TRUE(alive.has_value()) << "拒绝畸形请求后 daemon 必须仍在服务";
+    EXPECT_NE(alive->find("worker_cycles"), std::string::npos);
+}
+
 TEST(HttpFrameTest, LargeBodyIsNotTruncated) {
     HttpFixture f;
     // BUG-0003: 2000 字节 value 曾被单次 1024 字节 read_some 静默截断为 863 字节却回 OK

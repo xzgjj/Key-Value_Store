@@ -46,34 +46,51 @@ std::string not_found(bool keep_alive) {
     return true;
 }
 
-[[nodiscard]] std::size_t parse_size(std::string_view value) {
+// 严格解析十进制长度：非数字/溢出/尾随空白以外的字符 → nullopt（畸形头必须拒绝，
+// 不能当 0——"有 body 但按 0 处理"会让 keep-alive 流错位到下一个请求）
+[[nodiscard]] std::optional<std::size_t> parse_size_checked(std::string_view value) {
     while (!value.empty() && value.front() == ' ') {
         value.remove_prefix(1);
     }
     std::size_t out = 0;
     const auto res = std::from_chars(value.data(), value.data() + value.size(), out, 10);
-    return res.ec == std::errc{} && res.ptr == value.data() + value.size() ? out : 0;
+    if (res.ec != std::errc{} || res.ptr != value.data() + value.size()) {
+        return std::nullopt;
+    }
+    return out;
 }
 
-// 头部里大小写不敏感地找 Content-Length；无异常解析，畸形值一律按 0 处理
-[[nodiscard]] std::size_t content_length_of(std::string_view header) {
+// 头部里大小写不敏感地找 Content-Length。返回 nullopt = 畸形（数字非法或重复头值冲突）；
+// 缺省 = 0。旧实现把畸形值折成 0，等价于"没有 body"，keep-alive 下与客户端语义错位。
+[[nodiscard]] std::optional<std::size_t> content_length_of(std::string_view header) {
     constexpr std::string_view key = "content-length:";
+    std::optional<std::size_t> seen;
     std::size_t pos = 0;
-    while ((pos = header.find('\n', pos)) != std::string_view::npos) {
-        ++pos;
-        const auto eol = header.find('\r', pos);
-        if (eol == std::string_view::npos || eol <= pos) {
-            continue;
+    // 按行切分（含最后一行）：调用方传入的 header 不含结尾 CRLF，
+    // 旧实现只认 "\n...\r" 形式，最后一个头行（常见正是 Content-Length）会被漏掉。
+    while (pos < header.size()) {
+        const auto eol = header.find('\n', pos);
+        const auto line_end = eol == std::string_view::npos ? header.size() : eol;
+        auto line = header.substr(pos, line_end - pos);
+        if (!line.empty() && line.back() == '\r') {
+            line.remove_suffix(1);
         }
-        auto line = header.substr(pos, eol - pos);
-        while (!line.empty() && line.front() == ' ') {
+        pos = eol == std::string_view::npos ? header.size() : eol + 1;
+        while (!line.empty() && (line.front() == ' ' || line.front() == '\t')) {
             line.remove_prefix(1);
         }
         if (starts_with_ci(line, key)) {
-            return parse_size(line.substr(key.size()));
+            auto parsed = parse_size_checked(line.substr(key.size()));
+            if (!parsed.has_value()) {
+                return std::nullopt;  // 畸形：拒绝而不是当 0
+            }
+            if (seen.has_value() && *seen != *parsed) {
+                return std::nullopt;  // 重复头且值冲突：请求走私风险，直接拒绝
+            }
+            seen = *parsed;
         }
     }
-    return 0;
+    return seen.value_or(0);
 }
 
 // BUG-0023/N-5：清道夫用的单调时钟毫秒值（连接活跃时间戳基准）
@@ -254,7 +271,15 @@ result<std::unique_ptr<StatusServer>> StatusServer::start(
         io_threads == 0 ? std::max<std::size_t>(1, std::thread::hardware_concurrency())
                         : io_threads;
     for (std::size_t i = 0; i < thread_count; ++i) {
-        server->threads_.emplace_back([raw = server.get()] { raw->ctx_.run(); });
+        // 回调里的 make_shared<string>(len) 等分配可能抛 bad_alloc：异常穿出线程函数
+        // 会直接 std::terminate（code-review）。包一层 catch，单线程退出、其余线程继续服务。
+        server->threads_.emplace_back([raw = server.get()] {
+            try {
+                raw->ctx_.run();
+            } catch (...) {
+                // io_context 仍由其它线程/析构收尾
+            }
+        });
     }
     // BUG-0023（N-5）：空闲连接清道夫——独立 OS 线程，0 = 不限时（显式禁用不启动）
     if (server->idle_timeout_.count() > 0) {
@@ -264,23 +289,29 @@ result<std::unique_ptr<StatusServer>> StatusServer::start(
 }
 
 StatusServer::~StatusServer() {
-    // 先停清道夫：它只碰 native shutdown 与 weak_ptr，与 io 线程无共享 asio 状态，
-    // 但必须先于 io_context 析构收尾（join 延迟 ≤ 一个扫描粒度）。
-    reaper_stop_.store(true, std::memory_order_release);
-    reaper_cv_.notify_all();
-    if (reaper_.joinable()) {
-        reaper_.join();
-    }
-    if (acceptor_ != nullptr) {
-        asio::error_code ec;
-        acceptor_->close(ec);
-    }
-    guard_.reset();
-    ctx_.stop();
-    for (auto& t : threads_) {
-        if (t.joinable()) {
-            t.join();  // 绝不 detach
+    // 析构不抛：join() 可能抛 std::system_error（重复 join/自 join），
+    // 穿出析构就是 std::terminate。收尾整体兜住。
+    try {
+        // 先停清道夫：它只碰 native shutdown 与 weak_ptr，与 io 线程无共享 asio 状态，
+        // 但必须先于 io_context 析构收尾（join 延迟 ≤ 一个扫描粒度）。
+        reaper_stop_.store(true, std::memory_order_release);
+        reaper_cv_.notify_all();
+        if (reaper_.joinable()) {
+            reaper_.join();
         }
+        if (acceptor_ != nullptr) {
+            asio::error_code ec;
+            acceptor_->close(ec);
+        }
+        guard_.reset();
+        ctx_.stop();
+        for (auto& t : threads_) {
+            if (t.joinable()) {
+                t.join();  // 绝不 detach
+            }
+        }
+    } catch (...) {
+        // 见上：不再抛出
     }
 }
 
@@ -349,10 +380,11 @@ StatusServer::FrameReader::State StatusServer::FrameReader::consume(std::string_
             return raw.size() > kMaxHeaderBytes ? State::Rejected : State::More;
         }
         header_end = at + 4;
-        body_need = content_length_of(std::string_view(raw).substr(0, at));
-        if (body_need > kMaxBodyBytes) {
-            return State::Rejected;
+        const auto parsed_len = content_length_of(std::string_view(raw).substr(0, at));
+        if (!parsed_len.has_value() || *parsed_len > kMaxBodyBytes) {
+            return State::Rejected;  // 畸形 Content-Length：明确拒绝，不猜成"没有 body"
         }
+        body_need = *parsed_len;
     }
     return raw.size() - header_end >= body_need ? State::Done : State::More;
 }

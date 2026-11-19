@@ -65,19 +65,31 @@ result<std::unique_ptr<TcpTransport>> TcpTransport::start(const TcpOptions& opt)
         std::make_unique<asio::executor_work_guard<asio::io_context::executor_type>>(
             transport->ctx_.get_executor());
     transport->accept_loop();
-    transport->thread_ = std::thread([raw = transport.get()] { raw->ctx_.run(); });
+    // 异常穿出线程函数 = std::terminate；帧处理里有 make_shared 分配，必须兜住
+    transport->thread_ = std::thread([raw = transport.get()] {
+        try {
+            raw->ctx_.run();
+        } catch (...) {
+            // 与 status_server 同款：单线程退出，收尾交给析构
+        }
+    });
     return transport;
 }
 
 TcpTransport::~TcpTransport() {
-    if (acceptor_ != nullptr) {
-        asio::error_code ec;
-        acceptor_->close(ec);
-    }
-    guard_.reset();  // 释放 work guard，run() 才会自然返回
-    ctx_.stop();
-    if (thread_.joinable()) {
-        thread_.join();  // 绝不 detach：线程生命周期由对象负责
+    // 析构不抛：join() 失败不能穿出析构
+    try {
+        if (acceptor_ != nullptr) {
+            asio::error_code ec;
+            acceptor_->close(ec);
+        }
+        guard_.reset();  // 释放 work guard，run() 才会自然返回
+        ctx_.stop();
+        if (thread_.joinable()) {
+            thread_.join();  // 绝不 detach：线程生命周期由对象负责
+        }
+    } catch (...) {
+        // 见上：不再抛出
     }
 }
 

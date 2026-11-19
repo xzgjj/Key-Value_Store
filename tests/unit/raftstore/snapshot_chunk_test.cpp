@@ -111,4 +111,52 @@ TEST(SnapshotChunk, CorruptChunkRejected) {
     EXPECT_TRUE(std::holds_alternative<tinykv::Corrupted>(r.error()));
 }
 
+// code-review：半截快照必须有超时回收。旧实现传输中断后接收缓存（最多 512MB/peer）
+// 会一直占着，长跑即内存泄漏。
+TEST(SnapshotChunk, StalePartialRecvIsReclaimedByTick) {
+    PeerCluster c(3);
+    ASSERT_TRUE(c.elect());
+    const int leader = c.leader();
+    ASSERT_GE(leader, 0);
+    int victim = -1;
+    for (int i = 0; i < c.size(); ++i) {
+        if (i != leader) {
+            victim = i;
+            break;
+        }
+    }
+    ASSERT_GE(victim, 0);
+    auto& peer = c.peer(victim);
+    ASSERT_EQ(peer.snapshot_recv_count(), 0U);
+
+    // 只发第一块（total=3）：接收缓存建立后在途，模拟传输中断
+    tinykv::raftpb::SnapshotChunk chunk;
+    chunk.set_snapshot_index(100);
+    chunk.set_snapshot_term(2);
+    chunk.set_total_chunks(3);
+    chunk.set_chunk_seq(0);
+    chunk.set_data("partial");
+    const auto crc = tinykv::crc32c(
+        tinykv::as_bytes(tinykv::span{chunk.data().data(), chunk.data().size()}));
+    chunk.set_crc32(crc);
+    tinykv::raftpb::Message msg;
+    msg.set_id(tinykv::raftpb::MSG_SNAPSHOT_CHUNK);
+    msg.set_term(peer.raft().term().value);
+    msg.set_from(tinykv::PeerId{99}.value);
+    msg.set_to(peer.id().value);
+    msg.set_snapshot_data(chunk.SerializeAsString());
+    ASSERT_TRUE(peer.step_message(msg).has_value());
+    ASSERT_EQ(peer.snapshot_recv_count(), 1U);
+
+    // 300 tick 内不回收（避免误伤"Just slow"的正常传输），301+ 后必须清掉
+    for (int i = 0; i < 300; ++i) {
+        peer.tick();
+    }
+    EXPECT_EQ(peer.snapshot_recv_count(), 1U);
+    for (int i = 0; i < 2; ++i) {
+        peer.tick();
+    }
+    EXPECT_EQ(peer.snapshot_recv_count(), 0U) << "半截快照必须在超时后释放";
+}
+
 }  // namespace

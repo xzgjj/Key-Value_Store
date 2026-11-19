@@ -103,4 +103,17 @@ TEST(LatchConcurrency, DuplicateKeysDeduped) {
     EXPECT_TRUE(again.holds_key("a") && again.holds_key("b"));
 }
 
+// code-review：槽表原本永不删除——每个出现过的 key 都常驻一个 shared_ptr<Slot>，
+// 长跑 + 大 key 空间会持续涨内存。guard 全部释放后空槽必须被回收。
+TEST(LatchConcurrency, EmptySlotsReclaimedAfterRelease) {
+    LatchManager latches;
+    EXPECT_EQ(latches.slot_count(), 0U);
+    {
+        auto guard = latches.acquire(std::vector<std::string>{"k1", "k2"});
+        EXPECT_EQ(latches.slot_count(), 2U);
+        EXPECT_TRUE(guard.holds_key("k1"));
+    }
+    EXPECT_EQ(latches.slot_count(), 0U) << "guard 释放后空槽必须回收，否则长跑内存无界增长";
+}
+
 }  // namespace

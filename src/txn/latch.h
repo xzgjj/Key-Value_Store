@@ -32,7 +32,11 @@ public:
     public:
         LatchGuard() = default;
         LatchGuard(LatchGuard&& other) noexcept
-            : slots_(std::move(other.slots_)), keys_(std::move(other.keys_)) {}
+            : owner_(other.owner_),
+              slots_(std::move(other.slots_)),
+              keys_(std::move(other.keys_)) {
+            other.owner_ = nullptr;  // 移动后源对象析构不得再回收槽表
+        }
         LatchGuard& operator=(LatchGuard&&) = delete;
         LatchGuard(const LatchGuard&) = delete;
         LatchGuard& operator=(const LatchGuard&) = delete;
@@ -42,6 +46,12 @@ public:
             for (auto it = slots_.rbegin(); it != slots_.rend(); ++it) {
                 (*it)->mu.unlock();
             }
+            // 槽表回收（code-review：slots_ 原本永不删除，长跑 + 大 key 空间会持续涨内存）。
+            // 先释放本 guard 的 shared_ptr，再让 manager 摘掉"只有 map 还持有"的空槽。
+            slots_.clear();
+            if (owner_ != nullptr) {
+                owner_->reap_empty();
+            }
         }
 
         // 观察点（latch_concurrency_test 用）：本 guard 是否持有该 key
@@ -50,9 +60,11 @@ public:
         }
 
         // keys_ 构造后不可变：holds_key 免锁直读（观察点）
-        LatchGuard(std::vector<std::shared_ptr<Slot>> slots, std::vector<std::string> keys)
-            : slots_(std::move(slots)), keys_(std::move(keys)) {}
+        LatchGuard(LatchManager* owner, std::vector<std::shared_ptr<Slot>> slots,
+                   std::vector<std::string> keys)
+            : owner_(owner), slots_(std::move(slots)), keys_(std::move(keys)) {}
 
+        LatchManager* owner_{nullptr};  // 析构时回调回收空槽（声明序须在 slots_ 前）
         std::vector<std::shared_ptr<Slot>> slots_;  // 已加锁的槽（按 key 排序）
         std::vector<std::string> keys_;
     };
@@ -78,11 +90,32 @@ public:
         for (auto& slot : slots) {
             slot->mu.lock();  // 全序加锁：不可能成环（无死锁的结构性保证）
         }
-        return LatchGuard(std::move(slots), std::move(sorted));
+        return LatchGuard(this, std::move(slots), std::move(sorted));
+    }
+
+    // 观察点（latch 生命周期用例）：当前槽表大小。guard 全部释放后应回到 0。
+    [[nodiscard]] std::size_t slot_count() const {
+        std::lock_guard lock(mu_);
+        return slots_.size();
     }
 
 private:
-    std::mutex mu_;
+    friend class LatchGuard;
+
+    // 摘除"只有槽表还持有"的空槽（use_count==1）。调用方已释放自己的 shared_ptr，
+    // 且加锁后其它线程不可能正在使用该槽（它们的 acquire 会在 mu_ 上排队）。
+    void reap_empty() {
+        std::lock_guard lock(mu_);
+        for (auto it = slots_.begin(); it != slots_.end();) {
+            if (it->second.use_count() == 1) {
+                it = slots_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    mutable std::mutex mu_;
     std::map<std::string, std::shared_ptr<Slot>> slots_;
 };
 

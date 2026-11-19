@@ -473,8 +473,14 @@
     [[nodiscard]] inline  std::string ServerApp::intercepted(const std::string& method, const std::string& path,
                                           const std::string& key, Fn&& fn) {
         auto ev = interceptors_.begin(method, path, key);
-        auto out = fn();
-        const bool ok = !out.empty() && out.rfind("ERR", 0) != 0;
-        interceptors_.finish(ev, ok, ok ? std::string{"OK"} : out.substr(0, 48));
-        return out;
+        // code-review：fn() 抛异常时 finish 也必须执行，否则 metrics/trace 丢事件。
+        try {
+            auto out = fn();
+            const bool ok = !out.empty() && out.rfind("ERR", 0) != 0;
+            interceptors_.finish(ev, ok, ok ? std::string{"OK"} : out.substr(0, 48));
+            return out;
+        } catch (...) {
+            interceptors_.finish(ev, false, std::string{"exception"});
+            throw;
+        }
     }
