@@ -2,11 +2,7 @@
 
 > 用现代 C++23 从零实现的 mini-TiKV：单机 KV → Raft → Multi-Raft → Percolator 分布式事务，  服务端、命令行、嵌入 API 三件套齐备，正确性由 83 个 ctest 与 CI 门禁背书。
 
-![TinyKV-CI](https://github.com/xzgjj/Key-Value_Store/actions/workflows/ci.yml/badge.svg?branch=main)
-
-![C++23](https://img.shields.io/badge/C%2B%2B-23-blue)
-
-![License](https://img.shields.io/badge/license-Apache--2.0-blue)
+![TinyKV-CI](https://github.com/xzgjj/Key-Value_Store/actions/workflows/ci.yml/badge.svg?branch=main) ![C++23](https://img.shields.io/badge/C%2B%2B-23-blue) ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 
 - 系统级项目，把 TiKV 的核心链路  ——自研存储引擎、Raft 共识、Multi-Raft 分片、Percolator 事务——压缩到一万行量级，  
 
@@ -38,7 +34,7 @@
 
 **不追求**：不跟 TiKV/etcd 比生产成熟度。多租户、在线升级、安全鉴权、十万级 Region 调度都不在范围内；这个项目要回答的是"内核骨架到底怎么造"，而不是"怎么撑住一个云上的集群"。
 
-
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 - 目前项目对多节点的测试受限于设备情况进行不够充分，可能存在以下盲区
 
