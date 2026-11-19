@@ -60,6 +60,16 @@ std::string not_found(bool keep_alive) {
     return out;
 }
 
+// io_context 线程入口：回调里的分配异常若穿出线程函数会 std::terminate（code-review），
+// 统一在这里兜住；拆成函数也让 StatusServer::open 的体量守住 80 行门禁。
+void run_io_loop(asio::io_context& ctx) noexcept {
+    try {
+        ctx.run();
+    } catch (...) {
+        // 单线程退出；其余线程/析构继续收尾
+    }
+}
+
 // 头部里大小写不敏感地找 Content-Length。返回 nullopt = 畸形（数字非法或重复头值冲突）；
 // 缺省 = 0。旧实现把畸形值折成 0，等价于"没有 body"，keep-alive 下与客户端语义错位。
 [[nodiscard]] std::optional<std::size_t> content_length_of(std::string_view header) {
@@ -272,14 +282,8 @@ result<std::unique_ptr<StatusServer>> StatusServer::start(
                         : io_threads;
     for (std::size_t i = 0; i < thread_count; ++i) {
         // 回调里的 make_shared<string>(len) 等分配可能抛 bad_alloc：异常穿出线程函数
-        // 会直接 std::terminate（code-review）。包一层 catch，单线程退出、其余线程继续服务。
-        server->threads_.emplace_back([raw = server.get()] {
-            try {
-                raw->ctx_.run();
-            } catch (...) {
-                // io_context 仍由其它线程/析构收尾
-            }
-        });
+        // 会直接 std::terminate。run_io_loop 内统一兜住。
+        server->threads_.emplace_back([raw = server.get()] { run_io_loop(raw->ctx_); });
     }
     // BUG-0023（N-5）：空闲连接清道夫——独立 OS 线程，0 = 不限时（显式禁用不启动）
     if (server->idle_timeout_.count() > 0) {

@@ -70,6 +70,10 @@ bool parse_body(std::string_view body, std::vector<SstEntry>& out) {
             return false;
         }
         const auto kind = static_cast<std::uint8_t>(body[pos++]);
+        // kind 只允许 0（有值）/1（墓碑）：其它值说明文件损坏，按"删除"处理会静默丢数据
+        if (kind > 1) {
+            return false;
+        }
         std::uint64_t vlen = 0;
         if (!get_varint(body, pos, vlen) || vlen > body.size() - pos) {
             return false;
@@ -78,6 +82,10 @@ bool parse_body(std::string_view body, std::vector<SstEntry>& out) {
             e.value = std::string(body.substr(pos, static_cast<std::size_t>(vlen)));
         }
         pos += static_cast<std::size_t>(vlen);
+        // 严格升序是二分查找 find() 的正确性前提：乱序表会让查找返回错误结果
+        if (!out.empty() && !(out.back().key < e.key)) {
+            return false;
+        }
         out.push_back(std::move(e));
     }
     return true;
@@ -131,10 +139,11 @@ result<void> SstWriter::add(std::string key, std::optional<std::string> value) {
     if (finished_) {
         return tinykv::unexpected(InvalidArgument{"finish() 之后不可再 add"});
     }
-    if (!last_key_.empty() && key <= last_key_) {
+    if (has_last_key_ && key <= last_key_) {
         return tinykv::unexpected(InvalidArgument{"SST 要求 key 严格升序，实际逆序或重复：" + key});
     }
     last_key_ = key;
+    has_last_key_ = true;
     put_varint(body_, key.size());
     body_.append(key);
     body_.push_back(value.has_value() ? 0 : 1);

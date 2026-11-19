@@ -235,9 +235,18 @@ result<void> Peer::install_snapshot(const raftpb::SnapshotData& data) {
     ModifyVec batch;
     std::map<std::pair<std::uint32_t, std::string>, bool> incoming;
     for (const raftpb::SnapshotKv& kv : data.kvs()) {
+        // code-review：cf 来自网络，不校验就强转会截成 1 字节 CF；空 key 也会流到存储层
+        const auto cf = static_cast<Cf>(kv.cf());
+        if (!is_valid_cf(cf)) {
+            return tinykv::unexpected(
+                Corrupted{.where = "peer:snapshot", .reason = "快照含非法 CF"});
+        }
+        if (kv.key().empty()) {
+            return tinykv::unexpected(
+                Corrupted{.where = "peer:snapshot", .reason = "快照含空 key"});
+        }
         incoming[{kv.cf(), kv.key()}] = true;
-        batch.push_back(
-            Modify{Put{.cf = static_cast<Cf>(kv.cf()), .key = kv.key(), .value = kv.value()}});
+        batch.push_back(Modify{Put{.cf = cf, .key = kv.key(), .value = kv.value()}});
     }
     // 删除本地有、快照无的键：只覆盖不删除，分叉日志留下的脏键会永久残留
     auto walk = for_each_entry([&](Cf cf, const std::string& key, const std::string&) {

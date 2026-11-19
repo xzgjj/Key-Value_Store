@@ -290,7 +290,13 @@ result<std::vector<std::string>> Engine::load_manifest() const {
     // 清单缺失或为空：回落到目录扫描。清单只是目录的缓存，sst/ 里的文件才是事实，
     // 这样即使清单改名窗口被打断也不会把已有表当成不存在（宁可多载，不可漏载）。
     std::error_code ec;
-    for (const auto& entry : std::filesystem::directory_iterator(sst_dir_, ec)) {
+    std::filesystem::directory_iterator it(sst_dir_, ec);
+    if (ec) {
+        // 忽略 ec 会让"目录不可读"表现为"没有 SST"，旧数据看起来凭空消失
+        return tinykv::unexpected(
+            IoFailed{.path = sst_dir_.string(), .reason = "扫描 SST 目录失败: " + ec.message()});
+    }
+    for (const auto& entry : it) {
         if (entry.is_regular_file() && entry.path().extension() == ".sst") {
             names.push_back(entry.path().filename().string());
         }
@@ -335,10 +341,16 @@ result<void> Engine::write_manifest(const std::vector<std::string>& names) const
 result<void> Engine::recover() {
     std::error_code ec;
     std::filesystem::create_directories(sst_dir_, ec);
-    std::filesystem::create_directories(wal_dir_, ec);
     if (ec) {
         return tinykv::unexpected(
-            IoFailed{.path = opt_.dir.string(), .reason = "创建数据目录失败"});
+            IoFailed{.path = sst_dir_.string(), .reason = "创建 sst 目录失败: " + ec.message()});
+    }
+    // 两次调用必须用各自的 ec：复用时第二次成功会清掉第一次的失败
+    std::error_code wal_ec;
+    std::filesystem::create_directories(wal_dir_, wal_ec);
+    if (wal_ec) {
+        return tinykv::unexpected(
+            IoFailed{.path = wal_dir_.string(), .reason = "创建 wal 目录失败: " + wal_ec.message()});
     }
 
     auto names = load_manifest();

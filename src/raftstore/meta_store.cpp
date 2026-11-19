@@ -174,8 +174,20 @@ result<bool> StoreMetaStore::load() {
     }
     const auto main_file = dir_ / kFileName;
     const auto backup = dir_ / kBackupName;
-    if (!std::filesystem::exists(main_file, ec)) {
-        if (std::filesystem::exists(backup, ec)) {
+    // code-review：exists 的 ec 不能忽略——IO 错误会被当成"首次启动"，重建 region 1 覆盖真相
+    const bool main_exists = std::filesystem::exists(main_file, ec);
+    if (ec) {
+        return tinykv::unexpected(
+            IoFailed{.path = main_file.string(), .reason = "探测 meta 文件失败: " + ec.message()});
+    }
+    if (!main_exists) {
+        ec.clear();
+        const bool backup_exists = std::filesystem::exists(backup, ec);
+        if (ec) {
+            return tinykv::unexpected(IoFailed{.path = backup.string(),
+                                               .reason = "探测 meta 备份失败: " + ec.message()});
+        }
+        if (backup_exists) {
             // 主文件缺失但备份在：说明上次改名窗口被打断，用备份（"不许猜"的合法形态）
             auto regions = parse_file(backup);
             if (!regions.has_value()) {
@@ -192,7 +204,13 @@ result<bool> StoreMetaStore::load() {
     }
     auto regions = parse_file(main_file);
     if (!regions.has_value()) {
-        if (!std::filesystem::exists(backup, ec)) {
+        ec.clear();
+        const bool backup_exists = std::filesystem::exists(backup, ec);
+        if (ec) {
+            return tinykv::unexpected(IoFailed{.path = backup.string(),
+                                               .reason = "探测 meta 备份失败: " + ec.message()});
+        }
+        if (!backup_exists) {
             return tinykv::unexpected(regions.error());  // 无备份可退：明确失败
         }
         auto from_backup = parse_file(backup);
@@ -218,13 +236,13 @@ result<void> StoreMetaStore::persist() {
     }
     const auto payload = encode(meta_.all_regions());
     const auto tmp = dir_ / (std::string(kFileName) + ".tmp");
-    std::FILE* f = std::fopen(tmp.string().c_str(), "wb");
-    if (f == nullptr) {
+    FilePtr f(std::fopen(tmp.string().c_str(), "wb"));
+    if (!f) {
         return tinykv::unexpected(IoFailed{.path = tmp.string(), .reason = "fopen(wb) 失败"});
     }
-    const std::size_t written = std::fwrite(payload.data(), 1, payload.size(), f);
-    const bool synced = std::fflush(f) == 0 && raw_fsync(f) == 0;
-    std::fclose(f);
+    const std::size_t written = std::fwrite(payload.data(), 1, payload.size(), f.get());
+    const bool synced = std::fflush(f.get()) == 0 && raw_fsync(f.get()) == 0;
+    f.reset();
     if (written != payload.size() || !synced) {
         std::filesystem::remove(tmp, ec);
         return tinykv::unexpected(
@@ -233,7 +251,13 @@ result<void> StoreMetaStore::persist() {
     const auto main_file = dir_ / kFileName;
     const auto backup = dir_ / kBackupName;
     // 旧版先留成 .bak：新文件损坏时还有上一版可用（红线 4 的物质基础）
-    if (std::filesystem::exists(main_file, ec)) {
+    const bool main_exists = std::filesystem::exists(main_file, ec);
+    if (ec) {
+        return tinykv::unexpected(
+            IoFailed{.path = main_file.string(), .reason = "探测 meta 文件失败: " + ec.message()});
+    }
+    if (main_exists) {
+        ec.clear();
         std::filesystem::remove(backup, ec);
         std::filesystem::rename(main_file, backup, ec);
         if (ec) {

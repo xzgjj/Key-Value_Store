@@ -61,6 +61,7 @@ private:
     std::filesystem::path path_;
     std::string body_;
     std::string last_key_;
+    bool has_last_key_{false};  // 空 key 是合法字节串，不能拿 last_key_.empty() 当"没有上一条"
     std::uint32_t count_{0};
     bool finished_{false};
 };

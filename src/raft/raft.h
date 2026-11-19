@@ -135,6 +135,8 @@ private:
     void send_append(PeerId to);
     void advance_commit();
 
+    // 消息分派（从 step 拆出：圈复杂度门禁 15，step 只保留"失败态/任期"两个检查）
+    [[nodiscard]] result<void> dispatch(const raftpb::Message& msg);
     [[nodiscard]] result<void> handle_append(const raftpb::Message& msg);
     [[nodiscard]] result<void> merge_entries(const raftpb::Message& msg);
     void reject_append(PeerId to, std::uint64_t index, std::uint64_t log_term);

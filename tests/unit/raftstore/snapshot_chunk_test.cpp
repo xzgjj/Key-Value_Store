@@ -21,19 +21,24 @@ namespace {
 
 using namespace tinykv::testlib;  // NOLINT(google-build-using-namespace)
 
+// 取一个非 leader 节点作为落后副本/快照接收方（多个用例共用，避免复制粘贴）
+int pick_follower(PeerCluster& c) {
+    const int leader = c.leader();
+    for (int i = 0; i < c.size(); ++i) {
+        if (i != leader) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 // 用多块路径追平：落后节点在日志压缩后只能靠分块快照追上
 TEST(SnapshotChunk, LaggingFollowerCatchesUpViaChunks) {
     PeerCluster c(3);
     ASSERT_TRUE(c.elect());
     const int leader = c.leader();
     ASSERT_GE(leader, 0);
-    int victim = -1;
-    for (int i = 0; i < c.size(); ++i) {
-        if (i != leader) {
-            victim = i;
-            break;
-        }
-    }
+    const int victim = pick_follower(c);
     ASSERT_GE(victim, 0);
     // 强制小块：每条 kv 都跨多块，覆盖 seq 组装与窗口流控
     for (int i = 0; i < c.size(); ++i) {
@@ -116,15 +121,7 @@ TEST(SnapshotChunk, CorruptChunkRejected) {
 TEST(SnapshotChunk, StalePartialRecvIsReclaimedByTick) {
     PeerCluster c(3);
     ASSERT_TRUE(c.elect());
-    const int leader = c.leader();
-    ASSERT_GE(leader, 0);
-    int victim = -1;
-    for (int i = 0; i < c.size(); ++i) {
-        if (i != leader) {
-            victim = i;
-            break;
-        }
-    }
+    const int victim = pick_follower(c);
     ASSERT_GE(victim, 0);
     auto& peer = c.peer(victim);
     ASSERT_EQ(peer.snapshot_recv_count(), 0U);
@@ -157,6 +154,34 @@ TEST(SnapshotChunk, StalePartialRecvIsReclaimedByTick) {
         peer.tick();
     }
     EXPECT_EQ(peer.snapshot_recv_count(), 0U) << "半截快照必须在超时后释放";
+}
+
+// code-review（第三批）：快照里的 cf 是网络输入，必须校验后再强转；
+// 未校验时任意整数会被截成 1 字节 CF，数据落进未知列族。
+TEST(SnapshotChunk, InvalidCfInSnapshotRejected) {
+    PeerCluster c(3);
+    ASSERT_TRUE(c.elect());
+    const int victim = pick_follower(c);
+    ASSERT_GE(victim, 0);
+    auto& peer = c.peer(victim);
+
+    tinykv::raftpb::SnapshotData data;
+    auto* kv = data.add_kvs();
+    kv->set_cf(9);  // 非法 CF
+    kv->set_key("k");
+    kv->set_value("v");
+    tinykv::raftpb::Message msg;
+    msg.set_id(tinykv::raftpb::MSG_SNAPSHOT);
+    msg.set_term(peer.raft().term().value);
+    msg.set_from(tinykv::PeerId{99}.value);
+    msg.set_to(peer.id().value);
+    msg.set_index(10);
+    msg.set_log_term(1);
+    msg.set_snapshot_data(data.SerializeAsString());
+
+    auto r = peer.step_message(msg);
+    ASSERT_FALSE(r.has_value());
+    EXPECT_TRUE(std::holds_alternative<tinykv::Corrupted>(r.error()));
 }
 
 }  // namespace

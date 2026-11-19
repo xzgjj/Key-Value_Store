@@ -41,6 +41,23 @@ std::vector<Mutation> put(const std::string& key, const std::string& value) {
     return {Mutation{.op = Mutation::Op::kPut, .key = key, .value = value}};
 }
 
+// 直接写 n 个 Write 版本 + 对应 Default 数据（扫描上限用例共用）
+void write_versions(tinykv::Engine& engine, std::size_t n, const std::string& key) {
+    tinykv::ModifyVec batch;
+    batch.reserve(n * 2);
+    for (std::size_t i = 1; i <= n; ++i) {
+        batch.push_back(tinykv::Modify{tinykv::Put{
+            .cf = tinykv::Cf::Write,
+            .key = tinykv::txn::write_key(key, tinykv::Ts{i}),
+            .value = tinykv::txn::be64_str(i)}});
+        batch.push_back(tinykv::Modify{tinykv::Put{
+            .cf = tinykv::Cf::Default,
+            .key = tinykv::txn::data_key(key, tinykv::Ts{i}),
+            .value = "v" + std::to_string(i)}});
+    }
+    ASSERT_TRUE(engine.write(batch).has_value());
+}
+
 TEST(MvccTxnTest, PrewriteCommitReadRoundTrip) {
     Fixture f;
     auto t = f.txn();
@@ -217,19 +234,7 @@ TEST(MvccTxnTest, PrewriteRejectsEmptyValue) {
 TEST(MvccTxnTest, WriteVersionScanOverLimitReportsError) {
     Fixture f;
     constexpr std::size_t kVersions = 4097;  // 超过 kScanLimit=4096 一条
-    tinykv::ModifyVec batch;
-    batch.reserve(kVersions);
-    for (std::size_t i = 1; i <= kVersions; ++i) {
-        batch.push_back(tinykv::Modify{tinykv::Put{
-            .cf = tinykv::Cf::Write,
-            .key = tinykv::txn::write_key("hot", tinykv::Ts{i}),
-            .value = tinykv::txn::be64_str(i)}});
-        batch.push_back(tinykv::Modify{tinykv::Put{
-            .cf = tinykv::Cf::Default,
-            .key = tinykv::txn::data_key("hot", tinykv::Ts{i}),
-            .value = "v" + std::to_string(i)}});
-    }
-    ASSERT_TRUE(f.engine->write(batch).has_value());
+    write_versions(*f.engine, kVersions, "hot");
 
     auto t = f.txn();
     auto got = t.get("hot", tinykv::Ts{kVersions + 10});
@@ -246,19 +251,7 @@ TEST(MvccTxnTest, WriteVersionScanOverLimitReportsError) {
 TEST(MvccTxnTest, WriteVersionScanAtLimitStillReads) {
     Fixture f;
     constexpr std::size_t kVersions = 4096;
-    tinykv::ModifyVec batch;
-    batch.reserve(kVersions);
-    for (std::size_t i = 1; i <= kVersions; ++i) {
-        batch.push_back(tinykv::Modify{tinykv::Put{
-            .cf = tinykv::Cf::Write,
-            .key = tinykv::txn::write_key("hot", tinykv::Ts{i}),
-            .value = tinykv::txn::be64_str(i)}});
-        batch.push_back(tinykv::Modify{tinykv::Put{
-            .cf = tinykv::Cf::Default,
-            .key = tinykv::txn::data_key("hot", tinykv::Ts{i}),
-            .value = "v" + std::to_string(i)}});
-    }
-    ASSERT_TRUE(f.engine->write(batch).has_value());
+    write_versions(*f.engine, kVersions, "hot");
 
     auto t = f.txn();
     auto got = t.get("hot", tinykv::Ts{kVersions + 10});

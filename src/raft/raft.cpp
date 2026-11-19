@@ -280,6 +280,14 @@ result<void> Raft::step(const raftpb::Message& msg) {
             return ok;
         }
     }
+    if (auto r = dispatch(msg); !r) {
+        return r;
+    }
+    // 分支内部的持久化失败统一在这里上抛（不把错误吞成"消息处理成功"）
+    return check_failed();
+}
+
+result<void> Raft::dispatch(const raftpb::Message& msg) {
     switch (msg.id()) {
         case raftpb::MSG_HUP:
             campaign();
@@ -315,8 +323,7 @@ result<void> Raft::step(const raftpb::Message& msg) {
             // proto 枚举带哨兵值，必须显式兜底
             return tinykv::unexpected(InvalidArgument{"未知消息类型"});
     }
-    // 分支内部的持久化失败统一在这里上抛（不把错误吞成"消息处理成功"）
-    return check_failed();
+    return {};
 }
 
 result<void> Raft::propose(std::string data) {

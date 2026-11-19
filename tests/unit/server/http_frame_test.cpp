@@ -100,6 +100,22 @@ TEST(HttpFrameTest, MalformedContentLengthIsRejected) {
     EXPECT_NE(alive->find("worker_cycles"), std::string::npos);
 }
 
+// code-review（第三批）：query 里的 key 必须能承载空格/& 等字符。
+// 旧实现客户端不编码、服务端不解码，key 里的 '&' 会被 query 语法截断成另一个 key。
+TEST(HttpFrameTest, QueryKeyIsPercentDecoded) {
+    HttpFixture f;
+    const std::string key = "a b&c=d";
+    const auto put = f.post("/kv", "put\t" + key + "\tv1");
+    ASSERT_TRUE(put.has_value());
+    ASSERT_NE(put->find("OK"), std::string::npos);
+
+    // 手工按 RFC 3986 编码（CLI 的 url_encode 同款口径）
+    const auto body = f.get("/kv?key=a%20b%26c%3Dd&mode=read_index");
+    ASSERT_TRUE(body.has_value());
+    EXPECT_NE(body->find("\"found\":true"), std::string::npos) << *body;
+    EXPECT_NE(body->find("v1"), std::string::npos) << *body;
+}
+
 TEST(HttpFrameTest, LargeBodyIsNotTruncated) {
     HttpFixture f;
     // BUG-0003: 2000 字节 value 曾被单次 1024 字节 read_some 静默截断为 863 字节却回 OK

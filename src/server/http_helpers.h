@@ -44,6 +44,32 @@ namespace tinykv::server::http {
     return parts;
 }
 
+// 百分号解码（%XX / '+'）。客户端必须 encode，否则含空格/&/=/非 ASCII 的 key
+// 会被 query 语法截断——旧实现客户端与服务端都不编码，key 里的 '&' 会凭空消失。
+[[nodiscard]] inline std::string url_decode(std::string_view s) {
+    auto hex = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    std::string out;
+    out.reserve(s.size());
+    for (std::size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '%' && i + 2 < s.size()) {
+            const int hi = hex(s[i + 1]);
+            const int lo = hex(s[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                out.push_back(static_cast<char>((hi << 4) | lo));
+                i += 2;
+                continue;
+            }
+        }
+        out.push_back(s[i] == '+' ? ' ' : s[i]);
+    }
+    return out;
+}
+
 [[nodiscard]] inline std::string http_query_param(const std::string& query,
                                                    const std::string& name) {
     std::size_t begin = 0;
@@ -52,7 +78,7 @@ namespace tinykv::server::http {
         const auto item = query.substr(begin, at == std::string::npos ? at : at - begin);
         const auto eq = item.find('=');
         if (eq != std::string::npos && item.substr(0, eq) == name) {
-            return item.substr(eq + 1);
+            return url_decode(item.substr(eq + 1));
         }
         if (at == std::string::npos) {
             break;

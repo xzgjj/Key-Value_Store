@@ -69,6 +69,26 @@ std::string_view usage() {
            "  --help                   显示本帮助\n";
 }
 
+// query 值编码：key/session 里的空格、'&'、'=' 直接拼进 URL 会被服务端截断
+std::string url_encode(std::string_view in) {
+    static constexpr char kHex[] = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(in.size());
+    for (const unsigned char c : in) {
+        const bool unreserved = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                                (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' ||
+                                c == '~';
+        if (unreserved) {
+            out.push_back(static_cast<char>(c));
+        } else {
+            out.push_back('%');
+            out.push_back(kHex[c >> 4]);
+            out.push_back(kHex[c & 0x0F]);
+        }
+    }
+    return out;
+}
+
 std::optional<Cf> parse_cf(std::string_view name) {
     if (name == "default") {
         return Cf::Default;
@@ -439,7 +459,8 @@ int txn_get(const Globals& g, const std::vector<std::string>& pos, std::ostream&
         err << "txn 子命令需要 --endpoint <host:port>；用法见 txn --help\n";
         return kExitUsage;
     }
-    auto body = http_get(host, port, "/txn/get?session=" + pos[2] + "&key=" + pos[3]);
+    auto body = http_get(host, port, "/txn/get?session=" + url_encode(pos[2]) +
+                                       "&key=" + url_encode(pos[3]));
     if (!body) {
         err << "get 失败：" << describe(body.error()) << "\n";
         return kExitRuntime;
@@ -522,7 +543,7 @@ int cmd_cluster_read(const Globals& g, const std::string& cmd, const std::vector
             err << "用法: get <key>\n";
             return kExitUsage;
         }
-        path = "/kv?key=" + pos[1] + "&mode=" + g.read_mode;
+        path = "/kv?key=" + url_encode(pos[1]) + "&mode=" + g.read_mode;
     }
     auto body = http_get(host, port, path);
     if (!body) {

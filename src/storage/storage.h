@@ -27,13 +27,14 @@ namespace tinykv {
 
 // 一次写操作；cf 与 user_key 都未编码，编码在存储层内部完成（调用方不拼前缀）
 struct Put {
-    Cf cf;
+    // cppcheck：未初始化 POD 成员会让"忘了填 cf"变成随机列族（写到别的 CF 而不报错）
+    Cf cf{Cf::Default};
     std::string key;
     std::string value;
 };
 
 struct Delete {
-    Cf cf;
+    Cf cf{Cf::Default};
     std::string key;
 };
 
