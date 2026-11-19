@@ -14,25 +14,52 @@
 
 
 
-- **工程成熟度在“demo项目”里是上限水平，接近小型开源基础设施项目的治理形态。** 这
+- **工程成熟度在“demo项目”里是上限水平，接近小型开源基础设施项目的治理形态。** 
+
+
 
 
 
 ## 1. 项目定位
 
-**做什么**：从单机存储引擎起步，往上叠三节点 RaftKV，再扩成 Multi-Raft（Region 路由、Split、成员变更、快照、调度），最后实现快照隔离事务。四层依次递进，后一层建立在前一层之上，不是四个互不相干的 demo。
 
-**以什么形态交付**：一个 `tinykv-server` 常驻进程、一个 `tinykv-cli` 命令行工具，以及一个可以嵌进别的程序的 C++ API——最小示例见 [examples/embed\_example.cpp](examples/embed_example.cpp)，编译进 CI，接口一改就红。
+
+- 用 C++ 写的**迷你分布式键值数据库**:  **不丢数据、不乱序、能分片、支持事务的小型数据库**
+
+**C++ 会把 Go 藏起来的问题暴露出来。** Go 有垃圾回收，文件写入、线程调度也有成熟的库
+
+
+
+- 单机存储引擎起步，叠三节点 RaftKV，再扩成 Multi-Raft（Region 路由、Split、成员变更、快照、调度），实现快照隔离事务。
+
+**交付**：一个 `tinykv-server` 常驻进程、一个 `tinykv-cli` 命令行工具，以及一个可以嵌进别的程序的 C++ API——最小示例见 [examples/embed\_example.cpp](examples/embed_example.cpp)，编译进 CI，接口一改就红。
 
 **规模**：`src/` 约 12.6k 行 C++（含头文件），`tests/` 约 12.7k 行，83 个测试；`ctest` 一条命令跑全量，不需要手动拼编译参数。
 
-**不追求什么**：不跟 TiKV/etcd 比生产成熟度。多租户、在线升级、安全鉴权、十万级 Region 调度都不在范围内；这个项目要回答的是"内核骨架到底怎么造"，而不是"怎么撑住一个云上的集群"。
+**不追求**：不跟 TiKV/etcd 比生产成熟度。多租户、在线升级、安全鉴权、十万级 Region 调度都不在范围内；这个项目要回答的是"内核骨架到底怎么造"，而不是"怎么撑住一个云上的集群"。
 
-**凭什么说完成**：每个阶段都有规格与验收表，验收项必须指向仓库里真实存在的测试才算闭合。做不到的事也会写进已知限制，不拿"跑通了"冒充"做完了"。
+
 
 
 
 ## 2. 能力清单
+
+
+
+- 对外给东西：常驻服务端程序、命令行工具（存取、看状态、看分片、做事务）、C++ 接口
+
+**掉电不丢**：先记“流水账”（日志），再改内存；内存满了整理成磁盘文件
+
+**多台机器保持一致**：几台机器存同一份数据，选一个主；写操作要多数机器确认才算成功；主挂了自动重选 Raft
+
+**数据多了会分片**：按范围把数据切成一段一段，不同机器管不同段；段可以分裂、可以搬到别的机器
+
+**支持事务**：一组操作要么全成功、要么全失败；读的时候看到的是一个一致的时间点，
+
+
+
+- **写**：每秒约 **6.6 万次**（单机引擎）；99% 的写请求在 **0.047 毫秒**内完成。
+- **读**：如果读也走一遍“多机确认”，每秒约 2858 次；
 
 | 层          | 已实现的内容                                                                                     | 入口                                                  |
 | ---------- | ------------------------------------------------------------------------------------------ | --------------------------------------------------- |
@@ -46,6 +73,8 @@
 
 
 ## 3. 快速开始
+
+
 
 ### 3.1 环境要求
 
@@ -123,7 +152,8 @@ auto got = (*engine)->get(Cf::Default, std::as_bytes(std::span{"k1", 2}));
 
 ## 4. 架构
 
-一层一层往下看：最上面是两种入口，CLI 走 HTTP，嵌入 API 直接调 C++ 接口；往下是 `server` 层，它把 StatusServer、会话状态、Worker 泵和 Interceptor 链组装成一个常驻进程；再往下是 `raftstore`，每个 Region 由一个或多个 Peer 承载，负责区间路由、epoch 校验、Split 和快照分块；Peer 的两个依赖并行展开——`raft` 提供选举、复制、快照和日志压缩，`txn` 提供 MVCC、Latch 和 TSO；最底下是 `storage`，跳表 memtable 接追加写 WAL，落盘为 SST，三列族在这里物理隔离；`common` 横切全部层次，提供结构化错误、变长编码、CRC32C 和日志封装。
+- 最上面是两种入口，CLI 走 HTTP，嵌入 API 直接调 C++ 接口；往下是 `server` 层，它把 StatusServer、会话状态、Worker 泵和 Interceptor 链组装成一个常驻进程；再往下是 `raftstore`，每个 Region 由一个或多个 Peer 承载，负责区间路由、epoch 校验、Split 和快照分块；Peer 的两个依赖并行展开——`raft` 提供选举、复制、快照和日志压缩，`txn` 提供 MVCC、Latch 和 TSO；最底下是 `storage`，跳表 memtable 接追加写 WAL，落盘为 SST，三列族在这里物理隔离；`common` 横切全部层次，提供结构化错误、变长编码、CRC32C 和日志封装。
+
 
 ```
         tinykv-cli（HTTP）               嵌入 API（C++20/23）
@@ -141,6 +171,8 @@ auto got = (*engine)->get(Cf::Default, std::as_bytes(std::span{"k1", 2}));
 ```
 
 目录对应关系一句话一个：`src/common` 放结构化错误与编码；`src/config` 解析最小 YAML 子集，未知键直接报错；`src/storage` 是 memtable、WAL、SST 和三列族隔离；`src/raft` 是状态机与日志持久化；`src/raftstore` 承载 Peer 应用循环、Region 区间索引和传输抽象；`src/txn` 做 MVCC 键编码、Latch 与事务执行器；`src/scheduler` 放 TSO 和 PD-lite 调度器；`src/server` 是组合根、HTTP 端点、Worker 和会话管理；`src/cli` 是本地加集群两种模式的命令行；`proto` 定义请求响应与错误消息；`tests` 按 unit / simulation / integration / bench 四层组织；`tools/ci` 是六阶段检查器与登记表对账；`scripts` 只有统一构建入口。
+
+
 
 ### 关键设计
 
@@ -165,15 +197,11 @@ auto got = (*engine)->get(Cf::Default, std::as_bytes(std::span{"k1", 2}));
 - **跨 Region 事务**：协调器已落地并转正（分组 2PC：PREPARE → TSO → COMMIT_PRIMARY → COMMIT_SECONDARY，
   恢复靠 primary 锁状态收敛），`txn.cross_region_enabled` **默认开启**；150 轮随机 kill chaos
   （真崩溃语义，死亡点/主组侧/半途决议随机）与 150 轮枚举 chaos 双证据。显式配 false 即回"跨区拒绝"。
-- **Region 元数据**：已落盘（`meta/regions.pb` + `.bak`），split 后重启拓扑与数据都在；
-  但 region 1 仍沿用 `data_dir` 根目录（子 region 在 `regions/<id>`），双布局未合并。
+- **Region 元数据**：已落盘（`meta/regions.pb` + `.bak`），split 后重启拓扑与数据都在；但 region 1 仍沿用 `data_dir` 根目录（子 region 在 `regions/<id>`），双布局未合并。
 - **GC 安全点**取活跃会话的最小 start\_ts，无会话时取当前 TSO；锁冲突解析后的版本裁剪语义见 SPEC-4。
-- **并发与安全边界**：锁已按 region 分片（`server.lock_shards`，默认 16，同区串行/跨区并行；
-  多副本模式强制一把大锁）；M8 ⑪ 起 HTTP handler 并发执行（`server.http_threads`，默认 2；
+- **并发与安全边界**：锁已按 region 分片（`server.lock_shards`，默认 16，同区串行/跨区并行；多副本模式强制一把大锁）；M8 ⑪ 起 HTTP handler 并发执行（`server.http_threads`，默认 2；
   显式 1 = 单线程回退档）——io=4 跨区吞吐达 M7 基线 1.36× 以上（`docs/落实/notes-m8.md` §2）；
-  鉴权为 Bearer token；M8 ⑭ 起可配 TLS（`server.tls_cert/tls_key`，必须同给；未配 = 明文 +
-  强制回环守卫逐字节不变，配 TLS 后 token 可选）；未配 token 且未配 TLS 时强制绑回环并在
-  `/status` 标 `"auth":false`。
+  鉴权为 Bearer token；M8 ⑭ 起可配 TLS（`server.tls_cert/tls_key`，必须同给；未配 = 明文 +强制回环守卫逐字节不变，配 TLS 后 token 可选）；未配 token 且未配 TLS 时强制绑回环并在`/status` 标 `"auth":false`。
 - **编译器/标准**：默认 C++23；C++20/17 走 `src/common/compat.h`，g++ 与 clang++ 均在 CI 矩阵内。
 - **非目标**：Region Merge、完整 PD 调度策略、Joint Consensus、悲观事务、RDMA/GPU 传输。
 
@@ -181,6 +209,4 @@ auto got = (*engine)->get(Cf::Default, std::as_bytes(std::span{"k1", 2}));
 
 ## 6. 许可
 
-Apache License 2.0，见 [LICENSE](LICENSE)。上游 [Talent Plan TinyKV](https://github.com/tidb-incubator/tinykv)  
-与 [TinyKV 白皮书](https://github.com/Smith-Cruise/TinyKV-White-Paper) 为学习材料与设计参照，  
-本项目是独立的 C++ 重实现，不复用其源码。
+Apache License 2.0，见 [LICENSE](LICENSE)。上游 [Talent Plan TinyKV](https://github.com/tidb-incubator/tinykv)  与 [TinyKV 白皮书](https://github.com/Smith-Cruise/TinyKV-White-Paper) 为学习材料与设计参照，  本项目是独立的 C++ 重实现，
