@@ -65,6 +65,12 @@ public:
         if (key.empty()) {
             return tinykv::unexpected(InvalidArgument{"空 key"});
         }
+        // code-review P0-5：Default CF 的空串是 Delete 墓碑，事务路径不能再用它表示"存在但空"。
+        // 在客户端边界就拒绝，避免提交后读出"不存在"的语义错误。
+        if (value.empty()) {
+            return tinykv::unexpected(
+                InvalidArgument{"事务 Put 不接受空 value（空值语义与删除墓碑冲突）"});
+        }
         writes_.push_back(
             Mutation{.op = Mutation::Op::kPut, .key = std::move(key), .value = std::move(value)});
         return {};

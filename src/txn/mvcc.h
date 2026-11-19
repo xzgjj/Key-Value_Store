@@ -180,6 +180,13 @@ public:
             if (m.key.empty()) {
                 return tinykv::unexpected(InvalidArgument{"空 key"});
             }
+            // code-review P0-5：Default CF 用"空串"表示 Delete 墓碑，无法与"合法的空值"区分。
+            // 若放行 Put("", 空串)，提交后读出来是"不存在"，快照读语义直接错——
+            // 因此在边界拒绝，而不是靠 read_data 猜。
+            if (m.op == Mutation::Op::kPut && m.value.empty()) {
+                return tinykv::unexpected(
+                    InvalidArgument{"事务 Put 不接受空 value（空值语义与删除墓碑冲突）"});
+            }
             // 写写冲突判据 = 该 key 最新 Write.commitTs > start_ts（本事务启动后有人提交过）；
             // 命中即立即 abort 自己，绝不等待他者（REL-06 无死锁的结构性保证）
             auto latest = latest_commit_bound(m.key);
@@ -358,14 +365,20 @@ public:
         if (!reader.has_value()) {
             return tinykv::unexpected(IoFailed{.path = "txn:gc", .reason = "reader 创建失败"});
         }
-        auto it = (*reader)->scan(Cf::Write, tinykv::span<const std::byte>{}, kGcScanLimit);
+        auto it = (*reader)->scan(Cf::Write, tinykv::span<const std::byte>{}, kGcScanLimit + 1);
         if (!it.has_value()) {
             return tinykv::unexpected(IoFailed{.path = "txn:gc", .reason = "版本扫描失败"});
         }
+        std::size_t scanned = 0;
         std::vector<std::string> users;
         std::map<std::string, std::vector<std::pair<Ts, Ts>>>
             by_user;  // user → (commit_ts, data_start)
         for (; (*it)->valid(); (*it)->next()) {
+            if (++scanned > kGcScanLimit) {
+                return tinykv::unexpected(
+                    InvalidArgument{"GC 扫描超过上限 " + std::to_string(kGcScanLimit) +
+                                    "，需分批执行（拒绝半程 GC 当成功）"});
+            }
             const std::string stored((*it)->key());
             if (stored.size() < 8) {
                 break;
@@ -402,11 +415,18 @@ public:
             return tinykv::unexpected(reader.error());
         }
         for (const Cf cf : {Cf::Write, Cf::Lock}) {
-            auto it = (*reader)->scan(cf, tinykv::span<const std::byte>{}, kGcScanLimit);
+            auto it = (*reader)->scan(cf, tinykv::span<const std::byte>{}, kGcScanLimit + 1);
             if (!it.has_value()) {
                 return tinykv::unexpected(it.error());
             }
+            std::size_t scanned = 0;
             for (; (*it)->valid(); (*it)->next()) {
+                if (++scanned > kGcScanLimit) {
+                    // 静默截断会让 TSO 重启下限偏低 → 历史版本读不到；宁可启动失败
+                    return tinykv::unexpected(
+                        InvalidArgument{"时间戳基线扫描超过上限 " + std::to_string(kGcScanLimit) +
+                                        "，需先 GC 再启动"});
+                }
                 const std::string stored((*it)->key());
                 std::uint64_t ts = 0;
                 if (cf == Cf::Write) {
@@ -541,11 +561,19 @@ private:
         if (!reader.has_value()) {
             return tinykv::unexpected(reader.error());
         }
-        auto it = (*reader)->scan(Cf::Write, as_bytes_bytes(std::string(key)), kScanLimit);
+        // 多取一条用于判定"是否还有更多"：扫描预算被吃满说明版本数超上限，
+        // 旧实现静默截断 → find_write 可能把第 4096 个版本当成最新版本返回旧数据。
+        auto it = (*reader)->scan(Cf::Write, as_bytes_bytes(std::string(key)), kScanLimit + 1);
         if (!it.has_value()) {
             return tinykv::unexpected(it.error());
         }
+        std::size_t scanned = 0;
         for (; (*it)->valid(); (*it)->next()) {
+            if (++scanned > kScanLimit) {
+                return tinykv::unexpected(
+                    InvalidArgument{"写版本扫描超过上限 " + std::to_string(kScanLimit) +
+                                    "，拒绝静默截断（需先 GC 或分批读）"});
+            }
             const std::string stored((*it)->key());  // = user_key + ts 后缀（CF 前缀已剥）
             if (stored.size() < 8) {
                 return {};
@@ -644,12 +672,19 @@ private:
         if (!reader.has_value()) {
             return tinykv::unexpected(reader.error());
         }
-        auto it = (*reader)->scan(Cf::Write, as_bytes_bytes(std::string(key)), kScanLimit);
+        auto it = (*reader)->scan(Cf::Write, as_bytes_bytes(std::string(key)), kScanLimit + 1);
         if (!it.has_value()) {
             return tinykv::unexpected(it.error());
         }
         std::optional<Ts> best;
+        std::size_t scanned = 0;
         for (; (*it)->valid(); (*it)->next()) {
+            if (++scanned > kScanLimit) {
+                // 旧实现静默截断 → 漏掉更晚的提交 → 写写冲突检测失效（数据正确性错误）
+                return tinykv::unexpected(
+                    InvalidArgument{"写版本扫描超过上限 " + std::to_string(kScanLimit) +
+                                    "，拒绝在截断视图上判冲突"});
+            }
             const std::string stored((*it)->key());
             if (stored.size() < 8) {
                 break;

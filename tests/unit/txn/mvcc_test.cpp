@@ -198,4 +198,74 @@ TEST(MvccTxnTest, MultiVersionSnapshotReads) {
     EXPECT_EQ(**r50, "v2");
 }
 
+// code-review P0-5：空 value 与 Delete 墓碑共用同一表示，事务路径必须显式拒绝。
+// 旧行为：Put("", 空串) 提交后 get 返回"不存在"（快照读语义错误）。
+TEST(MvccTxnTest, PrewriteRejectsEmptyValue) {
+    Fixture f;
+    auto t = f.txn();
+    auto r = t.prewrite(put("k", ""), "k", tinykv::Ts{100}, 3000, 0);
+    ASSERT_FALSE(r.has_value());
+    EXPECT_TRUE(std::holds_alternative<tinykv::InvalidArgument>(r.error()));
+    // 拒绝发生在写入前：锁与数据都不该留下
+    auto got = t.get("k", tinykv::Ts{200});
+    ASSERT_TRUE(got.has_value());
+    EXPECT_FALSE(got->has_value());
+}
+
+// code-review P0-6：同一 key 版本数超过扫描上限时必须显式报错，不能把第 4096 个
+// 版本当成最新版本（静默返回旧数据）。
+TEST(MvccTxnTest, WriteVersionScanOverLimitReportsError) {
+    Fixture f;
+    constexpr std::size_t kVersions = 4097;  // 超过 kScanLimit=4096 一条
+    tinykv::ModifyVec batch;
+    batch.reserve(kVersions);
+    for (std::size_t i = 1; i <= kVersions; ++i) {
+        batch.push_back(tinykv::Modify{tinykv::Put{
+            .cf = tinykv::Cf::Write,
+            .key = tinykv::txn::write_key("hot", tinykv::Ts{i}),
+            .value = tinykv::txn::be64_str(i)}});
+        batch.push_back(tinykv::Modify{tinykv::Put{
+            .cf = tinykv::Cf::Default,
+            .key = tinykv::txn::data_key("hot", tinykv::Ts{i}),
+            .value = "v" + std::to_string(i)}});
+    }
+    ASSERT_TRUE(f.engine->write(batch).has_value());
+
+    auto t = f.txn();
+    auto got = t.get("hot", tinykv::Ts{kVersions + 10});
+    ASSERT_FALSE(got.has_value()) << "截断视图上读出的结果不可信，必须显式失败";
+    EXPECT_TRUE(std::holds_alternative<tinykv::InvalidArgument>(got.error()));
+
+    // 写写冲突检测同样不得在截断视图上给结论
+    auto pre = t.prewrite(put("hot", "v"), "hot", tinykv::Ts{kVersions + 10}, 3000, 0);
+    ASSERT_FALSE(pre.has_value());
+    EXPECT_TRUE(std::holds_alternative<tinykv::InvalidArgument>(pre.error()));
+}
+
+// 边界正向用例：恰好 4096 个版本仍可读（上限语义是"超过"才拒绝）
+TEST(MvccTxnTest, WriteVersionScanAtLimitStillReads) {
+    Fixture f;
+    constexpr std::size_t kVersions = 4096;
+    tinykv::ModifyVec batch;
+    batch.reserve(kVersions);
+    for (std::size_t i = 1; i <= kVersions; ++i) {
+        batch.push_back(tinykv::Modify{tinykv::Put{
+            .cf = tinykv::Cf::Write,
+            .key = tinykv::txn::write_key("hot", tinykv::Ts{i}),
+            .value = tinykv::txn::be64_str(i)}});
+        batch.push_back(tinykv::Modify{tinykv::Put{
+            .cf = tinykv::Cf::Default,
+            .key = tinykv::txn::data_key("hot", tinykv::Ts{i}),
+            .value = "v" + std::to_string(i)}});
+    }
+    ASSERT_TRUE(f.engine->write(batch).has_value());
+
+    auto t = f.txn();
+    auto got = t.get("hot", tinykv::Ts{kVersions + 10});
+    ASSERT_TRUE(got.has_value());
+    ASSERT_TRUE(got->has_value());
+    // 最新版本指向的 Default 数据 = 第 4096 个版本的 start_ts
+    EXPECT_EQ(**got, "v" + std::to_string(kVersions));
+}
+
 }  // namespace
