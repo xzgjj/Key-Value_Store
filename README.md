@@ -1,6 +1,6 @@
 # TinyKV-CPP
 
-> 用现代 C++23 从零实现的 mini-TiKV：单机 KV → Raft → Multi-Raft → Percolator 分布式事务，  服务端、命令行、嵌入 API 三件套齐备，正确性由 83 个 ctest 与 CI 门禁背书。
+> 用现代 C++23 从零实现的 mini-TiKV：单机 KV → Raft → Multi-Raft → Percolator 分布式事务，  服务端、命令行、嵌入 API 三件套
 
 ![TinyKV-CI](https://github.com/xzgjj/Key-Value_Store/actions/workflows/ci.yml/badge.svg?branch=main) ![C++23](https://img.shields.io/badge/C%2B%2B-23-blue) ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 
